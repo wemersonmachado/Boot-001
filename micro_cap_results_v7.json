@@ -1,0 +1,674 @@
+{
+  "version": "v7",
+  "days": 180,
+  "by_tf": {
+    "3m": {
+      "A": {
+        "total_trades": 5477,
+        "win_rate": 55.4,
+        "profit_factor": 0.102,
+        "pct_return": -216.23,
+        "max_drawdown": 39.2,
+        "exits": {
+          "tp1": 2272,
+          "trail": 1848,
+          "sl": 3205,
+          "tp2": 174,
+          "timeout": 250
+        },
+        "fib_hits": {
+          "0.382": 3316,
+          "0.618": 461,
+          "0.236": 379,
+          "0.500": 608,
+          "0.786": 402
+        },
+        "top5": [
+          [
+            "BEATUSDT",
+            1.091,
+            45.88
+          ],
+          [
+            "LUMIAUSDT",
+            0.905,
+            43.63
+          ],
+          [
+            "CLUSDT",
+            0.896,
+            40.13
+          ],
+          [
+            "WLDUSDT",
+            0.884,
+            44.85
+          ],
+          [
+            "STGUSDT",
+            0.804,
+            39.68
+          ]
+        ],
+        "worst3": [
+          [
+            "DOGEUSDT",
+            0.673,
+            38.48
+          ],
+          [
+            "SOXLUSDT",
+            0.656,
+            33.87
+          ],
+          [
+            "BTCUSDT",
+            0.604,
+            39.25
+          ]
+        ]
+      },
+      "B": {
+        "total_trades": 5297,
+        "win_rate": 55.3,
+        "profit_factor": 0.022,
+        "pct_return": -211.55,
+        "max_drawdown": 34.5,
+        "exits": {
+          "tp1": 2187,
+          "trail": 1775,
+          "sl": 3110,
+          "tp2": 175,
+          "timeout": 237
+        },
+        "fib_hits": {
+          "0.382": 3350,
+          "0.618": 479,
+          "0.236": 412,
+          "0.500": 620,
+          "0.786": 436
+        },
+        "top5": [
+          [
+            "BEATUSDT",
+            1.025,
+            44.36
+          ],
+          [
+            "LUMIAUSDT",
+            0.96,
+            43.8
+          ],
+          [
+            "CLUSDT",
+            0.865,
+            39.1
+          ],
+          [
+            "WLDUSDT",
+            0.853,
+            44.57
+          ],
+          [
+            "STGUSDT",
+            0.841,
+            39.42
+          ]
+        ],
+        "worst3": [
+          [
+            "ETHUSDT",
+            0.682,
+            41.29
+          ],
+          [
+            "BTCUSDT",
+            0.609,
+            39.29
+          ],
+          [
+            "SOXLUSDT",
+            0.524,
+            32.79
+          ]
+        ]
+      },
+      "C": {
+        "total_trades": 9276,
+        "win_rate": 58.4,
+        "profit_factor": 0.0,
+        "pct_return": -296.8,
+        "max_drawdown": 45.7,
+        "exits": {
+          "sl": 5373,
+          "tp1": 3903,
+          "trail": 3183,
+          "tp2": 615,
+          "timeout": 105
+        },
+        "fib_hits": {
+          "0.382": 6933,
+          "0.618": 1175,
+          "0.500": 1168
+        },
+        "top5": [
+          [
+            "BEATUSDT",
+            0.986,
+            44.53
+          ],
+          [
+            "ALLOUSDT",
+            0.888,
+            45.2
+          ],
+          [
+            "MRVLUSDT",
+            0.874,
+            40.54
+          ],
+          [
+            "STGUSDT",
+            0.863,
+            41.93
+          ],
+          [
+            "WLDUSDT",
+            0.828,
+            44.14
+          ]
+        ],
+        "worst3": [
+          [
+            "BTCUSDT",
+            0.634,
+            40.53
+          ],
+          [
+            "SOXLUSDT",
+            0.555,
+            33.33
+          ],
+          [
+            "CLUSDT",
+            0.544,
+            36.7
+          ]
+        ]
+      }
+    },
+    "5m": {
+      "A": {
+        "total_trades": 3389,
+        "win_rate": 55.7,
+        "profit_factor": 0.474,
+        "pct_return": -76.7,
+        "max_drawdown": 41.3,
+        "exits": {
+          "sl": 1979,
+          "tp1": 1410,
+          "trail": 1164,
+          "timeout": 146,
+          "tp2": 100
+        },
+        "fib_hits": {
+          "0.382": 1703,
+          "0.500": 402,
+          "0.236": 291,
+          "0.618": 402,
+          "0.786": 335
+        },
+        "top5": [
+          [
+            "SOXLUSDT",
+            1.663,
+            46.88
+          ],
+          [
+            "BEATUSDT",
+            1.171,
+            46.23
+          ],
+          [
+            "ALLOUSDT",
+            1.117,
+            46.92
+          ],
+          [
+            "WLDUSDT",
+            0.933,
+            43.0
+          ],
+          [
+            "BTCUSDT",
+            0.902,
+            44.41
+          ]
+        ],
+        "worst3": [
+          [
+            "AIOUSDT",
+            0.696,
+            37.4
+          ],
+          [
+            "DOGEUSDT",
+            0.609,
+            37.23
+          ],
+          [
+            "MRVLUSDT",
+            0.528,
+            33.33
+          ]
+        ]
+      },
+      "B": {
+        "total_trades": 3237,
+        "win_rate": 55.8,
+        "profit_factor": 0.408,
+        "pct_return": -78.71,
+        "max_drawdown": 33.3,
+        "exits": {
+          "sl": 1892,
+          "tp1": 1345,
+          "trail": 1116,
+          "timeout": 133,
+          "tp2": 96
+        },
+        "fib_hits": {
+          "0.382": 1726,
+          "0.500": 412,
+          "0.236": 328,
+          "0.618": 415,
+          "0.786": 356
+        },
+        "top5": [
+          [
+            "SOXLUSDT",
+            1.575,
+            48.39
+          ],
+          [
+            "BEATUSDT",
+            1.248,
+            48.02
+          ],
+          [
+            "ALLOUSDT",
+            1.013,
+            45.32
+          ],
+          [
+            "BTCUSDT",
+            0.931,
+            44.69
+          ],
+          [
+            "ETHUSDT",
+            0.898,
+            41.37
+          ]
+        ],
+        "worst3": [
+          [
+            "CLUSDT",
+            0.71,
+            38.38
+          ],
+          [
+            "DOGEUSDT",
+            0.606,
+            36.98
+          ],
+          [
+            "MRVLUSDT",
+            0.461,
+            26.92
+          ]
+        ]
+      },
+      "C": {
+        "total_trades": 6049,
+        "win_rate": 59.3,
+        "profit_factor": 0.0,
+        "pct_return": -173.11,
+        "max_drawdown": 30.1,
+        "exits": {
+          "sl": 3450,
+          "tp1": 2599,
+          "trail": 2135,
+          "tp2": 391,
+          "timeout": 73
+        },
+        "fib_hits": {
+          "0.382": 4061,
+          "0.618": 1052,
+          "0.500": 936
+        },
+        "top5": [
+          [
+            "ALLOUSDT",
+            1.0,
+            46.58
+          ],
+          [
+            "BEATUSDT",
+            0.945,
+            44.0
+          ],
+          [
+            "MRVLUSDT",
+            0.937,
+            45.61
+          ],
+          [
+            "WLDUSDT",
+            0.924,
+            45.52
+          ],
+          [
+            "STGUSDT",
+            0.905,
+            44.85
+          ]
+        ],
+        "worst3": [
+          [
+            "AIOUSDT",
+            0.72,
+            40.17
+          ],
+          [
+            "BTCUSDT",
+            0.647,
+            41.88
+          ],
+          [
+            "CLUSDT",
+            0.643,
+            38.78
+          ]
+        ]
+      }
+    },
+    "15m": {
+      "A": {
+        "total_trades": 729,
+        "win_rate": 57.9,
+        "profit_factor": 0.927,
+        "pct_return": -3.68,
+        "max_drawdown": 22.9,
+        "exits": {
+          "sl": 411,
+          "tp1": 318,
+          "timeout": 30,
+          "trail": 254,
+          "tp2": 34
+        },
+        "fib_hits": {
+          "0.786": 103,
+          "0.236": 84,
+          "0.382": 234,
+          "0.618": 91,
+          "0.500": 88
+        },
+        "top5": [
+          [
+            "STGUSDT",
+            1.553,
+            41.94
+          ],
+          [
+            "AIOUSDT",
+            1.338,
+            43.1
+          ],
+          [
+            "BTCUSDT",
+            1.282,
+            47.69
+          ],
+          [
+            "MUUSDT",
+            1.209,
+            52.63
+          ],
+          [
+            "SUIUSDT",
+            1.067,
+            46.58
+          ]
+        ],
+        "worst3": [
+          [
+            "DOGEUSDT",
+            0.672,
+            38.89
+          ],
+          [
+            "CLUSDT",
+            0.394,
+            35.29
+          ],
+          [
+            "MRVLUSDT",
+            0.319,
+            33.33
+          ]
+        ]
+      },
+      "B": {
+        "total_trades": 641,
+        "win_rate": 59.2,
+        "profit_factor": 1.781,
+        "pct_return": 27.85,
+        "max_drawdown": 18.3,
+        "exits": {
+          "sl": 351,
+          "tp1": 290,
+          "timeout": 29,
+          "trail": 227,
+          "tp2": 34
+        },
+        "fib_hits": {
+          "0.786": 113,
+          "0.236": 99,
+          "0.382": 237,
+          "0.618": 97,
+          "0.500": 98
+        },
+        "top5": [
+          [
+            "MUUSDT",
+            1.852,
+            56.25
+          ],
+          [
+            "STGUSDT",
+            1.599,
+            41.82
+          ],
+          [
+            "SUIUSDT",
+            1.325,
+            52.31
+          ],
+          [
+            "LUMIAUSDT",
+            1.308,
+            50.0
+          ],
+          [
+            "ALLOUSDT",
+            1.261,
+            45.24
+          ]
+        ],
+        "worst3": [
+          [
+            "DOGEUSDT",
+            0.752,
+            40.38
+          ],
+          [
+            "MRVLUSDT",
+            0.652,
+            50.0
+          ],
+          [
+            "CLUSDT",
+            0.327,
+            31.25
+          ]
+        ]
+      },
+      "C": {
+        "total_trades": 1856,
+        "win_rate": 58.2,
+        "profit_factor": 0.225,
+        "pct_return": -55.58,
+        "max_drawdown": 12.1,
+        "exits": {
+          "sl": 1084,
+          "tp1": 773,
+          "tp2": 167,
+          "trail": 591,
+          "timeout": 14
+        },
+        "fib_hits": {
+          "0.382": 1062,
+          "0.500": 379,
+          "0.618": 416
+        },
+        "top5": [
+          [
+            "ALLOUSDT",
+            1.186,
+            46.72
+          ],
+          [
+            "BEATUSDT",
+            1.164,
+            50.45
+          ],
+          [
+            "MUUSDT",
+            0.979,
+            45.0
+          ],
+          [
+            "SUIUSDT",
+            0.909,
+            43.65
+          ],
+          [
+            "AIOUSDT",
+            0.892,
+            42.34
+          ]
+        ],
+        "worst3": [
+          [
+            "STGUSDT",
+            0.689,
+            35.9
+          ],
+          [
+            "SOXLUSDT",
+            0.684,
+            40.0
+          ],
+          [
+            "CLUSDT",
+            0.596,
+            33.33
+          ]
+        ]
+      }
+    }
+  },
+  "best_combos": [
+    {
+      "tf": "15m",
+      "group": "B",
+      "profit_factor": 1.781,
+      "win_rate": 59.2,
+      "pct_return": 27.85,
+      "total_trades": 641,
+      "max_drawdown": 18.3
+    },
+    {
+      "tf": "15m",
+      "group": "A",
+      "profit_factor": 0.927,
+      "win_rate": 57.9,
+      "pct_return": -3.68,
+      "total_trades": 729,
+      "max_drawdown": 22.9
+    },
+    {
+      "tf": "5m",
+      "group": "A",
+      "profit_factor": 0.474,
+      "win_rate": 55.7,
+      "pct_return": -76.7,
+      "total_trades": 3389,
+      "max_drawdown": 41.3
+    },
+    {
+      "tf": "5m",
+      "group": "B",
+      "profit_factor": 0.408,
+      "win_rate": 55.8,
+      "pct_return": -78.71,
+      "total_trades": 3237,
+      "max_drawdown": 33.3
+    },
+    {
+      "tf": "15m",
+      "group": "C",
+      "profit_factor": 0.225,
+      "win_rate": 58.2,
+      "pct_return": -55.58,
+      "total_trades": 1856,
+      "max_drawdown": 12.1
+    },
+    {
+      "tf": "3m",
+      "group": "A",
+      "profit_factor": 0.102,
+      "win_rate": 55.4,
+      "pct_return": -216.23,
+      "total_trades": 5477,
+      "max_drawdown": 39.2
+    },
+    {
+      "tf": "3m",
+      "group": "B",
+      "profit_factor": 0.022,
+      "win_rate": 55.3,
+      "pct_return": -211.55,
+      "total_trades": 5297,
+      "max_drawdown": 34.5
+    },
+    {
+      "tf": "3m",
+      "group": "C",
+      "profit_factor": 0.0,
+      "win_rate": 58.4,
+      "pct_return": -296.8,
+      "total_trades": 9276,
+      "max_drawdown": 45.7
+    },
+    {
+      "tf": "5m",
+      "group": "C",
+      "profit_factor": 0.0,
+      "win_rate": 59.3,
+      "pct_return": -173.11,
+      "total_trades": 6049,
+      "max_drawdown": 30.1
+    }
+  ]
+}

@@ -1,0 +1,15 @@
+.env
+.env.*
+!.env.example
+*.db
+*.sqlite*
+__pycache__/
+*.pyc
+venv/
+.klines_cache/
+ml_models/
+*.log
+market_state.json
+universe_state.json
+*.pdf
+*.docx

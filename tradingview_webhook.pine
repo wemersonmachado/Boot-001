@@ -1,0 +1,96 @@
+//@version=5
+// TRADER 001 — TradingView Webhook Alert Script
+// Attach this to any chart and configure alerts to fire to your webhook URL
+//
+// WEBHOOK URL (ngrok or VPS):  http://YOUR_IP:8000/webhook
+// ALERT MESSAGE FORMAT (copy exactly into TradingView alert message box):
+//
+// {
+//   "secret": "trader001secret",
+//   "asset": "{{ticker}}",
+//   "direction": "{{strategy.order.action}}",
+//   "price": {{close}},
+//   "timeframe": "{{interval}}",
+//   "reason": "TradingView Alert - {{strategy.order.comment}}"
+// }
+//
+// ─────────────────────────────────────────────────────────────────────────────
+// MANUAL ALERT (for non-strategy indicators):
+// Replace {{strategy.order.action}} with "LONG" or "SHORT"
+// Replace {{strategy.order.comment}} with your reason text
+// ─────────────────────────────────────────────────────────────────────────────
+
+indicator("TRADER 001 Signal Helper", overlay=true, max_bars_back=500)
+
+// ── Inputs ────────────────────────────────────────────────────────────────────
+fast_len   = input.int(21,  "Fast EMA", group="Trend")
+slow_len   = input.int(55,  "Slow EMA", group="Trend")
+trend_len  = input.int(200, "Trend EMA", group="Trend")
+rsi_len    = input.int(14,  "RSI Period", group="Momentum")
+rsi_ob     = input.int(70,  "RSI Overbought", group="Momentum")
+rsi_os     = input.int(30,  "RSI Oversold", group="Momentum")
+vol_mult   = input.float(1.5, "Volume Multiplier", group="Volume")
+
+// ── Calculations ──────────────────────────────────────────────────────────────
+ema_fast  = ta.ema(close, fast_len)
+ema_slow  = ta.ema(close, slow_len)
+ema_trend = ta.ema(close, trend_len)
+rsi_val   = ta.rsi(close, rsi_len)
+[macd_l, macd_s, macd_h] = ta.macd(close, 12, 26, 9)
+atr_val   = ta.atr(14)
+avg_vol   = ta.sma(volume, 20)
+
+// ── Signal Conditions ─────────────────────────────────────────────────────────
+vol_confirm = volume > avg_vol * vol_mult
+
+// LONG setup
+long_trend    = close > ema_fast and ema_fast > ema_slow and close > ema_trend
+long_momentum = rsi_val > 40 and rsi_val < 70 and macd_h > 0
+long_volume   = vol_confirm and close > open
+long_signal   = long_trend and long_momentum and long_volume
+
+// SHORT setup
+short_trend    = close < ema_fast and ema_fast < ema_slow and close < ema_trend
+short_momentum = rsi_val < 60 and rsi_val > 30 and macd_h < 0
+short_volume   = vol_confirm and close < open
+short_signal   = short_trend and short_momentum and short_volume
+
+// ── Plots ─────────────────────────────────────────────────────────────────────
+plot(ema_fast,  "EMA 21",  color=color.new(color.blue, 0),   linewidth=1)
+plot(ema_slow,  "EMA 55",  color=color.new(color.orange, 0), linewidth=1)
+plot(ema_trend, "EMA 200", color=color.new(color.white, 50), linewidth=2)
+
+plotshape(long_signal,  "LONG",  shape.triangleup,   location.belowbar, color.green, size=size.small)
+plotshape(short_signal, "SHORT", shape.triangledown, location.abovebar, color.red,   size=size.small)
+
+// Background color for trend bias
+bgcolor(long_trend  ? color.new(color.green, 95) : na)
+bgcolor(short_trend ? color.new(color.red,   95) : na)
+
+// ── Alerts ────────────────────────────────────────────────────────────────────
+alertcondition(long_signal,  "TRADER001 LONG",  "LONG signal on {{ticker}}")
+alertcondition(short_signal, "TRADER001 SHORT", "SHORT signal on {{ticker}}")
+
+// ── Info Table ────────────────────────────────────────────────────────────────
+var table info = table.new(position.top_right, 2, 5,
+     bgcolor=color.new(color.black, 80), border_color=color.gray, border_width=1)
+
+if barstate.islast
+    table.cell(info, 0, 0, "RSI",    text_color=color.gray)
+    table.cell(info, 1, 0, str.tostring(math.round(rsi_val, 1)),
+               text_color=rsi_val > rsi_ob ? color.red : rsi_val < rsi_os ? color.green : color.white)
+
+    table.cell(info, 0, 1, "MACD H", text_color=color.gray)
+    table.cell(info, 1, 1, str.tostring(math.round(macd_h, 4)),
+               text_color=macd_h > 0 ? color.green : color.red)
+
+    table.cell(info, 0, 2, "ATR",    text_color=color.gray)
+    table.cell(info, 1, 2, str.tostring(math.round(atr_val, 4)), text_color=color.white)
+
+    table.cell(info, 0, 3, "VOL x",  text_color=color.gray)
+    table.cell(info, 1, 3, str.tostring(math.round(volume / avg_vol, 2)) + "x",
+               text_color=vol_confirm ? color.green : color.gray)
+
+    table.cell(info, 0, 4, "BIAS",   text_color=color.gray)
+    table.cell(info, 1, 4, long_trend ? "LONG" : short_trend ? "SHORT" : "NEUTRAL",
+               text_color=long_trend ? color.green : short_trend ? color.red : color.gray)

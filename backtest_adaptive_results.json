@@ -1,0 +1,553 @@
+{
+  "meta": {
+    "gerado_em": "2026-06-16T01:36:03.858592",
+    "periodo_dias": 90,
+    "timeframe": "15m",
+    "banca_brl": 1000.0,
+    "banca_usdt": 185.19,
+    "cambio": 5.4,
+    "alavancagem": 10,
+    "fee_taker": 0.0004
+  },
+  "consolidado": {
+    "wr_medio": 43.8,
+    "pf_medio": 0.83,
+    "retorno_medio": -4.54,
+    "dd_medio": 9.9,
+    "total_trades": 416
+  },
+  "resultados": [
+    {
+      "symbol": "TONUSDT",
+      "success": true,
+      "trades": 22,
+      "win_rate": 63.6,
+      "profit_factor": 1.83,
+      "retorno_pct": 16.52,
+      "max_drawdown": 4.3,
+      "best_params": {
+        "oversold": 20,
+        "overbought": 80,
+        "sl_atr": 1.2,
+        "tp1_atr": 1.5,
+        "tp2_atr": 2.5,
+        "tp3_atr": 3.5
+      },
+      "banca_final_usdt": 215.78,
+      "n_candles": 8514
+    },
+    {
+      "symbol": "SUIUSDT",
+      "success": true,
+      "trades": 13,
+      "win_rate": 69.2,
+      "profit_factor": 2.28,
+      "retorno_pct": 11.7,
+      "max_drawdown": 4.3,
+      "best_params": {
+        "oversold": 20,
+        "overbought": 80,
+        "sl_atr": 1.8,
+        "tp1_atr": 2.5,
+        "tp2_atr": 4.5,
+        "tp3_atr": 6.5
+      },
+      "banca_final_usdt": 206.85,
+      "n_candles": 8514
+    },
+    {
+      "symbol": "ATOMUSDT",
+      "success": true,
+      "trades": 8,
+      "win_rate": 62.5,
+      "profit_factor": 1.78,
+      "retorno_pct": 5.31,
+      "max_drawdown": 4.3,
+      "best_params": {
+        "oversold": 25,
+        "overbought": 75,
+        "sl_atr": 1.8,
+        "tp1_atr": 2.5,
+        "tp2_atr": 4.5,
+        "tp3_atr": 6.5
+      },
+      "banca_final_usdt": 195.02,
+      "n_candles": 8514
+    },
+    {
+      "symbol": "OPUSDT",
+      "success": true,
+      "trades": 14,
+      "win_rate": 50.0,
+      "profit_factor": 1.31,
+      "retorno_pct": 5.04,
+      "max_drawdown": 7.0,
+      "best_params": {
+        "oversold": 30,
+        "overbought": 70,
+        "sl_atr": 1.8,
+        "tp1_atr": 2.5,
+        "tp2_atr": 4.5,
+        "tp3_atr": 6.5
+      },
+      "banca_final_usdt": 194.51,
+      "n_candles": 8514
+    },
+    {
+      "symbol": "ARBUSDT",
+      "success": true,
+      "trades": 14,
+      "win_rate": 57.1,
+      "profit_factor": 1.35,
+      "retorno_pct": 4.89,
+      "max_drawdown": 5.5,
+      "best_params": {
+        "oversold": 20,
+        "overbought": 80,
+        "sl_atr": 1.8,
+        "tp1_atr": 2.5,
+        "tp2_atr": 4.5,
+        "tp3_atr": 6.5
+      },
+      "banca_final_usdt": 194.23,
+      "n_candles": 8514
+    },
+    {
+      "symbol": "LTCUSDT",
+      "success": true,
+      "trades": 14,
+      "win_rate": 57.1,
+      "profit_factor": 1.02,
+      "retorno_pct": 0.36,
+      "max_drawdown": 7.0,
+      "best_params": {
+        "oversold": 30,
+        "overbought": 70,
+        "sl_atr": 1.5,
+        "tp1_atr": 2.0,
+        "tp2_atr": 3.5,
+        "tp3_atr": 5.0
+      },
+      "banca_final_usdt": 185.85,
+      "n_candles": 8514
+    },
+    {
+      "symbol": "APTUSDT",
+      "success": true,
+      "trades": 11,
+      "win_rate": 45.5,
+      "profit_factor": 0.99,
+      "retorno_pct": -0.15,
+      "max_drawdown": 6.4,
+      "best_params": {
+        "oversold": 25,
+        "overbought": 75,
+        "sl_atr": 1.8,
+        "tp1_atr": 2.5,
+        "tp2_atr": 4.5,
+        "tp3_atr": 6.5
+      },
+      "banca_final_usdt": 184.9,
+      "n_candles": 8514
+    },
+    {
+      "symbol": "FETUSDT",
+      "success": true,
+      "trades": 20,
+      "win_rate": 50.0,
+      "profit_factor": 0.97,
+      "retorno_pct": -0.66,
+      "max_drawdown": 7.4,
+      "best_params": {
+        "oversold": 20,
+        "overbought": 80,
+        "sl_atr": 1.5,
+        "tp1_atr": 2.0,
+        "tp2_atr": 3.5,
+        "tp3_atr": 5.0
+      },
+      "banca_final_usdt": 183.97,
+      "n_candles": 8497
+    },
+    {
+      "symbol": "SOLUSDT",
+      "success": true,
+      "trades": 13,
+      "win_rate": 38.5,
+      "profit_factor": 0.93,
+      "retorno_pct": -1.39,
+      "max_drawdown": 8.6,
+      "best_params": {
+        "oversold": 20,
+        "overbought": 80,
+        "sl_atr": 1.8,
+        "tp1_atr": 2.5,
+        "tp2_atr": 4.5,
+        "tp3_atr": 6.5
+      },
+      "banca_final_usdt": 182.6,
+      "n_candles": 8514
+    },
+    {
+      "symbol": "DOTUSDT",
+      "success": true,
+      "trades": 7,
+      "win_rate": 42.9,
+      "profit_factor": 0.67,
+      "retorno_pct": -2.79,
+      "max_drawdown": 8.5,
+      "best_params": {
+        "oversold": 20,
+        "overbought": 80,
+        "sl_atr": 1.8,
+        "tp1_atr": 2.5,
+        "tp2_atr": 4.5,
+        "tp3_atr": 6.5
+      },
+      "banca_final_usdt": 180.02,
+      "n_candles": 8514
+    },
+    {
+      "symbol": "LINKUSDT",
+      "success": true,
+      "trades": 11,
+      "win_rate": 54.5,
+      "profit_factor": 0.71,
+      "retorno_pct": -3.16,
+      "max_drawdown": 5.9,
+      "best_params": {
+        "oversold": 20,
+        "overbought": 80,
+        "sl_atr": 1.8,
+        "tp1_atr": 2.5,
+        "tp2_atr": 4.5,
+        "tp3_atr": 6.5
+      },
+      "banca_final_usdt": 179.33,
+      "n_candles": 8514
+    },
+    {
+      "symbol": "JUPUSDT",
+      "success": true,
+      "trades": 10,
+      "win_rate": 40.0,
+      "profit_factor": 0.67,
+      "retorno_pct": -4.17,
+      "max_drawdown": 6.2,
+      "best_params": {
+        "oversold": 20,
+        "overbought": 80,
+        "sl_atr": 1.8,
+        "tp1_atr": 2.5,
+        "tp2_atr": 4.5,
+        "tp3_atr": 6.5
+      },
+      "banca_final_usdt": 177.46,
+      "n_candles": 8514
+    },
+    {
+      "symbol": "ADAUSDT",
+      "success": true,
+      "trades": 14,
+      "win_rate": 42.9,
+      "profit_factor": 0.68,
+      "retorno_pct": -5.71,
+      "max_drawdown": 7.7,
+      "best_params": {
+        "oversold": 25,
+        "overbought": 75,
+        "sl_atr": 1.8,
+        "tp1_atr": 2.5,
+        "tp2_atr": 4.5,
+        "tp3_atr": 6.5
+      },
+      "banca_final_usdt": 174.62,
+      "n_candles": 8514
+    },
+    {
+      "symbol": "XRPUSDT",
+      "success": true,
+      "trades": 16,
+      "win_rate": 37.5,
+      "profit_factor": 0.74,
+      "retorno_pct": -5.92,
+      "max_drawdown": 10.8,
+      "best_params": {
+        "oversold": 30,
+        "overbought": 70,
+        "sl_atr": 1.8,
+        "tp1_atr": 2.5,
+        "tp2_atr": 4.5,
+        "tp3_atr": 6.5
+      },
+      "banca_final_usdt": 174.22,
+      "n_candles": 8497
+    },
+    {
+      "symbol": "WIFUSDT",
+      "success": true,
+      "trades": 14,
+      "win_rate": 35.7,
+      "profit_factor": 0.67,
+      "retorno_pct": -6.47,
+      "max_drawdown": 9.6,
+      "best_params": {
+        "oversold": 30,
+        "overbought": 70,
+        "sl_atr": 1.8,
+        "tp1_atr": 2.5,
+        "tp2_atr": 4.5,
+        "tp3_atr": 6.5
+      },
+      "banca_final_usdt": 173.19,
+      "n_candles": 8514
+    },
+    {
+      "symbol": "ETCUSDT",
+      "success": true,
+      "trades": 11,
+      "win_rate": 45.5,
+      "profit_factor": 0.5,
+      "retorno_pct": -6.51,
+      "max_drawdown": 8.0,
+      "best_params": {
+        "oversold": 20,
+        "overbought": 80,
+        "sl_atr": 1.5,
+        "tp1_atr": 2.0,
+        "tp2_atr": 3.5,
+        "tp3_atr": 5.0
+      },
+      "banca_final_usdt": 173.14,
+      "n_candles": 8514
+    },
+    {
+      "symbol": "TRXUSDT",
+      "success": true,
+      "trades": 16,
+      "win_rate": 43.8,
+      "profit_factor": 0.58,
+      "retorno_pct": -8.6,
+      "max_drawdown": 13.1,
+      "best_params": {
+        "oversold": 20,
+        "overbought": 80,
+        "sl_atr": 1.5,
+        "tp1_atr": 2.0,
+        "tp2_atr": 3.5,
+        "tp3_atr": 5.0
+      },
+      "banca_final_usdt": 169.27,
+      "n_candles": 8514
+    },
+    {
+      "symbol": "FILUSDT",
+      "success": true,
+      "trades": 8,
+      "win_rate": 37.5,
+      "profit_factor": 0.19,
+      "retorno_pct": -8.66,
+      "max_drawdown": 9.2,
+      "best_params": {
+        "oversold": 20,
+        "overbought": 80,
+        "sl_atr": 1.2,
+        "tp1_atr": 1.5,
+        "tp2_atr": 2.5,
+        "tp3_atr": 3.5
+      },
+      "banca_final_usdt": 169.16,
+      "n_candles": 8495
+    },
+    {
+      "symbol": "AVAXUSDT",
+      "success": true,
+      "trades": 14,
+      "win_rate": 35.7,
+      "profit_factor": 0.56,
+      "retorno_pct": -8.73,
+      "max_drawdown": 12.8,
+      "best_params": {
+        "oversold": 20,
+        "overbought": 80,
+        "sl_atr": 1.8,
+        "tp1_atr": 2.5,
+        "tp2_atr": 4.5,
+        "tp3_atr": 6.5
+      },
+      "banca_final_usdt": 169.02,
+      "n_candles": 8514
+    },
+    {
+      "symbol": "BNBUSDT",
+      "success": true,
+      "trades": 20,
+      "win_rate": 40.0,
+      "profit_factor": 0.65,
+      "retorno_pct": -9.66,
+      "max_drawdown": 18.6,
+      "best_params": {
+        "oversold": 20,
+        "overbought": 80,
+        "sl_atr": 1.8,
+        "tp1_atr": 2.5,
+        "tp2_atr": 4.5,
+        "tp3_atr": 6.5
+      },
+      "banca_final_usdt": 167.29,
+      "n_candles": 8514
+    },
+    {
+      "symbol": "SEIUSDT",
+      "success": true,
+      "trades": 14,
+      "win_rate": 35.7,
+      "profit_factor": 0.48,
+      "retorno_pct": -9.69,
+      "max_drawdown": 10.3,
+      "best_params": {
+        "oversold": 20,
+        "overbought": 80,
+        "sl_atr": 1.8,
+        "tp1_atr": 2.5,
+        "tp2_atr": 4.5,
+        "tp3_atr": 6.5
+      },
+      "banca_final_usdt": 167.25,
+      "n_candles": 8514
+    },
+    {
+      "symbol": "DOGEUSDT",
+      "success": true,
+      "trades": 15,
+      "win_rate": 33.3,
+      "profit_factor": 0.54,
+      "retorno_pct": -9.7,
+      "max_drawdown": 13.6,
+      "best_params": {
+        "oversold": 25,
+        "overbought": 75,
+        "sl_atr": 1.8,
+        "tp1_atr": 2.5,
+        "tp2_atr": 4.5,
+        "tp3_atr": 6.5
+      },
+      "banca_final_usdt": 167.21,
+      "n_candles": 8497
+    },
+    {
+      "symbol": "TIAUSDT",
+      "success": true,
+      "trades": 20,
+      "win_rate": 30.0,
+      "profit_factor": 0.66,
+      "retorno_pct": -9.73,
+      "max_drawdown": 16.8,
+      "best_params": {
+        "oversold": 20,
+        "overbought": 80,
+        "sl_atr": 1.8,
+        "tp1_atr": 2.5,
+        "tp2_atr": 4.5,
+        "tp3_atr": 6.5
+      },
+      "banca_final_usdt": 167.16,
+      "n_candles": 8514
+    },
+    {
+      "symbol": "ETHUSDT",
+      "success": true,
+      "trades": 21,
+      "win_rate": 38.1,
+      "profit_factor": 0.62,
+      "retorno_pct": -11.11,
+      "max_drawdown": 11.1,
+      "best_params": {
+        "oversold": 30,
+        "overbought": 70,
+        "sl_atr": 1.5,
+        "tp1_atr": 2.0,
+        "tp2_atr": 3.5,
+        "tp3_atr": 5.0
+      },
+      "banca_final_usdt": 164.61,
+      "n_candles": 8514
+    },
+    {
+      "symbol": "BTCUSDT",
+      "success": true,
+      "trades": 19,
+      "win_rate": 36.8,
+      "profit_factor": 0.57,
+      "retorno_pct": -12.28,
+      "max_drawdown": 12.3,
+      "best_params": {
+        "oversold": 25,
+        "overbought": 75,
+        "sl_atr": 1.8,
+        "tp1_atr": 2.5,
+        "tp2_atr": 4.5,
+        "tp3_atr": 6.5
+      },
+      "banca_final_usdt": 162.45,
+      "n_candles": 8514
+    },
+    {
+      "symbol": "RENDERUSDT",
+      "success": true,
+      "trades": 16,
+      "win_rate": 37.5,
+      "profit_factor": 0.38,
+      "retorno_pct": -12.32,
+      "max_drawdown": 14.5,
+      "best_params": {
+        "oversold": 25,
+        "overbought": 75,
+        "sl_atr": 1.8,
+        "tp1_atr": 2.5,
+        "tp2_atr": 4.5,
+        "tp3_atr": 6.5
+      },
+      "banca_final_usdt": 162.36,
+      "n_candles": 8514
+    },
+    {
+      "symbol": "XLMUSDT",
+      "success": true,
+      "trades": 18,
+      "win_rate": 38.9,
+      "profit_factor": 0.41,
+      "retorno_pct": -13.18,
+      "max_drawdown": 14.3,
+      "best_params": {
+        "oversold": 30,
+        "overbought": 70,
+        "sl_atr": 1.5,
+        "tp1_atr": 2.0,
+        "tp2_atr": 3.5,
+        "tp3_atr": 5.0
+      },
+      "banca_final_usdt": 160.78,
+      "n_candles": 8514
+    },
+    {
+      "symbol": "NEARUSDT",
+      "success": true,
+      "trades": 23,
+      "win_rate": 26.1,
+      "profit_factor": 0.38,
+      "retorno_pct": -20.22,
+      "max_drawdown": 20.2,
+      "best_params": {
+        "oversold": 20,
+        "overbought": 80,
+        "sl_atr": 1.5,
+        "tp1_atr": 2.0,
+        "tp2_atr": 3.5,
+        "tp3_atr": 5.0
+      },
+      "banca_final_usdt": 147.74,
+      "n_candles": 8497
+    }
+  ]
+}

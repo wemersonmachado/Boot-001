@@ -1,0 +1,1819 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1.0"/>
+<title>TRADER 001 — Dashboard</title>
+<style>
+/* ═══════════════════════════════════════════
+   TRADER 001 — Dark Gold v4  (wizard à esquerda, tema suave)
+═══════════════════════════════════════════ */
+:root {
+  --bg:        #09090f;
+  --card:      #141420;
+  --card2:     #0f0f1a;
+  --border:    #1e1e30;
+  --border2:   #2a2a42;
+  --gold:      #F0C000;
+  --gold2:     #FFD700;
+  --gold-dim:  rgba(240,192,0,.12);
+  --text:      #eeeef5;
+  --muted:     #8888aa;
+  --dim:       #2e2e44;
+  --up:        #00C896;
+  --up-bg:     rgba(0,200,150,.1);
+  --down:      #FF4D4D;
+  --down-bg:   rgba(255,77,77,.1);
+  --blue:      #5B9CF6;
+  --purple:    #B87EFB;
+  --wz-w:      440px;
+  --r:         12px;
+}
+body.light-theme {
+  --bg:        #f3f4f6;
+  --card:      #ffffff;
+  --card2:     #f9fafb;
+  --border:    #e5e7eb;
+  --border2:   #d1d5db;
+  --gold:      #b45309;
+  --gold2:     #d97706;
+  --gold-dim:  rgba(217,119,6,.08);
+  --text:      #111827;
+  --muted:     #4b5563;
+  --dim:       #e5e7eb;
+  --up:        #047857;
+  --up-bg:     rgba(4,120,87,.08);
+  --down:      #b91c1c;
+  --down-bg:   rgba(185,28,28,.08);
+  --blue:      #1d4ed8;
+  --purple:    #6d28d9;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{height:100%;overflow:hidden}
+body{
+  font-family:'Segoe UI',system-ui,-apple-system,sans-serif;
+  background:var(--bg);color:var(--text);font-size:15px;
+  display:flex;height:100vh;-webkit-font-smoothing:antialiased;
+  transition: background-color 0.25s, color 0.25s;
+}
+.wizard, .wz-hdr, .hdr, .sc, .mc, .card, .ob, .s-inp, .ptog, .qb, .step-hdr, .step-body, .tbl tr {
+  transition: background-color 0.25s, border-color 0.25s, color 0.25s;
+}
+::-webkit-scrollbar{width:5px;height:5px}
+::-webkit-scrollbar-track{background:transparent}
+::-webkit-scrollbar-thumb{background:var(--dim);border-radius:3px}
+::-webkit-scrollbar-thumb:hover{background:var(--border2)}
+
+/* ══ WIZARD (ESQUERDA) ══ */
+.wizard{
+  width:var(--wz-w);min-width:var(--wz-w);
+  background:#0b0b16;border-right:1px solid var(--border);
+  display:flex;flex-direction:column;overflow-y:auto;overflow-x:hidden;flex-shrink:0;
+}
+.wz-hdr{
+  padding:18px 18px 15px;border-bottom:1px solid var(--border);
+  flex-shrink:0;background:#0d0d1a;
+}
+.wz-logo{font-size:11px;font-weight:900;color:var(--gold);letter-spacing:2px;text-transform:uppercase;margin-bottom:10px;opacity:.8}
+.wz-title{font-size:16px;font-weight:900;margin-bottom:4px;letter-spacing:-.3px}
+.wz-sub{font-size:11px;color:var(--muted);font-weight:400;line-height:1.5}
+.wz-prog{margin-top:13px}
+.wz-prog-bar{height:3px;background:var(--border);border-radius:2px;overflow:hidden;margin-bottom:5px}
+.wz-prog-fill{height:100%;background:linear-gradient(90deg,var(--gold),var(--gold2));transition:width .4s}
+.wz-prog-txt{font-size:10px;color:var(--muted);display:flex;justify-content:space-between;font-weight:600}
+
+.wz-body{padding:14px 16px;flex:1}
+
+/* Step */
+.step{border:1.5px solid var(--border);border-radius:10px;margin-bottom:8px;overflow:hidden;transition:border-color .2s}
+.step.active{border-color:var(--gold)}
+.step.done{border-color:rgba(0,200,150,.4)}
+.step.locked{opacity:.4;pointer-events:none}
+.step.sinais-skip .step-hdr{pointer-events:none;cursor:default;opacity:.45}
+.step.sinais-skip .step-body{display:none!important}
+.step-hdr{
+  display:flex;align-items:center;gap:10px;padding:12px 14px;
+  cursor:pointer;background:var(--card2);user-select:none;
+}
+.step-num{width:24px;height:24px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:900;flex-shrink:0}
+.step.active .step-num{background:var(--gold);color:#000}
+.step.done   .step-num{background:var(--up);color:#000}
+.step.locked .step-num,.step.pending .step-num{background:var(--dim);color:var(--muted)}
+.step-ttl{flex:1;font-size:13px;font-weight:800}
+.step-cur{font-size:11px;color:var(--gold);font-weight:700}
+.step-ico{font-size:13px;color:var(--muted)}
+.step-body{padding:14px;background:rgba(0,0,0,.3);display:none}
+.step.active .step-body{display:block}
+
+/* Option grid */
+.og{display:grid;gap:7px}
+.og2{grid-template-columns:1fr 1fr}
+.og3{grid-template-columns:1fr 1fr 1fr}
+.ob{
+  padding:11px 8px;border-radius:9px;border:1.5px solid var(--border);
+  background:var(--card);color:var(--text);font-size:12px;font-weight:700;
+  cursor:pointer;text-align:center;transition:all .15s;line-height:1.6;
+}
+.ob:hover{border-color:rgba(240,192,0,.5);background:rgba(240,192,0,.05);color:var(--gold)}
+.ob.sel{border-color:var(--gold);background:rgba(240,192,0,.1);color:var(--gold)}
+.ob.sp2{grid-column:span 2}.ob.sp3{grid-column:span 3}
+.s-lbl{font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:.6px;margin:11px 0 6px;font-weight:700}
+.s-lbl:first-child{margin-top:0}
+.s-inp{
+  width:100%;padding:9px 12px;border-radius:9px;
+  background:var(--card);border:1.5px solid var(--border);
+  color:var(--text);font-size:13px;font-weight:700;outline:none;transition:border-color .15s;
+}
+.s-inp:focus{border-color:var(--gold)}
+.s-conf{
+  width:100%;padding:11px;border-radius:9px;
+  background:var(--gold);color:#000;border:none;
+  font-size:13px;font-weight:900;cursor:pointer;margin-top:11px;transition:opacity .15s;letter-spacing:.2px;
+}
+.s-conf:disabled{opacity:.25;cursor:not-allowed}
+.s-conf:not(:disabled):hover{opacity:.85}
+.s-warn{font-size:11px;margin-top:7px;padding:8px 10px;border-radius:8px;background:rgba(255,77,77,.1);color:#ffaaaa;display:none;font-weight:600;border:1px solid rgba(255,77,77,.2)}
+
+/* Quick Actions */
+.qa{padding:14px 16px;border-top:1px solid var(--border);flex-shrink:0}
+.qa-title{font-size:10px;font-weight:800;color:var(--muted);text-transform:uppercase;letter-spacing:.6px;margin-bottom:10px}
+.qa-grid{display:grid;grid-template-columns:1fr 1fr;gap:7px;margin-bottom:9px}
+.qb{padding:11px 7px;border-radius:9px;border:1.5px solid var(--border);background:var(--card);color:var(--text);font-size:12px;font-weight:800;cursor:pointer;text-align:center;transition:all .15s}
+.qb.start{border-color:rgba(0,200,150,.35);color:var(--up)}.qb.start:hover{background:rgba(0,200,150,.08)}
+.qb.pause{border-color:rgba(240,192,0,.35);color:var(--gold)}.qb.pause:hover{background:rgba(240,192,0,.08)}
+.qb.stop{border-color:rgba(255,77,77,.35);color:var(--down)}.qb.stop:hover{background:rgba(255,77,77,.08)}
+.qb.reset{border-color:rgba(168,85,247,.35);color:var(--purple)}.qb.reset:hover{background:rgba(168,85,247,.08)}
+.ptog{
+  display:flex;align-items:center;justify-content:space-between;
+  padding:10px 13px;background:var(--card);border-radius:9px;
+  border:1px solid var(--border);margin-bottom:7px;
+}
+.ptog-lbl{font-size:11px;font-weight:600;color:var(--muted)}
+.ptog-btn{padding:5px 14px;border-radius:12px;border:none;font-size:11px;font-weight:800;cursor:pointer;transition:all .2s}
+.ptog-btn.on{background:var(--gold);color:#000}
+.ptog-btn.off{background:var(--dim);color:var(--muted)}
+.qa-scan{width:100%;padding:10px;border-radius:9px;background:var(--gold-dim);border:1.5px solid rgba(240,192,0,.25);color:var(--gold);font-size:12px;font-weight:800;cursor:pointer;transition:all .15s}
+.qa-scan:hover{background:rgba(240,192,0,.18)}
+
+/* Bot Status Bar */
+.bsb{padding:12px 16px;background:#0d0d1a;border-top:1px solid var(--border);flex-shrink:0}
+.bsb-row{display:flex;align-items:center;justify-content:space-between;margin-bottom:5px}
+.pulse{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:6px}
+.pulse.run{background:var(--up);animation:plz 2s infinite}
+.pulse.pau{background:var(--gold)}
+.pulse.stp{background:var(--down)}
+@keyframes plz{0%,100%{opacity:1;transform:scale(1)}50%{opacity:.4;transform:scale(.75)}}
+.bsb-st{font-size:13px;font-weight:900}
+.bsb-md{font-size:10px;color:var(--muted);font-weight:600;margin-left:5px}
+.bsb-tm{font-size:11px;color:var(--muted);font-weight:600}
+.bsb-meta{display:flex;gap:14px;font-size:10px;color:var(--muted);font-weight:600}
+.bsb-meta strong{color:var(--text);font-weight:700}
+
+/* ══ MAIN ══ */
+.main{flex:1;overflow-y:auto;overflow-x:hidden;display:flex;flex-direction:column;min-width:0}
+
+/* ── Header ── */
+.hdr{
+  padding:17px 24px 15px;border-bottom:1px solid var(--border);
+  display:flex;align-items:flex-end;justify-content:space-between;
+  flex-shrink:0;background:#0d0d1a;
+}
+.bal-lbl{font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:.9px;margin-bottom:5px;font-weight:700}
+.bal-val{font-size:42px;font-weight:900;line-height:1;letter-spacing:-1.5px}
+.bal-val .cur{font-size:21px;font-weight:500;color:var(--muted);margin-right:2px}
+.periods{display:flex;gap:26px;margin-top:10px}
+.pd-lbl{font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:.5px;margin-bottom:3px;font-weight:700}
+.pd-val{font-size:14px;font-weight:800}
+.pd-val.up{color:var(--up)}.pd-val.down{color:var(--down)}.pd-val.nt{color:var(--muted)}
+.hdr-right{display:flex;align-items:center;gap:10px}
+.scan-chip{font-size:11px;color:var(--muted);padding:7px 14px;background:var(--card);border:1px solid var(--border);border-radius:20px}
+.scan-chip span{color:var(--gold);font-weight:800}
+.hdr-btn{
+  width:37px;height:37px;border-radius:50%;background:var(--card);
+  border:1px solid var(--border);display:flex;align-items:center;justify-content:center;
+  cursor:pointer;color:var(--muted);font-size:16px;position:relative;transition:all .15s;
+}
+.hdr-btn:hover{border-color:var(--border2);color:var(--text);background:var(--card2)}
+.notif-dot{position:absolute;top:5px;right:5px;width:7px;height:7px;background:var(--gold);border-radius:50%}
+.avatar{width:37px;height:37px;border-radius:50%;background:linear-gradient(135deg,var(--gold),#a07800);display:flex;align-items:center;justify-content:center;font-size:14px;font-weight:900;color:#000;cursor:pointer}
+
+/* ── Scroll content ── */
+.content{padding:16px 22px 22px;flex:1}
+
+/* ══ CARD ══ */
+.card{background:var(--card);border:1px solid var(--border);border-radius:var(--r);padding:16px}
+.ctitle{
+  font-size:11px;color:var(--muted);text-transform:uppercase;
+  letter-spacing:.6px;margin-bottom:12px;font-weight:700;
+  display:flex;align-items:center;justify-content:space-between;
+}
+.ctitle a{color:var(--gold);cursor:pointer;font-size:10px;text-transform:none;letter-spacing:0;font-weight:700}
+
+/* ══ COIN CARDS ══ */
+.coin-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:14px}
+.cc{background:var(--card2);border:1.5px solid var(--border);border-radius:var(--r);padding:16px;cursor:pointer;transition:border-color .2s;overflow:hidden}
+.cc:hover{border-color:var(--border2)}
+.cc.sel{border-color:var(--gold)}
+.cc-top{display:flex;align-items:center;justify-content:space-between;margin-bottom:9px}
+.cc-info{display:flex;align-items:center;gap:9px}
+.cc-ico{width:32px;height:32px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:16px;font-weight:800;flex-shrink:0}
+.cc-name{font-size:13px;font-weight:700}
+.cc-tk{font-size:10px;color:var(--muted);font-weight:600}
+.cc-arr{width:32px;height:32px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:17px;font-weight:700;flex-shrink:0}
+.cc-arr.up{background:rgba(0,200,150,.15);color:var(--up)}
+.cc-arr.down{background:rgba(255,77,77,.15);color:var(--down)}
+.cc-price{font-size:20px;font-weight:900;margin-bottom:4px;letter-spacing:-.5px}
+.cc-chg{font-size:12px;font-weight:700}
+.cc-chg.up{color:var(--up)}.cc-chg.down{color:var(--down)}
+.cc-spark{height:42px;margin-top:10px}
+
+/* ══ STATUS STRIP ══ */
+.sg{display:grid;grid-template-columns:repeat(6,1fr);gap:10px;margin-bottom:14px}
+.sc{background:var(--card);border:1px solid var(--border);border-radius:10px;padding:13px}
+.sc.gold-b{border-color:rgba(240,192,0,.22)}
+.sc-lbl{font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:.5px;margin-bottom:7px;font-weight:700}
+.sc-val{font-size:19px;font-weight:900;line-height:1}
+.sc-sub{font-size:10px;color:var(--muted);margin-top:4px;font-weight:500}
+.prog{height:4px;background:var(--border);border-radius:2px;overflow:hidden;margin-top:6px}
+.prog-fill{height:100%;border-radius:2px;background:var(--gold);transition:width .4s}
+
+/* ══ MIE ══ */
+.mie-row{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-bottom:14px}
+.mc{background:var(--card);border:1px solid var(--border);border-radius:10px;padding:14px}
+.mc-stats{font-size:12px;line-height:2.1;color:var(--muted);margin-top:6px}
+.mc-stats strong{color:var(--text);font-weight:700}
+.bias-bull{color:var(--up)!important}
+.bias-bear{color:var(--down)!important}
+.bias-neut{color:var(--gold)!important}
+
+/* ══ TRADES + SIGNALS ══ */
+.ts-row{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:14px}
+.tbl{width:100%;border-collapse:collapse;font-size:12px}
+.tbl th{text-align:left;padding:8px 10px;font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.3px;border-bottom:1px solid var(--border)}
+.tbl td{padding:10px 10px;border-bottom:1px solid var(--border);vertical-align:middle}
+.tbl tr:last-child td{border-bottom:none}
+.tbl tbody tr:hover{background:rgba(255,255,255,.02)}
+
+/* Tags */
+.tag{display:inline-block;padding:3px 9px;border-radius:18px;font-size:10px;font-weight:700;white-space:nowrap}
+.tag-up{background:var(--up-bg);color:var(--up)}
+.tag-down{background:var(--down-bg);color:var(--down)}
+.tag-gold{background:var(--gold-dim);color:var(--gold)}
+.tag-blue{background:rgba(91,156,246,.13);color:var(--blue)}
+.tag-muted{background:rgba(255,255,255,.06);color:var(--muted)}
+
+/* Signals */
+.sr{display:flex;align-items:center;gap:8px;padding:9px 0;border-bottom:1px solid var(--border)}
+.sr:last-child{border-bottom:none}
+.sr-dot{width:9px;height:9px;border-radius:50%;flex-shrink:0}
+.sr-sym{font-size:13px;font-weight:800;min-width:54px}
+.sr-dir{width:48px}
+.sr-sw{flex:1}
+.sr-sb{height:4px;background:var(--border);border-radius:2px;overflow:hidden}
+.sr-sf{height:100%;border-radius:2px;background:var(--gold)}
+.sr-sl{font-size:10px;color:var(--muted);margin-top:2px;font-weight:600}
+.sr-rr{font-size:11px;font-weight:800;min-width:34px;text-align:right;color:var(--muted)}
+
+/* ══ PERFORMANCE ══ */
+.perf-grid{display:grid;grid-template-columns:repeat(5,1fr);gap:10px;margin-bottom:14px}
+
+/* ══ PUMP/DUMP ALERTS ══ */
+.pd-row{display:flex;gap:10px;margin-bottom:14px;flex-wrap:wrap}
+.pd-alert{background:var(--card);border:1.5px solid var(--border);border-radius:10px;padding:10px 14px;flex:1;min-width:160px;max-width:220px}
+.pd-alert.pump{border-color:rgba(0,200,150,.35);background:rgba(0,200,150,.06)}
+.pd-alert.dump{border-color:rgba(255,77,77,.35);background:rgba(255,77,77,.06)}
+.pd-sym{font-size:13px;font-weight:800;margin-bottom:3px}
+.pd-type{display:inline-block;font-size:10px;font-weight:800;padding:2px 8px;border-radius:10px;margin-bottom:5px}
+.pd-type.pump{background:var(--up-bg);color:var(--up)}
+.pd-type.dump{background:var(--down-bg);color:var(--down)}
+.pd-conf{font-size:11px;color:var(--muted);font-weight:600}
+.pd-sigs{font-size:10px;color:var(--muted);margin-top:4px;line-height:1.5}
+.pd-empty{color:var(--muted);font-size:12px;padding:14px;text-align:center;background:var(--card);border:1px solid var(--border);border-radius:10px;flex:1}
+
+/* ══ HELPERS ══ */
+.empty{color:var(--muted);font-size:12px;padding:22px;text-align:center}
+.up{color:var(--up)}.down{color:var(--down)}.gold{color:var(--gold)}
+
+/* Toast */
+#toast{
+  position:fixed;bottom:22px;left:calc(var(--wz-w)+18px);
+  padding:11px 17px;border-radius:10px;font-size:12px;z-index:9999;
+  box-shadow:0 12px 40px rgba(0,0,0,.7);max-width:290px;display:none;
+  border:1px solid rgba(255,255,255,.1);color:#fff;font-weight:600;
+}
+</style>
+</head>
+<body>
+
+<!-- ══════════ WIZARD (ESQUERDA) ══════════ -->
+<aside class="wizard">
+
+  <div class="wz-hdr">
+    <div class="wz-logo">TRADER 001</div>
+    <div class="wz-title">&#9881; Configuração do Bot</div>
+    <div class="wz-sub">Preencha cada etapa em ordem<br>Clique <b>CONFIRMADO</b> para aplicar tudo</div>
+    <div class="wz-prog">
+      <div class="wz-prog-bar"><div class="wz-prog-fill" id="wzProgFill" style="width:0%"></div></div>
+      <div class="wz-prog-txt">
+        <span id="wzProgTxt">0 de 5 etapas concluídas</span>
+        <span id="wzProgPct">0%</span>
+      </div>
+    </div>
+  </div>
+
+  <div class="wz-body">
+
+    <!-- STEP 1: Modo -->
+    <div class="step active" id="step-1">
+      <div class="step-hdr" onclick="toggleStep(1)">
+        <div class="step-num">1</div>
+        <div class="step-ttl">Modo de Execução</div>
+        <span class="step-cur" id="sv-1"></span>
+        <span class="step-ico" id="si-1">&#9660;</span>
+      </div>
+      <div class="step-body">
+        <div class="og og2">
+          <button class="ob" id="ob-sup" onclick="selectMode('SUPERVISED')">
+            &#128100;<br><span style="font-size:12px;font-weight:800">Supervisão</span><br>
+            <span style="font-size:10px;color:var(--muted)">Aprova manualmente</span>
+          </button>
+          <button class="ob" id="ob-auto" onclick="selectMode('AUTONOMOUS')">
+            &#129302;<br><span style="font-size:12px;font-weight:800">Autônomo</span><br>
+            <span style="font-size:10px;color:var(--muted)">Opera sozinho</span>
+          </button>
+          <button class="ob" id="ob-grid" onclick="selectMode('GRID')">
+            &#9889;<br><span style="font-size:12px;font-weight:800">Grid</span><br>
+            <span style="font-size:10px;color:var(--muted)">Ciclos automáticos</span>
+          </button>
+          <button class="ob" id="ob-sinais" onclick="selectMode('SINAIS')">
+            &#128225;<br><span style="font-size:12px;font-weight:800">Sinais</span><br>
+            <span style="font-size:10px;color:var(--muted)">Só transmite</span>
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- STEP 2: Capital -->
+    <div class="step locked" id="step-2">
+      <div class="step-hdr" onclick="toggleStep(2)">
+        <div class="step-num">2</div>
+        <div class="step-ttl">Capital e Risco</div>
+        <span class="step-cur" id="sv-2"></span>
+        <span class="step-ico" id="si-2">&#128274;</span>
+      </div>
+      <div class="step-body">
+        <div class="s-lbl" style="margin-top:0">Capital Total Alocado (USDT)</div>
+        <div class="og" style="grid-template-columns:repeat(5,1fr);gap:6px;margin-bottom:8px">
+          <button class="ob" onclick="setCapPreset(10)">$10</button>
+          <button class="ob" onclick="setCapPreset(30)">$30</button>
+          <button class="ob" onclick="setCapPreset(100)">$100</button>
+          <button class="ob" onclick="setCapPreset(500)">$500</button>
+          <button class="ob" onclick="setCapPreset(1000)">$1k</button>
+        </div>
+        <input type="number" class="s-inp" id="capInput" placeholder="Ou digite o valor em USDT..." min="1" step="10" oninput="onCapInput()">
+        <div class="s-lbl">Risco por Trade</div>
+        <div class="og" style="grid-template-columns:repeat(4,1fr)">
+          <button class="ob" id="rb-05" onclick="setRisk(0.5)">0.5%<br><span style="font-size:9px;color:var(--muted)">Conservador</span></button>
+          <button class="ob" id="rb-1"  onclick="setRisk(1)">1%<br><span style="font-size:9px;color:var(--muted)">Padrão</span></button>
+          <button class="ob" id="rb-2"  onclick="setRisk(2)">2%<br><span style="font-size:9px;color:var(--gold)">Moderado</span></button>
+          <button class="ob" id="rb-3"  onclick="setRisk(3)">3%<br><span style="font-size:9px;color:var(--down)">Alto</span></button>
+        </div>
+        <button class="s-conf" id="sc-2" onclick="confirmStep(2)" disabled style="background:transparent;border-color:rgba(255,255,255,.12);color:var(--muted);font-size:11px;padding:7px 14px">Próximo →</button>
+      </div>
+    </div>
+
+    <!-- STEP 3: Trades/sessão -->
+    <div class="step locked" id="step-3">
+      <div class="step-hdr" onclick="toggleStep(3)">
+        <div class="step-num">3</div>
+        <div class="step-ttl">Limite de Trades por Sessão</div>
+        <span class="step-cur" id="sv-3"></span>
+        <span class="step-ico" id="si-3">&#128274;</span>
+      </div>
+      <div class="step-body">
+        <div class="og og3">
+          <button class="ob" onclick="selectTrades(1)">1</button>
+          <button class="ob" onclick="selectTrades(2)">2</button>
+          <button class="ob" onclick="selectTrades(3)">3</button>
+          <button class="ob" onclick="selectTrades(4)">4</button>
+          <button class="ob" onclick="selectTrades(5)">5</button>
+          <button class="ob" onclick="selectTrades(10)">10</button>
+          <button class="ob sp3" onclick="selectTrades(0)">&#8734; Ilimitado</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- STEP 4: Alavancagem -->
+    <div class="step locked" id="step-4">
+      <div class="step-hdr" onclick="toggleStep(4)">
+        <div class="step-num">4</div>
+        <div class="step-ttl">Alavancagem</div>
+        <span class="step-cur" id="sv-4"></span>
+        <span class="step-ico" id="si-4">&#128274;</span>
+      </div>
+      <div class="step-body">
+        <div class="og og3">
+          <button class="ob" onclick="selectLev(3)">3x<br><span style="font-size:10px;color:var(--up)">Conservador</span></button>
+          <button class="ob" onclick="selectLev(5)">5x<br><span style="font-size:10px;color:var(--muted)">Baixo</span></button>
+          <button class="ob" onclick="selectLev(7)">7x<br><span style="font-size:10px;color:var(--muted)">Moderado</span></button>
+          <button class="ob" onclick="selectLev(10)">10x<br><span style="font-size:10px;color:var(--gold)">Padrão</span></button>
+          <button class="ob" onclick="selectLev(15)">15x<br><span style="font-size:10px;color:var(--down)">Alto</span></button>
+          <button class="ob" onclick="selectLev(20)">20x<br><span style="font-size:10px;color:var(--down)">Máximo</span></button>
+        </div>
+        <div class="s-warn" id="lev-warn">&#9888; Alavancagem &#8805;15x aumenta muito o risco de liquidação</div>
+      </div>
+    </div>
+
+    <!-- STEP 5: Perfil -->
+    <div class="step locked" id="step-5">
+      <div class="step-hdr" onclick="toggleStep(5)">
+        <div class="step-num">5</div>
+        <div class="step-ttl">Perfil de Operação</div>
+        <span class="step-cur" id="sv-5"></span>
+        <span class="step-ico" id="si-5">&#128274;</span>
+      </div>
+      <div class="step-body">
+        <div class="og og3">
+          <button class="ob" id="ob-cons" onclick="selectProfile('CONSERVATIVE')">
+            &#128737;&#65039;<br><strong style="font-size:14px">Conservador</strong><br>
+            <span style="font-size:10px;color:var(--muted)">Score &#8805;82 | R:R &#8805;3.0<br>Scan: 90s | Só BTC/ETH/SOL</span>
+          </button>
+          <button class="ob" id="ob-norm" onclick="selectProfile('NORMAL')">
+            &#128202;<br><strong style="font-size:14px">Normal</strong><br>
+            <span style="font-size:10px;color:var(--muted)">Score &#8805;75 | R:R &#8805;2.5<br>Scan: 60s | Filtros rígidos</span>
+          </button>
+          <button class="ob" id="ob-aggr" onclick="selectProfile('AGGRESSIVE')">
+            &#128293;<br><strong style="font-size:14px">Agressivo</strong><br>
+            <span style="font-size:10px;color:var(--muted)">Score &#8805;60 | R:R &#8805;1.7<br>Scan: 45s | Mais sinais</span>
+          </button>
+        </div>
+      </div>
+    </div>
+
+  </div><!-- /wz-body -->
+    <!-- ══ CONFIRMADO ══ -->
+    <div id="confirm-all-wrap" style="padding:16px 18px 8px;border-top:1px solid var(--border)">
+      <div id="confirm-status" style="font-size:11px;color:var(--muted);text-align:center;margin-bottom:10px;min-height:16px"></div>
+      <button id="btn-confirm-all" onclick="applyAll()" disabled
+        style="width:100%;padding:14px;border-radius:12px;border:2px solid rgba(100,210,80,.2);
+               background:rgba(100,210,80,.06);color:rgba(100,210,80,.4);
+               font-size:14px;font-weight:900;cursor:not-allowed;letter-spacing:.5px;
+               transition:all .3s;text-transform:uppercase">
+        ✅ Confirmado
+      </button>
+    </div>
+
+
+  <!-- WATCHLIST POR MODO -->
+  <div style="padding:14px 18px;border-top:1px solid var(--border)">
+    <div style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.5px;font-weight:700;margin-bottom:10px">
+      Watchlist por Modo
+    </div>
+    <div style="font-size:10px;color:var(--muted);margin-bottom:8px">Ativos monitorados (vazio = todos da lista global)</div>
+    <div style="display:flex;flex-direction:column;gap:8px">
+      <div>
+        <div style="font-size:10px;font-weight:700;color:var(--text);margin-bottom:4px">Supervisionado</div>
+        <div style="display:flex;gap:6px">
+          <input id="wl-sup" type="text" placeholder="BTC,ETH,SOL ou vazio=todos"
+            style="flex:1;background:var(--card2);border:1px solid var(--border2);border-radius:7px;padding:6px 10px;color:var(--text);font-size:11px;outline:none">
+          <button onclick="saveWatchlist('supervised', 'wl-sup')"
+            style="padding:6px 12px;background:var(--card);border:1px solid var(--border2);border-radius:7px;color:var(--gold);font-size:11px;font-weight:700;cursor:pointer">OK</button>
+        </div>
+      </div>
+      <div>
+        <div style="font-size:10px;font-weight:700;color:var(--text);margin-bottom:4px">Autonomo</div>
+        <div style="display:flex;gap:6px">
+          <input id="wl-auto" type="text" placeholder="BTC,ETH,SOL ou vazio=todos"
+            style="flex:1;background:var(--card2);border:1px solid var(--border2);border-radius:7px;padding:6px 10px;color:var(--text);font-size:11px;outline:none">
+          <button onclick="saveWatchlist('autonomous', 'wl-auto')"
+            style="padding:6px 12px;background:var(--card);border:1px solid var(--border2);border-radius:7px;color:var(--gold);font-size:11px;font-weight:700;cursor:pointer">OK</button>
+        </div>
+      </div>
+      <div>
+        <div style="font-size:10px;font-weight:700;color:var(--text);margin-bottom:4px">Grid — Pares</div>
+        <div style="display:flex;gap:6px">
+          <input id="wl-grid" type="text" placeholder="BTCUSDT,ETHUSDT,SOLUSDT"
+            style="flex:1;background:var(--card2);border:1px solid var(--border2);border-radius:7px;padding:6px 10px;color:var(--text);font-size:11px;outline:none">
+          <button onclick="saveWatchlist('grid', 'wl-grid')"
+            style="padding:6px 12px;background:var(--card);border:1px solid var(--border2);border-radius:7px;color:var(--gold);font-size:11px;font-weight:700;cursor:pointer">OK</button>
+        </div>
+      </div>
+      <div>
+        <div style="font-size:10px;font-weight:700;color:var(--gold);margin-bottom:4px">Sinais &#128225;</div>
+        <div style="display:flex;gap:6px">
+          <input id="wl-sinais" type="text" placeholder="BTC,ETH,SOL ou vazio=todos"
+            style="flex:1;background:var(--card2);border:1px solid rgba(240,192,0,.3);border-radius:7px;padding:6px 10px;color:var(--text);font-size:11px;outline:none">
+          <button onclick="saveWatchlist('sinais', 'wl-sinais')"
+            style="padding:6px 12px;background:var(--card);border:1px solid var(--border2);border-radius:7px;color:var(--gold);font-size:11px;font-weight:700;cursor:pointer">OK</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- AÇÕES RÁPIDAS -->
+  <div class="qa">
+    <div class="qa-title">Ações Rápidas</div>
+    <div class="qa-grid">
+      <button class="qb start" onclick="quickStart()">&#9654; Iniciar Bot</button>
+      <button class="qb pause" onclick="quickPause()">&#9646;&#9646; Pausar Bot</button>
+      <button class="qb stop"  onclick="quickStop()">&#9632; Parar Bot</button>
+      <button class="qb reset" onclick="quickReset()">&#8635; Resetar Bot</button>
+    </div>
+    <div class="ptog">
+      <span class="ptog-lbl">Paper Trading (simulação — sem dinheiro real)</span>
+      <button class="ptog-btn off" id="paperBtn" onclick="togglePaper()">OFF</button>
+    </div>
+    <button class="qa-scan" onclick="forceScan()">&#9889; Forçar Novo Scan Agora</button>
+  </div>
+
+  <!-- STATUS BAR -->
+  <div class="bsb">
+    <div class="bsb-row">
+      <div>
+        <span class="pulse run" id="wizPulse"></span>
+        <span class="bsb-st" id="wizStatus">ATIVO</span>
+        <span class="bsb-md" id="wizMode">Supervisão · Normal</span>
+      </div>
+      <div class="bsb-tm" id="wizTime">--:--</div>
+    </div>
+    <div class="bsb-meta">
+      <span>Último scan: <strong id="lastScan">--</strong></span>
+      <span>Latência: <strong id="latDisp" style="color:var(--up)">--ms</strong></span>
+    </div>
+  </div>
+
+</aside>
+
+<!-- ══════════ MAIN ══════════ -->
+<div class="main">
+
+  <!-- HEADER -->
+  <div class="hdr">
+    <div class="hdr-left" style="display:flex;flex-direction:column;gap:13px">
+
+      <!-- Linha 1: botões de ação -->
+      <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
+        <button id="newsBtn" onclick="broadcastNews()" title="Enviar notícias ao Telegram"
+          style="padding:9px 14px;border-radius:10px;border:1.5px solid rgba(91,156,246,.4);background:rgba(91,156,246,.08);color:#5B9CF6;font-size:12px;font-weight:800;cursor:pointer;white-space:nowrap;flex-shrink:0;transition:all .15s;letter-spacing:.2px"
+          onmouseover="this.style.background='rgba(91,156,246,.18)'" onmouseout="this.style.background='rgba(91,156,246,.08)'">
+          &#128240; Notícias
+        </button>
+        <button id="brainBtn" onclick="toggleBrain()" title="Ativar filtro Claude AI nos sinais"
+          style="padding:9px 14px;border-radius:10px;border:1.5px solid rgba(184,126,251,.35);background:rgba(184,126,251,.07);color:#B87EFB;font-size:12px;font-weight:800;cursor:pointer;white-space:nowrap;flex-shrink:0;transition:all .2s;letter-spacing:.2px">
+          🧠 Modo Claude
+        </button>
+        <button id="normalBtn" onclick="deactivateBrain()" title="Desativar Claude AI — voltar ao modo tradicional"
+          style="display:none;padding:9px 14px;border-radius:10px;border:1.5px solid rgba(63,185,80,.5);background:rgba(63,185,80,.1);color:#3fb950;font-size:12px;font-weight:800;cursor:pointer;white-space:nowrap;flex-shrink:0;transition:all .2s;letter-spacing:.2px">
+          🔧 Modo Normal
+        </button>
+        <span id="brainCostBadge" style="display:none;font-size:10px;color:rgba(184,126,251,.75);font-weight:600;letter-spacing:.2px;white-space:nowrap;"></span>
+      </div>
+
+      <!-- Linha 2: info da conta Binance -->
+      <div style="display:flex;align-items:flex-end;gap:32px;flex-wrap:wrap;">
+        <div>
+          <div class="bal-lbl">SALDO TOTAL — BINANCE FUTURES</div>
+          <div class="bal-val"><span class="cur">$</span><span id="balVal">--.--</span></div>
+        </div>
+        <div class="periods" style="margin-top:0;padding-bottom:4px;">
+          <div class="pd">
+            <div class="pd-lbl">Hoje</div>
+            <div class="pd-val nt" id="pnlToday">$--</div>
+          </div>
+          <div class="pd">
+            <div class="pd-lbl">7 Dias</div>
+            <div class="pd-val nt" id="pnl7d">$--</div>
+          </div>
+          <div class="pd">
+            <div class="pd-lbl">30 Dias</div>
+            <div class="pd-val nt" id="pnl30d">$--</div>
+          </div>
+          <div class="pd">
+            <div class="pd-lbl">PnL Não Real.</div>
+            <div class="pd-val nt" id="pnlUnreal">$--</div>
+          </div>
+        </div>
+      </div>
+
+    </div>
+    <div class="hdr-right">
+      <div class="scan-chip">Scan: <span id="scanDisp">--</span></div>
+      <div class="hdr-btn" onclick="toggleTheme()" title="Alternar Tema" id="themeBtn" style="font-size:14px;">☀️</div>
+      <div class="hdr-btn" onclick="loadAll()" title="Atualizar tudo">&#8635;</div>
+      <div class="hdr-btn" style="position:relative" title="Notificações">
+        &#128276;
+        <span class="notif-dot" id="notifDot" style="display:none"></span>
+      </div>
+      <div class="avatar">T</div>
+    </div>
+  </div>
+
+  <!-- CONTENT -->
+  <div class="content">
+
+    <!-- COIN CARDS -->
+    <div class="coin-grid">
+      <div class="cc sel" id="cc-BTC">
+        <div class="cc-top">
+          <div class="cc-info">
+            <div class="cc-ico" style="background:rgba(247,147,26,.15);color:#f7931a">&#8383;</div>
+            <div><div class="cc-name">Bitcoin</div><div class="cc-tk">BTCUSDT · FUTURES</div></div>
+          </div>
+          <div class="cc-arr up" id="arr-BTC">&#8599;</div>
+        </div>
+        <div class="cc-price" id="price-BTC">$--</div>
+        <div class="cc-chg up" id="chg-BTC">+0.00%</div>
+        <div class="cc-spark"><canvas id="spark-BTC"></canvas></div>
+      </div>
+      <div class="cc" id="cc-ETH">
+        <div class="cc-top">
+          <div class="cc-info">
+            <div class="cc-ico" style="background:rgba(98,126,234,.15);color:#627eea">&#926;</div>
+            <div><div class="cc-name">Ethereum</div><div class="cc-tk">ETHUSDT · FUTURES</div></div>
+          </div>
+          <div class="cc-arr up" id="arr-ETH">&#8599;</div>
+        </div>
+        <div class="cc-price" id="price-ETH">$--</div>
+        <div class="cc-chg up" id="chg-ETH">+0.00%</div>
+        <div class="cc-spark"><canvas id="spark-ETH"></canvas></div>
+      </div>
+      <div class="cc" id="cc-SOL">
+        <div class="cc-top">
+          <div class="cc-info">
+            <div class="cc-ico" style="background:rgba(153,69,255,.15);color:#9945ff">&#9675;</div>
+            <div><div class="cc-name">Solana</div><div class="cc-tk">SOLUSDT · FUTURES</div></div>
+          </div>
+          <div class="cc-arr up" id="arr-SOL">&#8599;</div>
+        </div>
+        <div class="cc-price" id="price-SOL">$--</div>
+        <div class="cc-chg up" id="chg-SOL">+0.00%</div>
+        <div class="cc-spark"><canvas id="spark-SOL"></canvas></div>
+      </div>
+      <div class="cc" id="cc-HYPE">
+        <div class="cc-top">
+          <div class="cc-info">
+            <div class="cc-ico" style="background:rgba(0,212,170,.15);color:#00d4aa">&#9889;</div>
+            <div><div class="cc-name">Hyperliquid</div><div class="cc-tk">HYPEUSDT · FUTURES</div></div>
+          </div>
+          <div class="cc-arr up" id="arr-HYPE">&#8599;</div>
+        </div>
+        <div class="cc-price" id="price-HYPE">$--</div>
+        <div class="cc-chg up" id="chg-HYPE">+0.00%</div>
+        <div class="cc-spark"><canvas id="spark-HYPE"></canvas></div>
+      </div>
+    </div>
+
+    <!-- STATUS STRIP -->
+    <div class="sg" style="grid-template-columns:repeat(8,1fr)">
+      <div class="sc">
+        <div class="sc-lbl">Wallet Balance</div>
+        <div class="sc-val" id="sw-wallet">$--</div>
+        <div class="sc-sub">Conta USDT-M</div>
+      </div>
+      <div class="sc">
+        <div class="sc-lbl">Saldo Disponível</div>
+        <div class="sc-val" id="sw-avail">$--</div>
+        <div class="sc-sub">Para novas entradas</div>
+      </div>
+      <div class="sc">
+        <div class="sc-lbl">Saldo de Margem</div>
+        <div class="sc-val" id="sw-margin">$--</div>
+        <div class="sc-sub">Margin Balance</div>
+      </div>
+      <div class="sc">
+        <div class="sc-lbl">PnL do Dia</div>
+        <div class="sc-val" id="sw-dnl">$--</div>
+        <div class="sc-sub" id="sw-dnl-pct">0.00% hoje</div>
+      </div>
+      <div class="sc">
+        <div class="sc-lbl">Operações Abertas</div>
+        <div class="sc-val" id="sw-open">--</div>
+        <div class="sc-sub">trades ativos</div>
+      </div>
+      <div class="sc">
+        <div class="sc-lbl">Win Rate</div>
+        <div class="sc-val" id="sw-wr">--%</div>
+        <div class="prog"><div class="prog-fill" id="sw-wr-bar" style="width:0%"></div></div>
+      </div>
+      <div class="sc">
+        <div class="sc-lbl">BTC Suporte/Resist.</div>
+        <div class="sc-val" id="sw-resist" style="font-size:13px;color:var(--down)">$--</div>
+        <div class="sc-sub" id="sw-support" style="color:var(--up)">$--</div>
+      </div>
+      <div class="sc gold-b">
+        <div class="sc-lbl">Status do Bot</div>
+        <div class="sc-val" style="font-size:14px;display:flex;align-items:center;gap:6px">
+          <span class="pulse run" id="pulse2"></span>
+          <span id="statusLbl2">ATIVO</span>
+        </div>
+        <div class="sc-sub" id="statusMode2">Supervisão · Normal</div>
+      </div>
+    </div>
+
+    <!-- PUMP / DUMP ALERTS -->
+    <div class="card" style="margin-bottom:14px">
+      <div class="ctitle">
+        Pump &amp; Dump Alerts — Top 50 Futuros
+        <span style="display:flex;gap:10px;align-items:center">
+          <span id="pd-summary" style="font-size:11px;color:var(--muted);font-weight:600;text-transform:none;letter-spacing:0"></span>
+          <a onclick="loadPumpDump(true)">&#8635; Atualizar</a>
+        </span>
+      </div>
+      <div id="pdBody" class="pd-row"><div class="pd-empty">Carregando alertas...</div></div>
+    </div>
+
+    <!-- MARKET INTELLIGENCE -->
+    <div class="mie-row">
+      <div class="mc">
+        <div class="ctitle">Viés de Mercado <a onclick="loadMIE()">&#8635; Atualizar</a></div>
+        <div id="mie-bias-ico" style="font-size:28px;font-weight:900">&#8596;</div>
+        <div style="font-size:14px;font-weight:700;margin-top:3px" id="mie-bias-lbl">Neutro</div>
+        <div style="font-size:11px;color:var(--muted);margin-top:2px" id="mie-conf">Confiança: --%</div>
+        <div style="display:flex;gap:6px;margin-top:10px;flex-wrap:wrap">
+          <span class="tag tag-gold" id="mie-trend">Tendência --</span>
+          <span class="tag tag-blue" id="mie-fg">Medo/Ganância --</span>
+          <span class="tag tag-muted" id="mie-score">Score --</span>
+        </div>
+      </div>
+      <div class="mc">
+        <div class="ctitle">Binance Futures — Dados Ao Vivo</div>
+        <div class="mc-stats">
+          <div>Taxa de Financiamento BTC: <strong id="mc-fund">--</strong></div>
+          <div>Variação OI 24h: <strong id="mc-oi">--</strong></div>
+          <div>Ratio Long/Short: <strong id="mc-ls">--</strong></div>
+          <div>Ativos em Alta: <strong id="mc-gain">--</strong></div>
+        </div>
+      </div>
+      <div class="mc">
+        <div class="ctitle">CoinGecko — Mercado Global</div>
+        <div class="mc-stats">
+          <div>Dominância BTC: <strong id="mc-dom">--</strong></div>
+          <div>Cap. Mercado 24h: <strong id="mc-mkt">--</strong></div>
+          <div>Índice Medo/Ganância: <strong id="mc-fg2">--</strong></div>
+          <div>Trending: <strong id="mc-trend">--</strong></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- TRADES + SIGNALS -->
+    <div class="ts-row">
+      <div class="card">
+        <div class="ctitle">
+          Operações Ativas — Binance
+          <span id="tradeCntBdg" style="color:var(--gold);font-size:11px;font-weight:700"></span>
+        </div>
+        <div id="tradesBody"><div class="empty">Buscando operações na Binance...</div></div>
+      </div>
+      <div class="card">
+        <div class="ctitle">
+          Sinais Detectados
+          <span style="display:flex;gap:6px;font-size:10px">
+            <span style="color:#10b981">&#9679; &gt;$200M</span>
+            <span style="color:#f59e0b">&#9679; $20-200M</span>
+            <span style="color:#ef4444">&#9679; &lt;$20M</span>
+          </span>
+        </div>
+        <div id="signalsBody"><div class="empty">Aguardando próximo scan...</div></div>
+      </div>
+    </div>
+
+    <!-- PERFORMANCE -->
+    <div class="perf-grid">
+      <div class="card">
+        <div class="ctitle">PnL Total Acumulado</div>
+        <div class="sc-val" id="pf-pnl">$--</div>
+        <div class="sc-sub" id="pf-pnl-sub">-- trades fechados</div>
+      </div>
+      <div class="card">
+        <div class="ctitle">Profit Factor</div>
+        <div class="sc-val" id="pf-pf">--</div>
+        <div class="sc-sub">ganhos / perdas</div>
+      </div>
+      <div class="card">
+        <div class="ctitle">Win Rate</div>
+        <div class="sc-val" id="pf-wr">--%</div>
+        <div class="sc-sub" id="pf-wl">V: -- | D: --</div>
+      </div>
+      <div class="card">
+        <div class="ctitle">R:R Médio</div>
+        <div class="sc-val" id="pf-rr">--</div>
+        <div class="sc-sub">retorno médio por risco</div>
+      </div>
+      <div class="card">
+        <div class="ctitle">Ciclos Grid</div>
+        <div class="sc-val gold" id="pf-grid">--</div>
+        <div class="sc-sub" id="pf-grid-sub">$-- lucro total grid</div>
+      </div>
+    </div>
+
+    <!-- HISTORY -->
+    <div class="card" style="margin-bottom:18px">
+      <div class="ctitle">
+        Histórico de Trades
+        <a onclick="loadHistory()">&#8635; Atualizar</a>
+      </div>
+      <div style="overflow-x:auto">
+        <table class="tbl">
+          <thead><tr>
+            <th>Ativo</th><th>Direção</th><th>Entrada</th><th>Fechamento</th>
+            <th>PnL</th><th>R:R</th><th>Score</th><th>Data/Hora</th>
+          </tr></thead>
+          <tbody id="histBody">
+            <tr><td colspan="8" class="empty">Carregando histórico...</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+  </div><!-- /content -->
+</div><!-- /main -->
+
+<!-- Toast -->
+<div id="toast"></div>
+
+<script>
+'use strict';
+
+// API: relativo quando servido pelo FastAPI (porta 8000), absoluto caso contrário
+const API = (window.location.port === '8000' || window.location.port === '')
+  ? '' : 'http://127.0.0.1:8000';
+
+// ════ PERFIS DE RISCO (3 perfis) ════
+const PROFILE_BTN = { CONSERVATIVE: 'ob-cons', NORMAL: 'ob-norm', AGGRESSIVE: 'ob-aggr' };
+const PROFILE_LBL = { CONSERVATIVE: 'Conservador', NORMAL: 'Normal', AGGRESSIVE: 'Agressivo' };
+const PROFILE_URL = { CONSERVATIVE: '/mode/conservative', NORMAL: '/mode/normal', AGGRESSIVE: '/mode/aggressive' };
+
+// ════ STATE ════
+let _paperMode = false;
+let _sparkData = {};
+let _volZones  = {};
+const wz = {
+  completed: new Set(),
+  vals: { mode: null, capital: null, risk: 1, trades: null, leverage: null, profile: null },
+  temp: { capital: null, risk: 1 }
+};
+
+// Botão texto original para reset correto após erro
+const CONF_LABELS = {
+  1: 'Confirmar Modo',
+  2: 'Confirmar Capital',
+  3: 'Confirmar Limite',
+  4: 'Confirmar Alavancagem',
+  5: 'Aplicar Configuração Completa'
+};
+
+// ════ UTILS ════
+function fmt(v, d = 2) {
+  const f = parseFloat(v);
+  if (v == null || v === '' || isNaN(f)) return '--';
+  return f.toLocaleString('pt-BR', { minimumFractionDigits: d, maximumFractionDigits: d });
+}
+function sign(v) { return parseFloat(v) >= 0 ? '+' : ''; }
+function cls(v)  { return parseFloat(v) >= 0 ? 'up' : 'down'; }
+function pct(v)  { return sign(v) + fmt(v) + '%'; }
+function pnlH(v) {
+  const f = parseFloat(v || 0);
+  return `<span class="${cls(f)}">${sign(f)}$${fmt(Math.abs(f))}</span>`;
+}
+function set(id, html) { const e = document.getElementById(id); if (e) e.innerHTML = html; }
+function txt(id, t)    { const e = document.getElementById(id); if (e) e.textContent = t; }
+function $id(id)       { return document.getElementById(id); }
+
+function toast(msg, type = 'info') {
+  const t = $id('toast');
+  if (!t) return;
+  const bg = { info: '#161630', success: '#0d2a1f', error: '#2a0d0d', warn: '#2a1a00' };
+  const bc = { info: '#3344aa44', success: '#00c89644', error: '#ff4d4d44', warn: '#f0c00044' };
+  t.style.cssText = `position:fixed;bottom:22px;left:calc(var(--wz-w)+18px);
+    padding:11px 17px;border-radius:10px;font-size:12px;z-index:9999;font-weight:600;
+    box-shadow:0 12px 40px rgba(0,0,0,.7);max-width:290px;display:block;opacity:1;transition:opacity .25s;
+    background:${bg[type]||bg.info};border:1px solid ${bc[type]||bc.info};color:#eeeef5;`;
+  t.textContent = msg;
+  clearTimeout(t._t);
+  t._t = setTimeout(() => {
+    t.style.opacity = '0';
+    setTimeout(() => { t.style.display = 'none'; }, 280);
+  }, 3500);
+}
+
+async function apiFetch(path, method = 'GET') {
+  const t0 = Date.now();
+  try {
+    const ctrl = new AbortController();
+    const tid  = setTimeout(() => ctrl.abort(), 10000);
+    const r    = await fetch(API + path, { method, signal: ctrl.signal });
+    clearTimeout(tid);
+    const lat = Date.now() - t0;
+    const el  = $id('latDisp');
+    if (el) { el.textContent = lat + 'ms'; el.style.color = lat < 300 ? 'var(--up)' : lat < 800 ? 'var(--gold)' : 'var(--down)'; }
+    if (!r.ok) return null;
+    return await r.json();
+  } catch (e) {
+    return null;
+  }
+}
+
+// ════ SPARKLINES ════
+function drawSparkline(canvasId, prices, isUp) {
+  const canvas = $id(canvasId);
+  if (!canvas || !prices || prices.length < 2) return;
+  const w     = canvas.parentElement.offsetWidth || 200;
+  const h     = 42;
+  canvas.width = w; canvas.height = h;
+  const ctx   = canvas.getContext('2d');
+  const min   = Math.min(...prices), max = Math.max(...prices);
+  const range = max - min || 1;
+  const color = isUp ? '#00C896' : '#FF4D4D';
+  ctx.clearRect(0, 0, w, h);
+  ctx.beginPath();
+  prices.forEach((p, i) => {
+    const x = (i / (prices.length - 1)) * w;
+    const y = h - 4 - ((p - min) / range) * (h - 8);
+    i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+  });
+  ctx.strokeStyle = color; ctx.lineWidth = 1.8;
+  ctx.shadowColor = color; ctx.shadowBlur = 5;
+  ctx.stroke(); ctx.shadowBlur = 0;
+  const last = canvas.getContext('2d').getImageData(0, 0, 1, 1); // dummy — keep ctx reference
+  // fill gradient below line
+  const lastX = w;
+  const lastY = h - 4 - ((prices[prices.length - 1] - min) / range) * (h - 8);
+  ctx.lineTo(lastX, h); ctx.lineTo(0, h); ctx.closePath();
+  const grad = ctx.createLinearGradient(0, 0, 0, h);
+  grad.addColorStop(0, color + '44');
+  grad.addColorStop(1, color + '00');
+  ctx.fillStyle = grad; ctx.fill();
+}
+
+async function loadSparklines() {
+  await Promise.all(['BTC', 'ETH', 'SOL', 'HYPE'].map(async coin => {
+    const d = await apiFetch(`/sparkline/${coin}USDT?interval=1h&limit=36`);
+    if (d && d.prices && d.prices.length > 1) {
+      _sparkData[coin] = d.prices;
+      const chgEl = $id('chg-' + coin);
+      const isUp  = !(chgEl && chgEl.classList.contains('down'));
+      drawSparkline('spark-' + coin, d.prices, isUp);
+    }
+  }));
+}
+
+// ════ LOADERS ════
+function toggleTheme() {
+  document.body.classList.toggle('light-theme');
+  const isLight = document.body.classList.contains('light-theme');
+  localStorage.setItem('theme', isLight ? 'light' : 'dark');
+  const btn = document.getElementById('themeBtn');
+  if (btn) btn.textContent = isLight ? '🌙' : '☀️';
+}
+
+async function loadBalance() {
+  const d = await apiFetch('/balance');
+  if (!d) { txt('balVal', 'Erro — servidor offline'); return; }
+  const total = parseFloat(d.wallet_balance || 0);
+  txt('balVal', fmt(total));
+  txt('sw-wallet', '$' + fmt(total));
+  txt('sw-avail', '$' + fmt(d.available_balance || 0));
+  const margin = parseFloat(d.margin_balance || 0);
+  txt('sw-margin', '$' + fmt(margin));
+  const unreal = parseFloat(d.unrealized_pnl || 0);
+  set('pnlUnreal', pnlH(unreal));
+  // PnL do dia (realizado) — não confundir com unrealized
+  const dailyPnl = parseFloat(d.daily_pnl || 0);
+  set('sw-dnl', pnlH(dailyPnl));
+  const pct_ = total > 0 ? dailyPnl / total * 100 : 0;
+  txt('sw-dnl-pct', sign(pct_) + fmt(Math.abs(pct_)) + '% hoje');
+}
+
+async function loadMarket() {
+  const d = await apiFetch('/market');
+  if (!d || !d.prices) return;
+  const p = d.prices;
+  [
+    { sym: 'BTC',  key: 'BTCUSDT'  },
+    { sym: 'ETH',  key: 'ETHUSDT'  },
+    { sym: 'SOL',  key: 'SOLUSDT'  },
+    { sym: 'HYPE', key: 'HYPEUSDT' },
+  ].forEach(c => {
+    const info  = p[c.key]; if (!info) return;
+    const price = parseFloat(info.price || 0);
+    const chg   = parseFloat(info.price_change_pct || 0);
+    const isUp  = chg >= 0;
+    const pStr  = price >= 1000 ? '$' + fmt(price, 2) : '$' + fmt(price, 4);
+    txt('price-' + c.sym, pStr);
+    const chgEl = $id('chg-' + c.sym);
+    if (chgEl) { chgEl.textContent = pct(chg); chgEl.className = 'cc-chg ' + (isUp ? 'up' : 'down'); }
+    const arrEl = $id('arr-' + c.sym);
+    if (arrEl) { arrEl.innerHTML = isUp ? '&#8599;' : '&#8600;'; arrEl.className = 'cc-arr ' + (isUp ? 'up' : 'down'); }
+  });
+  if (d.zones) _volZones = d.zones;
+  loadSparklines();
+}
+
+async function loadActiveTrades() {
+  const d = await apiFetch('/trades/active');
+  if (!d) return;
+  const trades = Array.isArray(d) ? d : (d.trades || []);
+  txt('sw-open', trades.length);
+  txt('tradeCntBdg', trades.length > 0 ? trades.length + ' abertas' : 'nenhuma');
+  if (trades.length === 0) {
+    set('tradesBody', '<div class="empty">Nenhuma operação aberta na Binance</div>'); return;
+  }
+  const rows = trades.map(t => {
+    const pnl    = parseFloat(t.pnl_usdt || t.unrealized_pnl || 0);
+    const pnlPct = parseFloat(t.pnl_pct || 0);
+    const dir    = (t.direction || t.side || '').toUpperCase();
+    const isLong = dir.includes('LONG') || dir === 'BUY';
+    const zone   = _volZones[t.asset] || 'GREEN';
+    const zc     = zone === 'GREEN' ? '#10b981' : zone === 'YELLOW' ? '#f59e0b' : '#ef4444';
+    const tid    = t.id || t.trade_id || '';
+    return `<tr>
+      <td><span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:${zc};margin-right:5px"></span><strong>${t.asset || '--'}</strong></td>
+      <td><span class="tag ${isLong ? 'tag-up' : 'tag-down'}">${isLong ? 'LONG' : 'SHORT'}</span></td>
+      <td>$${fmt(t.entry_price || 0)}</td>
+      <td>$${fmt(t.current_price || t.entry_price || 0)}</td>
+      <td class="${cls(pnl)}" style="font-weight:700">${sign(pnl)}$${fmt(Math.abs(pnl), 4)}<br>
+        <span style="font-size:10px;color:var(--muted)">${sign(pnlPct)}${fmt(pnlPct)}%</span></td>
+      <td><span class="tag tag-muted">${t.grid_mode ? 'GRID' : 'SINAL'}</span></td>
+      <td><button onclick="closeTrade('${tid}')" style="padding:3px 9px;border-radius:6px;background:var(--down-bg);border:1px solid rgba(255,77,77,.3);color:var(--down);font-size:10px;font-weight:700;cursor:pointer">Fechar</button></td>
+    </tr>`;
+  }).join('');
+  set('tradesBody', `<table class="tbl"><thead><tr>
+    <th>Ativo</th><th>Direção</th><th>Entrada</th><th>Preço Atual</th><th>PnL</th><th>Tipo</th><th></th>
+  </tr></thead><tbody>${rows}</tbody></table>`);
+}
+
+async function loadSignals() {
+  const d = await apiFetch('/signals');
+  if (!d) return;
+  const sigs = Array.isArray(d) ? d : (d.signals || []);
+  const dot  = $id('notifDot');
+  if (sigs.length === 0) {
+    set('signalsBody', '<div class="empty">Aguardando próximo scan (15s)...</div>');
+    if (dot) dot.style.display = 'none';
+    return;
+  }
+  if (dot) dot.style.display = 'block';
+  const html = sigs.slice(0, 10).map(s => {
+    const score  = parseFloat(s.score || s.confidence || 0);
+    const dir    = (s.direction || '').toUpperCase();
+    const isLong = dir.includes('LONG') || dir.includes('BUY');
+    const zone   = _volZones[s.asset || s.symbol] || 'GREEN';
+    const dc     = zone === 'GREEN' ? '#10b981' : zone === 'YELLOW' ? '#f59e0b' : '#ef4444';
+    const rr     = parseFloat(s.risk_reward || s.rr || 0);
+    const entry  = parseFloat(s.entry || 0);
+    const sym    = (s.asset || s.symbol || '').replace('USDT', '');
+    return `<div class="sr">
+      <div class="sr-dot" style="background:${dc}" title="Liquidez: ${zone}"></div>
+      <div class="sr-sym">${sym}</div>
+      <div class="sr-dir"><span class="tag ${isLong ? 'tag-up' : 'tag-down'}">${isLong ? 'LONG' : 'SHORT'}</span></div>
+      <div class="sr-sw">
+        <div class="sr-sb"><div class="sr-sf" style="width:${Math.min(score, 100)}%"></div></div>
+        <div class="sr-sl">${fmt(score, 0)} pts${entry > 0 ? ' · $' + fmt(entry) : ''}</div>
+      </div>
+      <div class="sr-rr">${rr > 0 ? fmt(rr, 1) + 'R' : '--'}</div>
+    </div>`;
+  }).join('');
+  set('signalsBody', html || '<div class="empty">Nenhum sinal qualificado</div>');
+}
+
+async function loadPerformance() {
+  const d = await apiFetch('/performance');
+  if (!d) return;
+  const s  = d.stats || d;
+  const tp = parseFloat(s.total_pnl_usdt || 0);
+  set('pf-pnl', pnlH(tp));
+  txt('pf-pnl-sub', (s.total_trades || 0) + ' trades fechados');
+  txt('pf-pf', fmt(s.profit_factor || 0, 2));
+  const wr  = parseFloat(s.win_rate_pct || 0);
+  txt('pf-wr', fmt(wr, 1) + '%');
+  txt('sw-wr', fmt(wr, 1) + '%');
+  const bar = $id('sw-wr-bar');
+  if (bar) bar.style.width = Math.min(wr, 100) + '%';
+  txt('pf-wl', 'V: ' + (s.wins || 0) + ' | D: ' + (s.losses || 0));
+  txt('pf-rr', fmt(s.avg_rr || 0, 2));
+  [['pnlToday', s.today_pnl], ['pnl7d', s.week_pnl], ['pnl30d', s.month_pnl]].forEach(([id, v]) => {
+    if (v == null) return;
+    const el = $id(id);
+    if (el) { el.innerHTML = pnlH(v); el.className = 'pd-val ' + cls(v); }
+  });
+}
+
+async function loadPumpDump(force = false) {
+  const url = '/alerts/pump_dump' + (force ? '?force=true' : '');
+  const d = await apiFetch(url);
+  if (!d) { set('pdBody', '<div class="pd-empty">Erro ao carregar alertas</div>'); return; }
+  const alerts = (d.alerts || []).filter(a => a.priority === 'HIGH' || a.priority === 'MEDIUM').slice(0, 6);
+  txt('pd-summary', `HIGH: ${d.high || 0} | MED: ${d.medium || 0} | LOW: ${d.low || 0}`);
+  if (alerts.length === 0) {
+    set('pdBody', '<div class="pd-empty">Nenhum alerta detectado — mercado calmo</div>');
+    return;
+  }
+  const html = alerts.map(a => {
+    const tc = a.type === 'PUMP' ? 'pump' : 'dump';
+    const sigs = (a.signals || []).slice(0, 2).join(' · ');
+    const sym = (a.symbol || '').replace('USDT', '');
+    const confBar = `<div style="height:3px;background:var(--border);border-radius:2px;margin-top:5px;overflow:hidden"><div style="height:100%;width:${a.confidence}%;background:${a.type==='PUMP'?'var(--up)':'var(--down)'};border-radius:2px"></div></div>`;
+    return `<div class="pd-alert ${tc}">
+      <div class="pd-sym">${sym} <span style="font-size:10px;color:var(--muted);font-weight:600">${a.priority}</span></div>
+      <span class="pd-type ${tc}">${a.type}</span>
+      <div class="pd-conf">Confiança: ${a.confidence}% · Vol ${a.rel_volume}x</div>
+      <div class="pd-sigs">${sigs}</div>
+      ${confBar}
+    </div>`;
+  }).join('');
+  set('pdBody', html);
+}
+
+async function loadSRZones() {
+  const d = await apiFetch('/signals/zones/BTCUSDT');
+  if (!d || !d.zones) return;
+  const z = d.zones;
+  const price = z.current_price || 0;
+  const resist = z.nearest_resistance;
+  const support = z.nearest_support;
+  if (resist) {
+    const distR = price > 0 ? ((resist.level - price) / price * 100).toFixed(1) : '?';
+    set('sw-resist', `$${fmt(resist.level)} <span style="font-size:10px;color:var(--muted)">+${distR}%</span>`);
+  }
+  if (support) {
+    const distS = price > 0 ? ((price - support.level) / price * 100).toFixed(1) : '?';
+    set('sw-support', `$${fmt(support.level)} <span style="font-size:10px;color:var(--muted)">-${distS}%</span>`);
+  }
+}
+
+async function loadGridStatus() {
+  const d = await apiFetch('/grid/status');
+  if (!d) return;
+  const cycles = d.total_cycles || d.cycles || 0;
+  const profit = parseFloat(d.total_profit || 0);
+  txt('pf-grid', cycles);
+  txt('pf-grid-sub', '$' + fmt(profit, 4) + ' lucro total grid');
+}
+
+async function loadHistory() {
+  const d = await apiFetch('/trades/history');
+  if (!d) return;
+  const trades = Array.isArray(d) ? d : (d.trades || []);
+  if (trades.length === 0) {
+    set('histBody', '<tr><td colspan="8" class="empty">Nenhum trade no histórico</td></tr>');
+    return;
+  }
+  const rows = trades.slice(0, 20).map(t => {
+    const pnl = parseFloat(t.pnl_usdt || 0);
+    const dir = (t.direction || '').toUpperCase();
+    const isL = dir.includes('LONG') || dir === 'BUY';
+    const rr  = parseFloat(t.risk_reward || 0);
+    const sc  = parseFloat(t.signal_score || 0);
+    const dt  = t.closed_at ? t.closed_at.substring(0, 16).replace('T', ' ') : '--';
+    return `<tr>
+      <td><strong>${(t.asset || '').replace('USDT', '')}</strong></td>
+      <td><span class="tag ${isL ? 'tag-up' : 'tag-down'}">${isL ? 'LONG' : 'SHORT'}</span></td>
+      <td>$${fmt(t.entry_price || 0)}</td>
+      <td>$${fmt(t.exit_price || 0)}</td>
+      <td class="${cls(pnl)}" style="font-weight:700">${sign(pnl)}$${fmt(Math.abs(pnl), 4)}</td>
+      <td>${rr > 0 ? fmt(rr, 2) + 'R' : '--'}</td>
+      <td>${sc > 0 ? fmt(sc, 0) + ' pts' : '--'}</td>
+      <td style="color:var(--muted);font-size:11px">${dt}</td>
+    </tr>`;
+  }).join('');
+  set('histBody', rows);
+}
+
+async function loadMIE() {
+  const d = await apiFetch('/market/intelligence');
+  if (!d) return;
+  const bias = d.market_bias || 'Neutral';
+  const conf = d.confidence  || 50;
+  const bCls = bias === 'Bullish' ? 'bias-bull' : bias === 'Bearish' ? 'bias-bear' : 'bias-neut';
+  const bIco = bias === 'Bullish' ? '&#8593;' : bias === 'Bearish' ? '&#8595;' : '&#8596;';
+  const bLbl = bias === 'Bullish' ? 'Altista (Bullish)' : bias === 'Bearish' ? 'Baixista (Bearish)' : 'Neutro';
+  set('mie-bias-ico', `<span class="${bCls}" style="font-size:28px;font-weight:900">${bIco}</span>`);
+  txt('mie-bias-lbl', bLbl);
+  txt('mie-conf', 'Confiança: ' + fmt(conf, 0) + '%');
+  
+  // Mapeamento correto de chaves na raiz do dict do MIE
+  txt('mie-trend', 'Tendência ' + fmt(d.trend_score != null ? d.trend_score : 50, 0));
+  txt('mie-fg',    'Medo/Ganância ' + fmt(d.sentiment_value != null ? d.sentiment_value : 50, 0));
+  txt('mie-score', 'Score ' + fmt(d.trend_score != null ? d.trend_score : 50, 0));
+  
+  // Binance data mapeado da raiz se binance_data não existir encapsulado
+  const bin = (d.binance_data && Object.keys(d.binance_data).length > 0) ? d.binance_data : d;
+  const btcF = bin.btc_funding;
+  set('mc-fund', btcF != null ? `<span class="${cls(btcF)}">${(parseFloat(btcF) * 100).toFixed(4)}%</span>` : '--');
+  set('mc-oi',   bin.oi_change_24h != null
+    ? `<span class="${cls(bin.oi_change_24h)}">${sign(bin.oi_change_24h)}${fmt(bin.oi_change_24h, 1)}%</span>`
+    : '--');
+  txt('mc-ls',   bin.long_short_ratio ? fmt(bin.long_short_ratio, 2) : '--');
+  
+  const gainers = bin.gainers_count != null ? bin.gainers_count : (bin.top_gainers ? bin.top_gainers.length : null);
+  txt('mc-gain', gainers != null ? gainers + ' ativos subindo' : '--');
+  
+  // CoinGecko e Fear & Greed estão na raiz no Python
+  txt('mc-dom', d.btc_dominance ? fmt(d.btc_dominance, 1) + '%' : '--');
+  set('mc-mkt', d.mkt_cap_change_24h != null
+    ? `<span class="${cls(d.mkt_cap_change_24h)}">${sign(d.mkt_cap_change_24h)}${fmt(d.mkt_cap_change_24h, 1)}%</span>`
+    : '--');
+  
+  txt('mc-fg2', d.sentiment_value ? d.sentiment_value + ' — ' + (d.sentiment_label || '') : '--');
+  
+  const trending = (d.trending_coins || []).map(item => typeof item === 'object' ? (item.name || item.symbol || '') : item);
+  txt('mc-trend', trending.slice(0, 3).join(', ') || '--');
+}
+
+
+async function loadSettings() {
+  const d = await apiFetch('/settings');
+  if (!d) return;
+  _paperMode = d.paper_trading || false;
+  refreshPaperBtn();
+
+  if (wz.vals.mode === null) {
+    const m   = (d.operation_mode || 'SINAIS').toUpperCase();
+    wz.vals.mode = m;
+    const map = { SUPERVISED: 'ob-sup', AUTONOMOUS: 'ob-auto', GRID: 'ob-grid', SINAIS: 'ob-sinais' };
+    const el  = map[m] && $id(map[m]);
+    if (el) el.classList.add('sel');
+    const sc1 = $id('sc-1'); if (sc1) sc1.disabled = false;
+    if (m === 'SINAIS') {
+      // Mostra hints de "Desativado" nas etapas 2 e 4 desde o carregamento inicial
+      txt('sv-2', 'Desativado'); txt('sv-4', 'Desativado');
+    }
+  }
+  if (wz.vals.capital === null) {
+    const cap = parseFloat(d.banca_usdt || 0);
+    wz.vals.capital = cap;
+    wz.temp.capital = cap;
+    const inp = $id('capInput');
+    if (inp && cap > 0) inp.value = cap;
+    wz.vals.risk = 1; wz.temp.risk = 1;
+    const rb1 = $id('rb-1'); if (rb1) rb1.classList.add('sel');
+    const sc2 = $id('sc-2'); if (sc2) sc2.disabled = false;
+  }
+  if (wz.vals.trades === null) {
+    const isSinais = (d.operation_mode || '').toUpperCase() === 'SINAIS';
+    wz.vals.trades = isSinais ? 0 : (d.trades_per_session != null ? d.trades_per_session : 3);
+    if (isSinais) txt('sv-3', 'Ilimitado');
+    const sc3 = $id('sc-3'); if (sc3) sc3.disabled = false;
+  }
+  if (wz.vals.leverage === null) {
+    wz.vals.leverage = d.grid_leverage || 10;
+    const sc4 = $id('sc-4'); if (sc4) sc4.disabled = false;
+  }
+  if (wz.vals.profile === null) {
+    const pr  = (d.trading_mode || 'NORMAL').toUpperCase();
+    wz.vals.profile = pr;
+    const el2 = $id(PROFILE_BTN[pr] || 'ob-norm');
+    if (el2) el2.classList.add('sel');
+    const sc5 = $id('sc-5'); if (sc5) sc5.disabled = false;
+  }
+
+  // Popula watchlist inputs
+  const supWl    = (d.supervised_watchlist || []).map(s => s.replace('USDT', '')).join(',');
+  const autoWl   = (d.autonomous_watchlist || []).map(s => s.replace('USDT', '')).join(',');
+  const gridWl   = (d.grid_pairs           || []).map(s => s.replace('USDT', '')).join(',');
+  const sinaisWl = (d.sinais_watchlist     || []).map(s => s.replace('USDT', '')).join(',');
+  if ($id('wl-sup')    && supWl)    $id('wl-sup').value    = supWl;
+  if ($id('wl-auto')   && autoWl)   $id('wl-auto').value   = autoWl;
+  if ($id('wl-grid')   && gridWl)   $id('wl-grid').value   = gridWl;
+  if ($id('wl-sinais') && sinaisWl) $id('wl-sinais').value = sinaisWl;
+
+  updateStatusBar(d);
+  updateStepValues();
+  // Unlock steps that have their pre-conditions met
+  const prereq = [
+    wz.vals.mode !== null,      // unlocks step 2
+    wz.vals.capital !== null,   // unlocks step 3
+    wz.vals.trades !== null,    // unlocks step 4
+    wz.vals.leverage !== null,  // unlocks step 5
+  ];
+  [2, 3, 4, 5].forEach((n, i) => { if (prereq[i]) unlockStep(n); });
+}
+
+function updateStatusBar(d) {
+  const mMap = { AUTONOMOUS: 'Autônomo', SUPERVISED: 'Supervisão', GRID: 'Grid', SINAIS: 'Sinais' };
+  const pMap = PROFILE_LBL;
+  const op   = (d.operation_mode || 'SUPERVISED').toUpperCase();
+  const pr   = (d.trading_mode   || 'NORMAL').toUpperCase();
+  const pau  = d.paper_trading || false;
+  const st   = pau ? 'PAUSADO' : 'ATIVO';
+  const pc   = pau ? 'pau' : 'run';
+  const mt   = (mMap[op] || op) + ' · ' + (pMap[pr] || pr);
+  ['statusLbl2', 'wizStatus'].forEach(id => txt(id, st));
+  ['statusMode2', 'wizMode'].forEach(id => txt(id, mt));
+  ['pulse2', 'wizPulse'].forEach(id => {
+    const e = $id(id); if (e) e.className = 'pulse ' + pc;
+  });
+  const scanS = d.scan_interval_s || 60;   // intervalo REAL vindo da API
+  txt('scanDisp', (pMap[pr] || pr) + ' · ' + scanS + 's');
+  const now = new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+  txt('wizTime', now.substring(0, 5)); // HH:MM
+  txt('lastScan', now);
+}
+
+function updateStepValues() {
+  const mL = { AUTONOMOUS: 'Autônomo', SUPERVISED: 'Supervisão', GRID: 'Grid', SINAIS: 'Sinais' };
+  const pL = PROFILE_LBL;
+  if (wz.vals.mode !== null)    txt('sv-1', mL[wz.vals.mode] || wz.vals.mode);
+  if (wz.vals.capital !== null) txt('sv-2', '$' + fmt(wz.vals.capital));
+  if (wz.vals.trades !== null)  txt('sv-3', wz.vals.trades === 0 ? 'Ilimitado' : String(wz.vals.trades));
+  if (wz.vals.leverage !== null) txt('sv-4', wz.vals.leverage + 'x');
+  if (wz.vals.profile !== null) txt('sv-5', pL[wz.vals.profile] || wz.vals.profile);
+}
+
+// ════ WIZARD LOGIC ════
+function toggleStep(n) {
+  const el = $id('step-' + n);
+  if (!el || el.classList.contains('locked') || el.classList.contains('sinais-skip')) return;
+  const body = el.querySelector('.step-body');
+  if (wz.completed.has(n)) {
+    // Toggle body on already-completed steps
+    if (body) body.style.display = body.style.display === 'none' ? 'block' : 'none';
+  } else {
+    setActiveStep(n);
+  }
+}
+
+function setActiveStep(n) {
+  for (let i = 1; i <= 5; i++) {
+    const el   = $id('step-' + i); if (!el) continue;
+    const body = el.querySelector('.step-body');
+    if (i === n) {
+      if (!el.classList.contains('locked')) {
+        el.classList.add('active');
+        if (body) body.style.display = 'block';
+      }
+    } else if (!wz.completed.has(i)) {
+      el.classList.remove('active');
+      if (body) body.style.display = 'none';
+    }
+  }
+}
+
+function unlockStep(n) {
+  const el  = $id('step-' + n); if (!el) return;
+  el.classList.remove('locked');
+  const ico = $id('si-' + n);
+  if (ico) ico.innerHTML = '&#9660;'; // always set to chevron when unlocked
+}
+
+function markDone(n, display) {
+  const el = $id('step-' + n); if (!el) return;
+  el.classList.remove('active'); el.classList.add('done');
+  const body = el.querySelector('.step-body');
+  if (body) body.style.display = 'none';
+  const num = el.querySelector('.step-num');
+  if (num) num.innerHTML = '&#10003;';
+  const ico = $id('si-' + n);
+  if (ico) ico.innerHTML = '&#9998;';
+  if (display) txt('sv-' + n, display);
+  wz.completed.add(n);
+  updateProgress();
+}
+
+function updateProgress() {
+  const p = (wz.completed.size / 5) * 100;
+  const f = $id('wzProgFill'); if (f) f.style.width = p + '%';
+  txt('wzProgTxt', wz.completed.size + ' de 5 etapas concluídas');
+  txt('wzProgPct', Math.round(p) + '%');
+}
+
+// ── Selection helpers ──
+function selectMode(m) {
+  wz.vals.mode = m;
+  document.querySelectorAll('#ob-sup,#ob-auto,#ob-grid,#ob-sinais').forEach(b => b.classList.remove('sel'));
+  const btnMap = { SUPERVISED: 'ob-sup', AUTONOMOUS: 'ob-auto', GRID: 'ob-grid', SINAIS: 'ob-sinais' };
+  const mLbl   = { SUPERVISED: 'Supervisão', AUTONOMOUS: 'Autônomo', GRID: 'Grid', SINAIS: 'Sinais' };
+  const el = $id(btnMap[m]); if (el) el.classList.add('sel');
+
+  if (m === 'SINAIS') {
+    ['step-2','step-4'].forEach(id => { const e=$id(id); if(e) e.classList.add('sinais-skip'); });
+    wz.vals.capital = 0; wz.vals.risk = 1; wz.vals.leverage = 10;
+    unlockStep(2); markDone(2, 'N/A — Sinais');
+    unlockStep(4); markDone(4, 'N/A — Sinais');
+    ['step-2','step-4'].forEach(id => { const e=$id(id); if(e) e.classList.add('sinais-skip'); });
+    markDone(1, 'Sinais');
+    unlockStep(3); setActiveStep(3);
+  } else {
+    ['step-2','step-4'].forEach(id => { const e=$id(id); if(e) e.classList.remove('sinais-skip'); });
+    if (wz.completed.has(2) && wz.vals.capital === 0) { wz.completed.delete(2); }
+    if (wz.completed.has(4) && wz.vals.leverage === 5) { wz.completed.delete(4); }
+    markDone(1, mLbl[m] || m);
+    unlockStep(2); setActiveStep(2);
+  }
+  _checkConfirmBtn();
+}
+
+function setCapPreset(v) {
+  const inp = $id('capInput'); if (inp) inp.value = v;
+  wz.temp.capital = v;
+  _tryEnableCapNext();
+}
+function onCapInput() {
+  const inp = $id('capInput');
+  wz.temp.capital = inp ? (parseFloat(inp.value) || null) : null;
+  _tryEnableCapNext();
+}
+function setRisk(v) {
+  wz.temp.risk = v;
+  document.querySelectorAll('#rb-05,#rb-1,#rb-2,#rb-3').forEach(b => b.classList.remove('sel'));
+  const map = { 0.5: 'rb-05', 1: 'rb-1', 2: 'rb-2', 3: 'rb-3' };
+  const el  = $id(map[v]); if (el) el.classList.add('sel');
+  _tryEnableCapNext();
+}
+function _tryEnableCapNext() {
+  const sc = $id('sc-2');
+  if (sc) sc.disabled = !(wz.temp.capital > 0 && wz.temp.risk != null);
+}
+
+// Passo 2: só tem botão "Próximo →" (campo livre precisa de clique manual)
+function confirmStep(n) {
+  if (n !== 2) return;
+  wz.vals.capital = wz.temp.capital || wz.vals.capital;
+  wz.vals.risk    = wz.temp.risk    || wz.vals.risk;
+  if (!(wz.vals.capital > 0)) { toast('Informe o capital alocado.', 'error'); return; }
+  markDone(2, '$' + fmt(wz.vals.capital));
+  unlockStep(3); setActiveStep(3);
+  _checkConfirmBtn();
+}
+
+function selectTrades(n) {
+  wz.vals.trades = n;
+  document.querySelectorAll('#step-3 .ob').forEach(b => {
+    const t = b.textContent.trim();
+    b.classList.toggle('sel', n === 0 ? t.includes('Ilimitado') : t === String(n));
+  });
+  const lbl = n === 0 ? 'Ilimitado' : String(n);
+  markDone(3, lbl);
+  if (wz.vals.mode === 'SINAIS') {
+    unlockStep(5); setActiveStep(5);
+  } else {
+    unlockStep(4); setActiveStep(4);
+  }
+  _checkConfirmBtn();
+}
+
+function selectLev(v) {
+  wz.vals.leverage = v;
+  document.querySelectorAll('#step-4 .ob').forEach(b =>
+    b.classList.toggle('sel', b.textContent.trim().startsWith(v + 'x'))
+  );
+  const warn = $id('lev-warn'); if (warn) warn.style.display = v >= 15 ? 'block' : 'none';
+  markDone(4, v + 'x');
+  unlockStep(5); setActiveStep(5);
+  _checkConfirmBtn();
+}
+
+function selectProfile(p) {
+  wz.vals.profile = p;
+  document.querySelectorAll('#ob-cons,#ob-norm,#ob-aggr').forEach(b => b.classList.remove('sel'));
+  const el = $id(PROFILE_BTN[p] || 'ob-norm'); if (el) el.classList.add('sel');
+  markDone(5, PROFILE_LBL[p] || p);
+  _checkConfirmBtn();
+}
+
+function _checkConfirmBtn() {
+  const btn = $id('btn-confirm-all');
+  const status = $id('confirm-status');
+  const done = wz.completed.size;
+  const ready = done >= 5;
+  if (!btn) return;
+  if (ready) {
+    btn.disabled = false;
+    btn.style.borderColor = 'rgba(100,210,80,.8)';
+    btn.style.background  = 'rgba(100,210,80,.15)';
+    btn.style.color       = '#64d250';
+    btn.style.cursor      = 'pointer';
+    btn.style.boxShadow   = '0 0 16px rgba(100,210,80,.2)';
+    if (status) status.textContent = '✅ Tudo configurado — pronto para confirmar';
+  } else {
+    btn.disabled = true;
+    btn.style.borderColor = 'rgba(100,210,80,.2)';
+    btn.style.background  = 'rgba(100,210,80,.06)';
+    btn.style.color       = 'rgba(100,210,80,.4)';
+    btn.style.cursor      = 'not-allowed';
+    btn.style.boxShadow   = 'none';
+    if (status) status.textContent = done + '/5 etapas preenchidas';
+  }
+}
+
+async function applyAll() {
+  const btn = $id('btn-confirm-all');
+  if (btn) { btn.disabled = true; btn.textContent = '⏳ Aplicando...'; }
+
+  const modeMap = { SUPERVISED: 'supervisao', AUTONOMOUS: 'autonomo', GRID: 'grid', SINAIS: 'sinais' };
+  const pairs   = 'BTCUSDT,ETHUSDT,SOLUSDT,HYPEUSDT';
+  const errors  = [];
+
+  try {
+    // 1 — Modo
+    const r1 = await apiFetch('/settings/mode?mode=' + (modeMap[wz.vals.mode] || wz.vals.mode.toLowerCase()), 'POST');
+    if (!r1) errors.push('modo');
+
+    // 2 — Capital (apenas se não for SINAIS)
+    if (wz.vals.mode !== 'SINAIS' && wz.vals.capital > 0) {
+      const r2 = await apiFetch('/settings/banca?banca=' + wz.vals.capital, 'POST');
+      if (!r2) errors.push('capital');
+    }
+
+    // 3 — Trades por sessão
+    const r3 = await apiFetch('/settings/trades_per_session?count=' + (wz.vals.trades ?? 0), 'POST');
+    if (!r3) errors.push('trades');
+
+    // 4 — Alavancagem (apenas se não for SINAIS)
+    if (wz.vals.mode !== 'SINAIS') {
+      const r4 = await apiFetch('/settings/grid?leverage=' + wz.vals.leverage + '&target=1&pairs=' + pairs, 'POST');
+      if (!r4) errors.push('alavancagem');
+    }
+
+    // 5 — Perfil
+    const profUrl = PROFILE_URL[wz.vals.profile] || '/mode/normal';
+    const r5 = await apiFetch(profUrl, 'POST');
+    if (!r5) errors.push('perfil');
+
+    if (errors.length === 0) {
+      // Tudo OK — notifica Telegram
+      await apiFetch('/config/notify', 'POST');
+      toast('✅ Configuração aplicada! Notificação enviada no Telegram.', 'success');
+      if (btn) { btn.textContent = '✅ Confirmado!'; btn.style.background = 'rgba(100,210,80,.25)'; }
+      loadSettings();
+    } else {
+      toast('Erro em: ' + errors.join(', ') + '. Verifique o servidor.', 'error');
+      if (btn) { btn.disabled = false; btn.textContent = '✅ Confirmado'; }
+    }
+  } catch(e) {
+    toast('Erro ao aplicar configuração.', 'error');
+    if (btn) { btn.disabled = false; btn.textContent = '✅ Confirmado'; }
+  }
+}
+
+// ════ CLAUDE BRAIN ════
+let _brainEnabled = false;
+let _brainCost    = 0.0;
+let _brainBudget  = 0.0;
+let _brainCalls   = 0;
+let _brainPollTimer = null;
+
+async function loadBrainStatus() {
+  try {
+    const r = await apiFetch('/claude-brain/status');
+    if (r) {
+      _brainEnabled = r.enabled;
+      _brainCost    = r.session_cost   || 0;
+      _brainBudget  = r.budget_usd     || 0;
+      _brainCalls   = r.session_calls  || 0;
+      _updateBrainBtn();
+      _updateBrainCostBadge();
+    }
+  } catch(e) {}
+}
+
+function _updateBrainBtn() {
+  const btn       = $id('brainBtn');
+  const normalBtn = $id('normalBtn');
+  if (!btn) return;
+  if (_brainEnabled) {
+    btn.innerHTML = '🧠 Modo Claude ✦';
+    btn.style.borderColor = 'rgba(184,126,251,.9)';
+    btn.style.background  = 'rgba(184,126,251,.22)';
+    btn.style.color       = '#d4a8ff';
+    btn.style.boxShadow   = '0 0 10px rgba(184,126,251,.25)';
+    if (normalBtn) normalBtn.style.display = 'inline-block';
+    _startBrainCostPoll();
+  } else {
+    btn.innerHTML = '🧠 Modo Claude';
+    btn.style.borderColor = 'rgba(184,126,251,.35)';
+    btn.style.background  = 'rgba(184,126,251,.07)';
+    btn.style.color       = '#B87EFB';
+    btn.style.boxShadow   = 'none';
+    if (normalBtn) normalBtn.style.display = 'none';
+    _stopBrainCostPoll();
+    _updateBrainCostBadge();
+  }
+}
+
+function _updateBrainCostBadge() {
+  let badge = $id('brainCostBadge');
+  if (!badge) return;
+  if (_brainEnabled && (_brainCalls > 0 || _brainCost > 0)) {
+    let txt = `💰 $${_brainCost.toFixed(4)} · ${_brainCalls} análises`;
+    if (_brainBudget > 0) {
+      const rem = Math.max(0, _brainBudget - _brainCost);
+      const pct = Math.min(100, (_brainCost / _brainBudget) * 100);
+      txt += ` · restam $${rem.toFixed(4)} (${(100 - pct).toFixed(0)}%)`;
+    }
+    badge.textContent = txt;
+    badge.style.display = 'inline';
+  } else {
+    badge.style.display = 'none';
+  }
+}
+
+function _startBrainCostPoll() {
+  if (_brainPollTimer) return;
+  _brainPollTimer = setInterval(async () => {
+    try {
+      const r = await apiFetch('/claude-brain/status');
+      if (r && r.enabled) {
+        _brainCost   = r.session_cost  || 0;
+        _brainCalls  = r.session_calls || 0;
+        _brainBudget = r.budget_usd    || 0;
+        _updateBrainCostBadge();
+      }
+    } catch(e) {}
+  }, 15000); // atualiza a cada 15s
+}
+
+function _stopBrainCostPoll() {
+  if (_brainPollTimer) { clearInterval(_brainPollTimer); _brainPollTimer = null; }
+}
+
+async function toggleBrain() {
+  if (_brainEnabled) return; // use deactivateBrain() to turn off
+  if (!confirm('⚠️ Ativar Claude AI como filtro de trades?\n\nCada sinal será analisado pela API do Claude antes de executar.\n\nRequer ANTHROPIC_API_KEY configurada no .env\n(console.anthropic.com → API Keys)')) return;
+  const btn = $id('brainBtn');
+  btn.disabled = true;
+  try {
+    const r = await apiFetch('/claude-brain/toggle', 'POST');
+    if (r) {
+      _brainEnabled = r.enabled;
+      _updateBrainBtn();
+      toast('🧠 Claude AI ativado — notificação enviada no Telegram', 'success');
+    }
+  } catch(e) {
+    toast('Erro: verifique se ANTHROPIC_API_KEY está configurada no .env', 'error');
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+async function deactivateBrain() {
+  if (!_brainEnabled) return;
+  if (!confirm('Desativar Claude AI e voltar ao modo de análise tradicional?')) return;
+  const normalBtn = $id('normalBtn');
+  if (normalBtn) normalBtn.disabled = true;
+  try {
+    const r = await apiFetch('/claude-brain/toggle', 'POST');
+    if (r) {
+      _brainEnabled = r.enabled;
+      _updateBrainBtn();
+      toast('🔧 Modo Normal restaurado — resumo enviado no Telegram', 'info');
+    }
+  } catch(e) {
+    toast('Erro ao desativar Claude AI', 'error');
+  } finally {
+    if (normalBtn) normalBtn.disabled = false;
+  }
+}
+
+// ════ NEWS BROADCAST ════
+async function broadcastNews() {
+  const btn = $id('newsBtn');
+  const orig = btn.innerHTML;
+  btn.disabled = true;
+  btn.innerHTML = '&#128240; Buscando...';
+  btn.style.opacity = '.6';
+  try {
+    const r = await apiFetch('/news/broadcast', 'POST');
+    if (r && r.status === 'sent') {
+      toast(`Notícias enviadas ao Telegram (${r.items || 0} itens)`, 'success');
+      btn.innerHTML = '&#128240; Enviado!';
+      setTimeout(() => { btn.innerHTML = orig; btn.style.opacity = '1'; btn.disabled = false; }, 3000);
+    } else {
+      toast('Erro ao enviar notícias. Verifique o Telegram.', 'error');
+      btn.innerHTML = orig; btn.style.opacity = '1'; btn.disabled = false;
+    }
+  } catch(e) {
+    toast('Erro de conexão com o servidor.', 'error');
+    btn.innerHTML = orig; btn.style.opacity = '1'; btn.disabled = false;
+  }
+}
+
+// ════ QUICK ACTIONS ════
+async function quickStart() {
+  const r = await apiFetch('/bot/resume', 'POST');
+  if (r) { toast('Bot iniciado — operando normalmente.', 'success'); _paperMode = false; refreshPaperBtn(); }
+  else   toast('Erro ao iniciar bot. Servidor offline?', 'error');
+}
+async function quickPause() {
+  const r = await apiFetch('/bot/pause', 'POST');
+  if (r) { toast('Bot pausado — sem novas entradas.', 'warn'); _paperMode = true; refreshPaperBtn(); }
+  else   toast('Erro ao pausar bot.', 'error');
+}
+async function quickStop() {
+  if (!confirm('Parar o bot?\n\nPosiçoes abertas continuam sendo monitoradas.')) return;
+  quickPause();
+}
+async function quickReset() {
+  if (!confirm('Resetar o bot?\n\nSerá limpo:\n• Cache de sinais\n• Contadores de sessão\n\nAPI keys e configurações são preservadas.')) return;
+  const r = await apiFetch('/bot/reset', 'POST');
+  if (r) { toast('Bot resetado com sucesso.', 'success'); setTimeout(loadAll, 1500); }
+  else   toast('Erro ao resetar bot.', 'error');
+}
+async function togglePaper() {
+  const r = _paperMode
+    ? await apiFetch('/bot/resume', 'POST')
+    : await apiFetch('/bot/pause', 'POST');
+  if (r) {
+    _paperMode = !_paperMode;
+    refreshPaperBtn();
+    toast(_paperMode ? 'Paper Trading ativado. Sem ordens reais.' : 'Paper Trading desativado.', 'info');
+  }
+}
+function refreshPaperBtn() {
+  const btn = $id('paperBtn');
+  if (btn) { btn.textContent = _paperMode ? 'ON' : 'OFF'; btn.className = 'ptog-btn ' + (_paperMode ? 'on' : 'off'); }
+  ['pulse2', 'wizPulse'].forEach(id => {
+    const e = $id(id); if (e) e.className = 'pulse ' + (_paperMode ? 'pau' : 'run');
+  });
+  ['statusLbl2', 'wizStatus'].forEach(id => txt(id, _paperMode ? 'PAUSADO' : 'ATIVO'));
+}
+
+async function saveWatchlist(mode, inputId) {
+  const inp = $id(inputId);
+  if (!inp) return;
+  const val = inp.value.trim();
+  const r = await apiFetch(`/settings/watchlist?mode=${mode}&symbols=${encodeURIComponent(val || 'all')}`, 'POST');
+  if (r) toast(`Watchlist ${mode}: ${val || 'todos'}`, 'success');
+  else    toast('Erro ao salvar watchlist.', 'error');
+}
+
+async function forceScan() {
+  const r = await apiFetch('/auto/force_scan', 'POST');
+  if (r) {
+    const t = r.started_at || new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    txt('lastScan', t + ' (em andamento...)');
+    toast('Scan iniciado — novos sinais em ~30s.', 'info');
+    setTimeout(() => { loadSignals(); loadAll(); }, 30000);
+  } else {
+    toast('Erro ao forcar scan.', 'error');
+  }
+}
+
+async function closeTrade(id) {
+  if (!id || !confirm('Fechar operação ' + id + '?\nIsso enviará ordem de fechamento à Binance.')) return;
+  const r = await apiFetch('/trades/' + id + '/close', 'POST');
+  toast(r ? 'Operação fechada.' : 'Erro ao fechar operação.', r ? 'success' : 'error');
+  if (r) setTimeout(loadActiveTrades, 2000);
+}
+
+// ════ LOAD ALL ════
+async function loadAll() {
+  await Promise.all([
+    loadBalance(),
+    loadMarket(),
+    loadActiveTrades(),
+    loadSignals(),
+    loadMIE(),
+    loadPerformance(),
+    loadGridStatus(),
+    loadSettings(),
+    loadPumpDump(),
+    loadSRZones(),
+    _refreshLastScan(),
+  ]);
+  loadHistory();
+}
+
+async function _refreshLastScan() {
+  const s = await apiFetch('/auto/status');
+  if (!s) return;
+  if (s.last_scan_at) txt('lastScan', s.last_scan_at);
+}
+
+// ════ INIT ════
+document.addEventListener('DOMContentLoaded', () => {
+  // Carrega tema salvo
+  const savedTheme = localStorage.getItem('theme');
+  if (savedTheme === 'light') {
+    document.body.classList.add('light-theme');
+    const btn = document.getElementById('themeBtn');
+    if (btn) btn.textContent = '🌙';
+  }
+
+  loadAll();
+  loadBrainStatus();
+  setInterval(loadBalance,       8000);
+  setInterval(loadMarket,       10000);
+  setInterval(loadActiveTrades,  5000);
+  setInterval(loadSignals,      15000);
+  setInterval(loadPerformance,  30000);
+  setInterval(loadGridStatus,    8000);
+  setInterval(loadMIE,         600000);
+  setInterval(loadPumpDump,    120000);
+  setInterval(loadSRZones,     300000);
+  setInterval(_refreshLastScan,  30000);
+  // Update clock every minute
+  setInterval(() => {
+    txt('wizTime', new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' }));
+  }, 60000);
+  // Redraw sparklines on resize
+  window.addEventListener('resize', () => {
+    Object.keys(_sparkData).forEach(coin => {
+      const e = $id('chg-' + coin);
+      drawSparkline('spark-' + coin, _sparkData[coin], !(e && e.classList.contains('down')));
+    });
+  });
+});
+</script>
+</body>
+</html>

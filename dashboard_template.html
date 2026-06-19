@@ -1,0 +1,615 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Trader 001 — Dashboard</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+<style>
+  :root {
+    --bg: #0d1117; --bg2: #161b22; --bg3: #21262d;
+    --green: #3fb950; --red: #f85149; --blue: #58a6ff;
+    --yellow: #d29922; --text: #e6edf3; --muted: #8b949e;
+    --border: #30363d;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: var(--bg); color: var(--text); font-family: 'Segoe UI', system-ui, sans-serif; font-size: 14px; }
+  header { display: flex; align-items: center; justify-content: space-between; padding: 12px 20px; background: var(--bg2); border-bottom: 1px solid var(--border); }
+  header h1 { font-size: 18px; font-weight: 600; color: var(--blue); }
+  .badge { padding: 3px 10px; border-radius: 20px; font-size: 12px; font-weight: 600; }
+  .badge.live { background: #1a3a1a; color: var(--green); }
+  .badge.paused { background: #3a1a1a; color: var(--red); }
+  .grid { display: grid; gap: 12px; padding: 16px; }
+  .grid-4 { grid-template-columns: repeat(4, 1fr); }
+  .grid-3 { grid-template-columns: repeat(3, 1fr); }
+  .grid-2 { grid-template-columns: repeat(2, 1fr); }
+  .card { background: var(--bg2); border: 1px solid var(--border); border-radius: 8px; padding: 16px; }
+  .card h3 { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.8px; margin-bottom: 8px; }
+  .card .value { font-size: 24px; font-weight: 700; }
+  .card .sub { font-size: 12px; color: var(--muted); margin-top: 4px; }
+  .green { color: var(--green); }
+  .red { color: var(--red); }
+  .yellow { color: var(--yellow); }
+  .blue { color: var(--blue); }
+  canvas { max-height: 240px; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th { text-align: left; padding: 8px 10px; color: var(--muted); font-weight: 500; border-bottom: 1px solid var(--border); font-size: 11px; text-transform: uppercase; }
+  td { padding: 8px 10px; border-bottom: 1px solid var(--border); }
+  tr:last-child td { border-bottom: none; }
+  .regime-badge { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 11px; font-weight: 600; }
+  .TRENDING { background: #1a3a1a; color: var(--green); }
+  .RANGING { background: #1a2a3a; color: var(--blue); }
+  .VOLATILE { background: #3a2a1a; color: var(--yellow); }
+  .NEUTRAL { background: var(--bg3); color: var(--muted); }
+  .status-row { display: flex; gap: 16px; padding: 8px 16px; background: var(--bg2); border-bottom: 1px solid var(--border); font-size: 12px; flex-wrap: wrap; }
+  .status-item { display: flex; gap: 6px; align-items: center; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; }
+  .dot.green { background: var(--green); }
+  .dot.red { background: var(--red); }
+  .dot.yellow { background: var(--yellow); }
+  .fg-gauge { position: relative; width: 120px; height: 60px; margin: 8px auto; }
+  @media (max-width: 900px) { .grid-4 { grid-template-columns: repeat(2, 1fr); } .grid-3 { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+
+  <h1>&#9650; Trader 001</h1>
+  <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;">
+    <span id="real-mode-badge" class="badge" style="background:#21262d;color:var(--text);border:1px solid var(--border);">Real Mode: —</span>
+    <span id="active-strategy-badge" class="badge" style="background:#1f2a3a;color:var(--blue);border:1px solid #388bfd;">Strategy: —</span>
+    <span id="telegram-state-badge" class="badge" style="background:#3a2a1a;color:var(--yellow);border:1px solid var(--yellow);">Telegram: —</span>
+    <span id="status-badge" class="badge live">LIVE</span>
+    <span id="last-update" style="color:var(--muted);font-size:12px">—</span>
+  </div>
+</header>
+
+<!-- Painel de Configurações Interativo -->
+<div class="grid grid-1" style="padding: 16px 16px 0 16px;">
+  <div class="card" style="border: 1px solid var(--blue); background: rgba(88,166,255,0.05);">
+    <h3 style="color: var(--blue); font-weight: 600; font-size: 13px; display: flex; justify-content: space-between; align-items: center;">
+      <span>⚙️ Configuração Operacional e Perfil</span>
+      <span id="pending-alert" class="badge paused" style="display:none; animation: pulse 1.5s infinite; font-size: 10px;">ALTERAÇÕES PENDENTES</span>
+    </h3>
+    <style>
+      @keyframes pulse {
+        0% { opacity: 0.6; }
+        50% { opacity: 1; }
+        100% { opacity: 0.6; }
+      }
+      .config-input-group {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+        gap: 12px;
+        margin-top: 12px;
+      }
+      .config-field {
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+      }
+      .config-field label {
+        font-size: 11px;
+        color: var(--muted);
+        text-transform: uppercase;
+        font-weight: 600;
+      }
+      .config-field input, .config-field select {
+        background: var(--bg3);
+        border: 1px solid var(--border);
+        color: var(--text);
+        padding: 6px 10px;
+        border-radius: 4px;
+        font-size: 13px;
+        outline: none;
+        transition: border 0.2s;
+      }
+      .config-field input:focus, .config-field select:focus {
+        border-color: var(--blue);
+      }
+      .btn-approve {
+        background: var(--green);
+        color: white;
+        border: none;
+        padding: 8px 16px;
+        border-radius: 4px;
+        font-weight: 600;
+        cursor: pointer;
+        transition: opacity 0.2s;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        gap: 6px;
+      }
+      .btn-approve:hover {
+        opacity: 0.9;
+      }
+      .btn-approve:disabled {
+        background: var(--bg3);
+        color: var(--muted);
+        cursor: not-allowed;
+      }
+    </style>
+    
+    <div class="config-input-group">
+      <div class="config-field">
+        <label for="cfg-mode">Modo de Operação</label>
+        <select id="cfg-mode" onchange="proposeChange()">
+          <option value="SINAIS">Sinais (Exclusivo)</option>
+          <option value="SUPERVISED">Supervisionado (Bot)</option>
+          <option value="AUTONOMOUS">Autônomo (100% Auto)</option>
+          <option value="GRID">Grid Mode</option>
+        </select>
+      </div>
+      <div class="config-field">
+        <label for="cfg-banca">Banca Alocada (USDT)</label>
+        <input type="number" id="cfg-banca" min="0" step="10" placeholder="Ex: 1000" oninput="proposeChange()">
+      </div>
+      <div class="config-field">
+        <label for="cfg-risco">Risco por Trade (%)</label>
+        <input type="number" id="cfg-risco" min="1" max="50" step="0.5" placeholder="Ex: 2" oninput="proposeChange()">
+      </div>
+      <div class="config-field">
+        <label for="cfg-target">Meta Lucro Diário (USDT)</label>
+        <input type="number" id="cfg-target" min="0" step="5" placeholder="Ex: 50" oninput="proposeChange()">
+      </div>
+      <div class="config-field">
+        <label for="cfg-leverage">Alavancagem Grid</label>
+        <input type="number" id="cfg-leverage" min="1" max="50" step="1" placeholder="Ex: 10" oninput="proposeChange()">
+      </div>
+      <div class="config-field">
+        <label for="cfg-perfil">Perfil de Risco</label>
+        <select id="cfg-perfil" onchange="proposeChange()">
+          <option value="CONSERVATIVE">Conservador</option>
+          <option value="NORMAL">Normal / Moderado</option>
+          <option value="AGGRESSIVE">Agressivo</option>
+        </select>
+      </div>
+      <div class="config-field" style="justify-content: flex-end;">
+        <button id="btn-apply" class="btn-approve" onclick="approveConfig()" disabled>
+          <span>✓ APROVAR MUDANÇAS</span>
+        </button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="status-row">
+  <div class="status-item"><div class="dot" id="ws-dot"></div><span id="ws-status">WS: —</span></div>
+  <div class="status-item"><div class="dot" id="ml-dot"></div><span id="ml-status">ML: —</span></div>
+  <div class="status-item"><span id="fg-status">F&G: —</span></div>
+  <div class="status-item"><span id="regime-status">Regime: —</span></div>
+  <div class="status-item"><span id="sortino-status">Sortino: —</span></div>
+  <div class="status-item"><span id="var-status">VaR: —</span></div>
+</div>
+
+<!-- KPIs -->
+<div class="grid grid-4">
+  <div class="card">
+    <h3>PnL Diário</h3>
+    <div class="value" id="daily-pnl">—</div>
+    <div class="sub" id="daily-meta">—</div>
+  </div>
+  <div class="card">
+    <h3>Win Rate (sessão)</h3>
+    <div class="value" id="win-rate">—</div>
+    <div class="sub" id="win-rate-sub">—</div>
+  </div>
+  <div class="card">
+    <h3>Trades Abertos</h3>
+    <div class="value blue" id="open-trades">—</div>
+    <div class="sub" id="banca">Banca: —</div>
+  </div>
+  <div class="card">
+    <h3>Profit Factor</h3>
+    <div class="value" id="profit-factor">—</div>
+    <div class="sub" id="total-trades">—</div>
+  </div>
+</div>
+
+<!-- Charts -->
+<div class="grid grid-2">
+  <div class="card">
+    <h3>Equity Curve (últimos 60 trades)</h3>
+    <canvas id="equityChart"></canvas>
+  </div>
+  <div class="card">
+    <h3>PnL por Hora do Dia</h3>
+    <canvas id="hourlyChart"></canvas>
+  </div>
+</div>
+
+<!-- Walk-forward + Trades abertos -->
+<div class="grid grid-2">
+  <div class="card">
+    <h3>Walk-Forward Analysis</h3>
+    <div id="wf-recommendation" style="margin-bottom:10px;color:var(--yellow);font-size:13px">—</div>
+    <canvas id="wfChart"></canvas>
+  </div>
+  <div class="card">
+    <h3>Posições Abertas</h3>
+    <table id="trades-table">
+      <thead><tr><th>Ativo</th><th>Dir</th><th>Entry</th><th>PnL%</th><th>SL</th></tr></thead>
+      <tbody id="trades-body"><tr><td colspan="5" style="color:var(--muted)">Sem posições</td></tr></tbody>
+    </table>
+  </div>
+</div>
+
+<!-- Risk metrics + Signals -->
+<div class="grid grid-3">
+  <div class="card">
+    <h3>Risk Metrics</h3>
+    <div id="risk-content" style="font-size:13px;line-height:2">—</div>
+  </div>
+  <div class="card">
+    <h3>Portfolio VaR</h3>
+    <canvas id="varChart"></canvas>
+    <div id="var-detail" style="font-size:12px;color:var(--muted);margin-top:8px">—</div>
+  </div>
+  <div class="card">
+    <h3>Últimos Sinais</h3>
+    <table id="signals-table">
+      <thead><tr><th>Ativo</th><th>Dir</th><th>Score</th><th>TF</th></tr></thead>
+      <tbody id="signals-body"></tbody>
+    </table>
+  </div>
+</div>
+
+<script>
+const BASE = '';
+let equityChart, hourlyChart, wfChart, varChart;
+
+function fmt(v, decimals=2, prefix='') {
+  if (v === null || v === undefined) return '—';
+  const n = parseFloat(v);
+  return prefix + (n >= 0 ? '+' : '') + n.toFixed(decimals);
+}
+
+function colorClass(v) { return parseFloat(v) >= 0 ? 'green' : 'red'; }
+
+function makeChart(id, type, data, options={}) {
+  const ctx = document.getElementById(id).getContext('2d');
+  return new Chart(ctx, { type, data, options: { responsive: true, plugins: { legend: { display: false } }, ...options } });
+}
+
+// ── Fetch helpers ─────────────────────────────────────────────────────────────
+async function get(url) {
+  try { return await (await fetch(BASE + url)).json(); }
+  catch { return null; }
+}
+
+// ── Charts init ───────────────────────────────────────────────────────────────
+function initCharts() {
+  const dark = { color: '#8b949e', grid: { color: '#21262d' } };
+
+  equityChart = makeChart('equityChart', 'line',
+    { labels: [], datasets: [{ data: [], borderColor: '#3fb950', borderWidth: 2, fill: true,
+      backgroundColor: 'rgba(63,185,80,0.1)', tension: 0.3, pointRadius: 0 }] },
+    { scales: { x: dark, y: dark } }
+  );
+
+  hourlyChart = makeChart('hourlyChart', 'bar',
+    { labels: Array.from({length:24}, (_,i) => i+'h'),
+      datasets: [{ data: Array(24).fill(0), backgroundColor: '#58a6ff55', borderColor: '#58a6ff', borderWidth: 1 }] },
+    { scales: { x: dark, y: dark } }
+  );
+
+  wfChart = makeChart('wfChart', 'bar',
+    { labels: [], datasets: [
+      { label: 'PF', data: [], backgroundColor: '#3fb95077' },
+      { label: 'WinRate', data: [], backgroundColor: '#58a6ff55' }
+    ] },
+    { scales: { x: dark, y: { ...dark, beginAtZero: true } }, plugins: { legend: { display: true, labels: { color: '#8b949e' } } } }
+  );
+
+  varChart = makeChart('varChart', 'doughnut',
+    { labels: ['VaR Usado', 'Disponível'],
+      datasets: [{ data: [0, 100], backgroundColor: ['#f8514955', '#3fb95033'], borderColor: ['#f85149', '#3fb950'], borderWidth: 1 }] },
+    { plugins: { legend: { labels: { color: '#8b949e', font: { size: 11 } } } } }
+  );
+}
+
+// Variáveis locais para controle de concorrência e estado das configurações
+let userInteracting = false;
+let interactionTimeout = null;
+
+function markUserInteracting() {
+  userInteracting = true;
+  if (interactionTimeout) clearTimeout(interactionTimeout);
+  interactionTimeout = setTimeout(() => {
+    userInteracting = false;
+  }, 10000); // 10s sem digitação libera a atualização vinda do backend
+}
+
+async function proposeChange() {
+  markUserInteracting();
+  
+  const mode = document.getElementById('cfg-mode').value;
+  const banca = parseFloat(document.getElementById('cfg-banca').value) || 0;
+  const risco = parseFloat(document.getElementById('cfg-risco').value) || 0;
+  const daily_target = parseFloat(document.getElementById('cfg-target').value) || 0;
+  const leverage = parseInt(document.getElementById('cfg-leverage').value) || 0;
+  const perfil = document.getElementById('cfg-perfil').value;
+
+  // Habilita visualmente as alterações pendentes
+  document.getElementById('pending-alert').style.display = 'inline-block';
+  document.getElementById('btn-apply').disabled = false;
+
+  const url = `/config/propose?mode=${encodeURIComponent(mode)}&banca=${banca}&risco=${risco}&daily_target=${daily_target}&leverage=${leverage}&perfil=${perfil}`;
+  await fetch(url, { method: 'POST' });
+}
+
+async function approveConfig() {
+  try {
+    const res = await fetch('/config/approve', { method: 'POST' });
+    const data = await res.json();
+    if (data.status === 'approved') {
+      document.getElementById('pending-alert').style.display = 'none';
+      document.getElementById('btn-apply').disabled = true;
+      userInteracting = false;
+      await updateStatus();
+      alert('Configurações aplicadas com sucesso!');
+    }
+  } catch (err) {
+    console.error(err);
+    alert('Erro ao aprovar configurações.');
+  }
+}
+
+// ── Update functions ──────────────────────────────────────────────────────────
+async function updateStatus() {
+  const data = await get('/auto/status');
+  if (!data) return;
+
+  // Atualiza crachás de status no topo
+  document.getElementById('real-mode-badge').textContent = `Real Mode: ${data.real_running_mode || '—'}`;
+  document.getElementById('active-strategy-badge').textContent = `Strategy: ${data.active_strategy || '—'}`;
+  document.getElementById('telegram-state-badge').textContent = `Telegram: ${data.telegram_state || '—'}`;
+
+  const paused = data.paper_trading || data.auto_paused;
+  const sb = document.getElementById('status-badge');
+  sb.textContent = paused ? 'PAUSADO' : 'LIVE';
+  sb.className = 'badge ' + (paused ? 'paused' : 'live');
+
+  document.getElementById('open-trades').textContent = data.open_trades ?? '—';
+  document.getElementById('banca').textContent = 'Banca: $' + (data.banca_usdt ?? '—');
+
+  const pnl = data.daily_pnl;
+  const pnlEl = document.getElementById('daily-pnl');
+  pnlEl.textContent = pnl !== undefined ? fmt(pnl, 2, '$') : '—';
+  pnlEl.className = 'value ' + colorClass(pnl);
+
+  const target = data.daily_target_usdt;
+  document.getElementById('daily-meta').textContent = target > 0 ? `Meta: $${target}` : 'Sem meta';
+  document.getElementById('last-update').textContent = new Date().toLocaleTimeString('pt-BR');
+
+  // WS
+  const wsDot = document.getElementById('ws-dot');
+  const wfeed = data.ws_feed || {};
+  const wsOk = wfeed.kline_feed_running || wfeed.mark_price_running;
+  wsDot.className = 'dot ' + (wsOk ? 'green' : 'red');
+  document.getElementById('ws-status').textContent = 'WS: ' + (wsOk ? 'ON' : 'OFF');
+
+  // Atualiza os inputs do painel apenas se o usuário não estiver interagindo ativamente
+  if (!userInteracting) {
+    if (data.operation_mode) document.getElementById('cfg-mode').value = data.operation_mode;
+    if (data.banca_usdt !== undefined) document.getElementById('cfg-banca').value = data.banca_usdt;
+    if (data.exposure_pct !== undefined) document.getElementById('cfg-risco').value = data.exposure_pct;
+    if (data.daily_target_usdt !== undefined) document.getElementById('cfg-target').value = data.daily_target_usdt;
+    if (data.grid_leverage !== undefined) document.getElementById('cfg-leverage').value = data.grid_leverage;
+    if (data.current_mode) document.getElementById('cfg-perfil').value = data.current_mode;
+
+    // Se houver alterações pendentes no backend
+    if (data.pending_config && Object.keys(data.pending_config).length > 0) {
+      document.getElementById('pending-alert').style.display = 'inline-block';
+      document.getElementById('btn-apply').disabled = false;
+    } else {
+      document.getElementById('pending-alert').style.display = 'none';
+      document.getElementById('btn-apply').disabled = true;
+    }
+  }
+}
+
+async function updatePerformance() {
+  const perf = await get('/performance');
+  if (!perf) return;
+
+  const wr = parseFloat(perf.win_rate || 0);
+  const wrEl = document.getElementById('win-rate');
+  wrEl.textContent = (wr * 100).toFixed(1) + '%';
+  wrEl.className = 'value ' + (wr >= 0.5 ? 'green' : 'red');
+  document.getElementById('win-rate-sub').textContent = `${perf.total_wins ?? 0}W / ${perf.total_losses ?? 0}L`;
+
+  const pf = parseFloat(perf.profit_factor || 0);
+  const pfEl = document.getElementById('profit-factor');
+  pfEl.textContent = pf.toFixed(2);
+  pfEl.className = 'value ' + (pf >= 1 ? 'green' : 'red');
+  document.getElementById('total-trades').textContent = `${perf.total_trades ?? 0} trades`;
+}
+
+async function updateEquityCurve() {
+  const hist = await get('/trades/history?limit=60');
+  if (!hist || !hist.trades) return;
+  const trades = hist.trades.reverse();
+  let cum = 0;
+  const labels = [];
+  const vals = [];
+  trades.forEach((t, i) => {
+    cum += parseFloat(t.pnl_usdt || 0);
+    labels.push(i + 1);
+    vals.push(parseFloat(cum.toFixed(2)));
+  });
+  equityChart.data.labels = labels;
+  equityChart.data.datasets[0].data = vals;
+  equityChart.update('none');
+
+  // Hourly heatmap
+  const hourly = Array(24).fill(0);
+  const hourlyCount = Array(24).fill(0);
+  trades.forEach(t => {
+    const dt = new Date(t.opened_at || t.closed_at || '');
+    const h = dt.getHours();
+    if (!isNaN(h)) {
+      hourly[h] += parseFloat(t.pnl_usdt || 0);
+      hourlyCount[h]++;
+    }
+  });
+  hourlyChart.data.datasets[0].data = hourly.map(v => parseFloat(v.toFixed(2)));
+  hourlyChart.data.datasets[0].backgroundColor = hourly.map(v => v >= 0 ? '#3fb95055' : '#f8514955');
+  hourlyChart.data.datasets[0].borderColor = hourly.map(v => v >= 0 ? '#3fb950' : '#f85149');
+  hourlyChart.update('none');
+}
+
+async function updateOpenTrades() {
+  const data = await get('/trades/active');
+  const tbody = document.getElementById('trades-body');
+  if (!data || !data.trades || data.trades.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="5" style="color:var(--muted)">Sem posições abertas</td></tr>';
+    return;
+  }
+  tbody.innerHTML = data.trades.map(t => {
+    const pnl = parseFloat(t.pnl_pct || 0);
+    const cls = pnl >= 0 ? 'green' : 'red';
+    return `<tr>
+      <td><strong>${t.asset}</strong></td>
+      <td class="${t.direction === 'LONG' ? 'green' : 'red'}">${t.direction}</td>
+      <td>$${parseFloat(t.entry_price || 0).toFixed(4)}</td>
+      <td class="${cls}">${fmt(pnl, 2)}%</td>
+      <td style="color:var(--muted)">$${parseFloat(t.stop_loss || 0).toFixed(4)}</td>
+    </tr>`;
+  }).join('');
+}
+
+async function updateRiskMetrics() {
+  const risk = await get('/risk/metrics');
+  if (!risk) return;
+
+  const sh = risk.sharpe !== null ? risk.sharpe?.toFixed(2) : '—';
+  const so = risk.sortino !== null ? risk.sortino?.toFixed(2) : '—';
+  const soClass = risk.sortino !== null ? (risk.sortino >= 1 ? 'green' : risk.sortino >= 0 ? 'yellow' : 'red') : '';
+
+  document.getElementById('sortino-status').textContent = `Sortino: ${so}`;
+  document.getElementById('sortino-status').style.color = `var(--${soClass || 'muted'})`;
+
+  document.getElementById('risk-content').innerHTML = `
+    <div>Sharpe: <strong class="${parseFloat(sh) >= 1 ? 'green' : parseFloat(sh) >= 0 ? 'yellow' : 'red'}">${sh}</strong></div>
+    <div>Sortino: <strong class="${soClass}">${so}</strong></div>
+    <div>Trades sessão: <strong>${risk.n ?? risk.session_returns_count ?? 0}</strong></div>
+    <div>Auto-pausado: <strong class="${risk.auto_paused ? 'red' : 'green'}">${risk.auto_paused ? 'SIM' : 'NÃO'}</strong></div>
+    <div>Limite Sortino: <strong>${risk.sortino_threshold ?? 0.8}</strong></div>
+  `;
+}
+
+async function updatePortfolioRisk() {
+  const data = await get('/portfolio/risk');
+  if (!data) return;
+
+  const varPct = parseFloat(data.var_pct || 0);
+  const limit  = parseFloat(data.limit_pct || 5);
+  const used   = Math.min(varPct, limit);
+
+  varChart.data.datasets[0].data = [used, Math.max(0, limit - used)];
+  varChart.update('none');
+
+  const ok = data.within_limit;
+  document.getElementById('var-detail').innerHTML = `
+    VaR: <strong class="${ok ? 'green' : 'red'}">${varPct.toFixed(2)}%</strong> / ${limit}% |
+    Long: $${data.long_exposure_usdt ?? 0} | Short: $${data.short_exposure_usdt ?? 0}
+  `;
+  document.getElementById('var-status').textContent = `VaR: ${varPct.toFixed(1)}%`;
+  document.getElementById('var-status').style.color = ok ? 'var(--green)' : 'var(--red)';
+}
+
+async function updateWalkForward() {
+  const wf = await get('/walk_forward');
+  if (!wf || !wf.windows || wf.windows.length === 0) return;
+
+  const rec = document.getElementById('wf-recommendation');
+  rec.textContent = wf.recommendation || '';
+  rec.style.color = wf.overall_status === 'DEGRADING' ? 'var(--red)' :
+                    wf.overall_status === 'STABLE'    ? 'var(--green)' : 'var(--yellow)';
+
+  const labels = wf.windows.map(w => w.start.slice(5));
+  const pfs    = wf.windows.map(w => w.profit_factor);
+  const wrs    = wf.windows.map(w => w.win_rate_pct);
+
+  wfChart.data.labels = labels;
+  wfChart.data.datasets[0].data = pfs;
+  wfChart.data.datasets[0].backgroundColor = pfs.map(v => v >= 1 ? '#3fb95077' : '#f8514955');
+  wfChart.data.datasets[1].data = wrs;
+  wfChart.update('none');
+}
+
+async function updateSignals() {
+  const data = await get('/signals/latest');
+  if (!data || !data.signals) return;
+  const tbody = document.getElementById('signals-body');
+  const top = (data.signals || []).slice(0, 6);
+  tbody.innerHTML = top.map(s => {
+    const score = parseFloat(s.confidence || s.score || 0);
+    const cls = score >= 75 ? 'green' : score >= 60 ? 'yellow' : 'muted';
+    return `<tr>
+      <td>${s.asset || s.symbol}</td>
+      <td class="${s.direction === 'LONG' ? 'green' : 'red'}">${s.direction}</td>
+      <td class="${cls}"><strong>${score.toFixed(0)}</strong></td>
+      <td style="color:var(--muted)">${s.timeframe || '—'}</td>
+    </tr>`;
+  }).join('');
+}
+
+async function updateFearGreed() {
+  const data = await get('/fear_greed');
+  if (!data) return;
+  const v = data.value;
+  const lbl = data.label || data.classification || '';
+  const cls = v <= 25 ? 'green' : v <= 45 ? 'blue' : v <= 65 ? 'muted' : v <= 80 ? 'yellow' : 'red';
+  document.getElementById('fg-status').innerHTML = `F&G: <strong class="${cls}">${v} (${lbl})</strong>`;
+}
+
+async function updateRegime() {
+  const data = await get('/regime');
+  if (!data) return;
+  const r = data.regime || data.current_regime || 'NEUTRAL';
+  document.getElementById('regime-status').innerHTML =
+    `Regime: <span class="regime-badge ${r}">${r}</span> ADX:${data.adx ?? '—'}`;
+}
+
+async function updateML() {
+  const data = await get('/ml/status');
+  if (!data) return;
+  const ready = data.models_ready || data.global_model;
+  document.getElementById('ml-dot').className = 'dot ' + (ready ? 'green' : 'yellow');
+  document.getElementById('ml-status').textContent = `ML: ${ready ? 'Pronto' : 'Treinando'} (${data.total_samples ?? 0} amostras)`;
+}
+
+// ── Main loop ─────────────────────────────────────────────────────────────────
+async function updateAll() {
+  await Promise.allSettled([
+    updateStatus(),
+    updatePerformance(),
+    updateOpenTrades(),
+    updateRiskMetrics(),
+    updatePortfolioRisk(),
+    updateSignals(),
+    updateFearGreed(),
+    updateRegime(),
+    updateML(),
+  ]);
+}
+
+async function updateSlow() {
+  await Promise.allSettled([
+    updateEquityCurve(),
+    updateWalkForward(),
+  ]);
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+  initCharts();
+  updateAll();
+  updateSlow();
+  setInterval(updateAll, 5000);   // rápido: a cada 5s
+  setInterval(updateSlow, 30000); // lento: a cada 30s
+});
+</script>
+</body>
+</html>

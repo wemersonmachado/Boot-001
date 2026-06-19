@@ -1,0 +1,728 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<title>Trader 001 — Fluxo Completo</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: #0d1117;
+    font-family: 'Segoe UI', system-ui, sans-serif;
+    color: #e6edf3;
+    padding: 20px;
+    min-height: 100vh;
+  }
+
+  .title {
+    text-align: center;
+    font-size: 18px;
+    font-weight: 700;
+    color: #58a6ff;
+    letter-spacing: 2px;
+    margin-bottom: 6px;
+  }
+  .subtitle {
+    text-align: center;
+    font-size: 11px;
+    color: #8b949e;
+    margin-bottom: 24px;
+    letter-spacing: 1px;
+  }
+
+  .diagram {
+    display: flex;
+    flex-direction: column;
+    gap: 0;
+    max-width: 900px;
+    margin: 0 auto;
+  }
+
+  .row {
+    display: flex;
+    align-items: stretch;
+    gap: 0;
+  }
+
+  .arrow-down {
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    height: 32px;
+    position: relative;
+  }
+  .arrow-down::after {
+    content: '';
+    position: absolute;
+    left: 50%;
+    top: 0; bottom: 0;
+    width: 2px;
+    background: #30363d;
+    transform: translateX(-50%);
+  }
+  .arrow-down span {
+    background: #0d1117;
+    z-index: 1;
+    padding: 0 4px;
+    font-size: 18px;
+    color: #58a6ff;
+  }
+
+  .arrow-right {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 32px;
+    flex-shrink: 0;
+    color: #58a6ff;
+    font-size: 18px;
+  }
+
+  .block {
+    border-radius: 10px;
+    padding: 12px 14px;
+    flex: 1;
+    cursor: pointer;
+    transition: transform 0.15s, box-shadow 0.15s;
+    position: relative;
+    border: 1px solid transparent;
+  }
+  .block:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 6px 20px rgba(0,0,0,0.4);
+  }
+  .block .bicon { font-size: 22px; display: block; margin-bottom: 4px; }
+  .block .btitle { font-size: 12px; font-weight: 700; letter-spacing: 0.5px; }
+  .block .bsub { font-size: 10px; color: #8b949e; margin-top: 3px; line-height: 1.4; }
+  .block .badge {
+    position: absolute;
+    top: 8px; right: 8px;
+    font-size: 9px;
+    padding: 2px 6px;
+    border-radius: 20px;
+    font-weight: 700;
+    letter-spacing: 0.5px;
+  }
+
+  .blue   { background: #0c2040; border-color: #1f6feb; }
+  .blue   .btitle { color: #58a6ff; }
+  .green  { background: #0d2b1b; border-color: #238636; }
+  .green  .btitle { color: #3fb950; }
+  .orange { background: #2b1a00; border-color: #9e6a03; }
+  .orange .btitle { color: #e3b341; }
+  .purple { background: #1a0d2b; border-color: #8957e5; }
+  .purple .btitle { color: #bc8cff; }
+  .red    { background: #2b0d0d; border-color: #da3633; }
+  .red    .btitle { color: #f85149; }
+  .teal   { background: #0d1f2b; border-color: #1d7b8a; }
+  .teal   .btitle { color: #39d0e0; }
+  .gray   { background: #161b22; border-color: #30363d; }
+  .gray   .btitle { color: #8b949e; }
+
+  .badge-1h  { background: #1f6feb22; color: #58a6ff; border: 1px solid #1f6feb; }
+  .badge-10s { background: #23863622; color: #3fb950; border: 1px solid #238636; }
+  .badge-30s { background: #9e6a0322; color: #e3b341; border: 1px solid #9e6a03; }
+  .badge-live{ background: #8957e522; color: #bc8cff; border: 1px solid #8957e5; }
+  .badge-evt { background: #da363322; color: #f85149; border: 1px solid #da3633; }
+
+  .popup-overlay {
+    display: none;
+    position: fixed;
+    inset: 0;
+    background: rgba(0,0,0,0.7);
+    z-index: 100;
+    justify-content: center;
+    align-items: center;
+  }
+  .popup-overlay.active { display: flex; }
+  .popup {
+    background: #161b22;
+    border: 1px solid #30363d;
+    border-radius: 14px;
+    padding: 24px;
+    max-width: 420px;
+    width: 90%;
+    position: relative;
+  }
+  .popup h3 { font-size: 15px; color: #58a6ff; margin-bottom: 12px; }
+  .popup ul { list-style: none; padding: 0; }
+  .popup ul li {
+    font-size: 12px;
+    color: #c9d1d9;
+    padding: 5px 0;
+    border-bottom: 1px solid #21262d;
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+  }
+  .popup ul li:last-child { border-bottom: none; }
+  .popup ul li .dot {
+    width: 6px; height: 6px;
+    border-radius: 50%;
+    margin-top: 4px;
+    flex-shrink: 0;
+  }
+  .popup .close-btn {
+    position: absolute;
+    top: 12px; right: 14px;
+    background: none; border: none;
+    color: #8b949e; font-size: 18px;
+    cursor: pointer; line-height: 1;
+  }
+  .popup .close-btn:hover { color: #f85149; }
+  .popup .tip {
+    margin-top: 12px;
+    font-size: 11px;
+    color: #8b949e;
+    background: #0d1117;
+    padding: 8px 10px;
+    border-radius: 6px;
+    border-left: 3px solid #58a6ff;
+  }
+
+  .legend {
+    display: flex;
+    gap: 16px;
+    justify-content: center;
+    flex-wrap: wrap;
+    margin-top: 20px;
+  }
+  .legend-item {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 10px;
+    color: #8b949e;
+  }
+  .legend-dot { width: 10px; height: 10px; border-radius: 3px; }
+
+  .phase-label {
+    text-align: center;
+    font-size: 9px;
+    font-weight: 700;
+    letter-spacing: 2px;
+    color: #30363d;
+    margin: 4px 0;
+    text-transform: uppercase;
+  }
+
+  @keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.5; }
+  }
+  .live-dot {
+    display: inline-block;
+    width: 7px; height: 7px;
+    border-radius: 50%;
+    background: #3fb950;
+    animation: pulse 1.5s infinite;
+    margin-right: 4px;
+    vertical-align: middle;
+  }
+
+  .hint {
+    text-align: center;
+    font-size: 10px;
+    color: #484f58;
+    margin-top: 16px;
+  }
+</style>
+</head>
+<body>
+
+<div class="title">&#9889; TRADER 001 &mdash; FLUXO COMPLETO</div>
+<div class="subtitle"><span class="live-dot"></span>CLIQUE EM QUALQUER BLOCO PARA DETALHES</div>
+
+<div class="diagram">
+
+  <div class="phase-label">&mdash; FASE 1: COLETA DE DADOS &mdash;</div>
+  <div class="row">
+    <div class="block blue" onclick="show('universe')">
+      <span class="bicon">&#127760;</span>
+      <div class="btitle">Universe Builder</div>
+      <div class="bsub">~400 pares USDT &middot; $20M+ &middot; Score 8 metricas</div>
+      <span class="badge badge-1h">1h</span>
+    </div>
+    <div class="arrow-right">&rarr;</div>
+    <div class="block teal" onclick="show('ws')">
+      <span class="bicon">&#128225;</span>
+      <div class="btitle">WebSocket Feed</div>
+      <div class="bsub">Binance Futures &middot; kline 5m &middot; markPrice &middot; 10 simbolos</div>
+      <span class="badge badge-live">LIVE</span>
+    </div>
+    <div class="arrow-right">&rarr;</div>
+    <div class="block orange" onclick="show('news')">
+      <span class="bicon">&#128240;</span>
+      <div class="btitle">News + Fear&amp;Greed</div>
+      <div class="bsub">Sentimento &middot; Funding Rate &middot; Open Interest &middot; L/S ratio</div>
+      <span class="badge badge-30s">30min</span>
+    </div>
+  </div>
+
+  <div class="arrow-down"><span>&darr;</span></div>
+
+  <div class="phase-label">&mdash; FASE 2: FILTRO DO UNIVERSO &mdash;</div>
+  <div class="row">
+    <div class="block purple" onclick="show('filter')">
+      <span class="bicon">&#128269;</span>
+      <div class="btitle">Filtro Dinamico</div>
+      <div class="bsub">Volume crescendo &middot; OI &middot; Trades/h &middot; Momentum &plusmn;3% &middot; Funding extremo</div>
+      <span class="badge badge-1h">1h</span>
+    </div>
+    <div class="arrow-right">&rarr;</div>
+    <div class="block green" onclick="show('radar')">
+      <span class="bicon">&#127919;</span>
+      <div class="btitle">Radar Ativo</div>
+      <div class="bsub">Score &ge; 4 entra &middot; Max 80 ativos &middot; Sai se vol &lt; $20M por 48h</div>
+      <span class="badge badge-1h">dinamico</span>
+    </div>
+  </div>
+
+  <div class="arrow-down"><span>&darr;</span></div>
+
+  <div class="phase-label">&mdash; FASE 3: ANALISE TECNICA (cada 10-60s) &mdash;</div>
+  <div class="row">
+    <div class="block blue" onclick="show('ema')">
+      <span class="bicon">&#128200;</span>
+      <div class="btitle">Trend EMA</div>
+      <div class="bsub">EMA 9/21/55/200 &middot; Golden/Death Cross &middot; Slope</div>
+      <span class="badge badge-10s">25%</span>
+    </div>
+    <div class="arrow-right">&rarr;</div>
+    <div class="block teal" onclick="show('momentum')">
+      <span class="bicon">&#9889;</span>
+      <div class="btitle">Momentum</div>
+      <div class="bsub">Stoch RSI &middot; MACD &middot; RSI divergencia &middot; Bollinger</div>
+      <span class="badge badge-10s">20%</span>
+    </div>
+    <div class="arrow-right">&rarr;</div>
+    <div class="block orange" onclick="show('volume')">
+      <span class="bicon">&#128202;</span>
+      <div class="btitle">Volume + CVD</div>
+      <div class="bsub">Volume spike &middot; Buy/sell pressure &middot; Aceleracao</div>
+      <span class="badge badge-10s">20%</span>
+    </div>
+  </div>
+
+  <div class="arrow-down"><span>&darr;</span></div>
+
+  <div class="row">
+    <div class="block green" onclick="show('sr')">
+      <span class="bicon">&#127956;</span>
+      <div class="btitle">Suporte &amp; Resistencia</div>
+      <div class="bsub">Swing highs/lows &middot; OB/FVG V6 &middot; BOS &middot; Pivots</div>
+      <span class="badge badge-10s">15%</span>
+    </div>
+    <div class="arrow-right">&rarr;</div>
+    <div class="block purple" onclick="show('fib')">
+      <span class="bicon">&#127744;</span>
+      <div class="btitle">Fibonacci + Regime</div>
+      <div class="bsub">61.8% &middot; ADX &middot; ATR &middot; TRENDING/RANGING/VOLATILE</div>
+      <span class="badge badge-10s">10%</span>
+    </div>
+    <div class="arrow-right">&rarr;</div>
+    <div class="block teal" onclick="show('funding')">
+      <span class="bicon">&#128185;</span>
+      <div class="btitle">Funding + OI</div>
+      <div class="bsub">Funding rate extremo &middot; OI crescente &middot; Macro cycle</div>
+      <span class="badge badge-10s">10%</span>
+    </div>
+  </div>
+
+  <div class="arrow-down"><span>&darr;</span></div>
+
+  <div class="phase-label">&mdash; FASE 4: SCORE + FILTROS &mdash;</div>
+  <div class="row">
+    <div class="block orange" onclick="show('score')">
+      <span class="bicon">&#129518;</span>
+      <div class="btitle">Score Engine</div>
+      <div class="bsub">Score 0-100 &middot; NORMAL &ge;75 &middot; AGGRESSIVE &ge;60 &middot; R:R minimo</div>
+    </div>
+    <div class="arrow-right">&rarr;</div>
+    <div class="block purple" onclick="show('ml')">
+      <span class="bicon">&#129302;</span>
+      <div class="btitle">ML Boost</div>
+      <div class="bsub">RandomForest + XGBoost &middot; &plusmn;10pts &middot; Treina com trades fechados</div>
+    </div>
+    <div class="arrow-right">&rarr;</div>
+    <div class="block red" onclick="show('risk')">
+      <span class="bicon">&#128737;</span>
+      <div class="btitle">Risk Manager</div>
+      <div class="bsub">Portfolio VaR &middot; Correlacao &middot; Alavancagem dinamica &middot; Sortino</div>
+    </div>
+  </div>
+
+  <div class="arrow-down"><span>&darr;</span></div>
+
+  <div class="phase-label">&mdash; FASE 5: MODO DE OPERACAO &mdash;</div>
+  <div class="row">
+    <div class="block gray" onclick="show('sinais')">
+      <span class="bicon">&#128226;</span>
+      <div class="btitle">SINAIS</div>
+      <div class="bsub">So alerta Telegram &middot; Sem trade</div>
+    </div>
+    <div class="arrow-right" style="color:#30363d">|</div>
+    <div class="block blue" onclick="show('supervised')">
+      <span class="bicon">&#128065;</span>
+      <div class="btitle">SUPERVISED</div>
+      <div class="bsub">Telegram + aguarda aprovacao</div>
+    </div>
+    <div class="arrow-right" style="color:#30363d">|</div>
+    <div class="block green" onclick="show('autonomous')">
+      <span class="bicon">&#129302;</span>
+      <div class="btitle">AUTONOMOUS</div>
+      <div class="bsub">Executa e notifica</div>
+    </div>
+    <div class="arrow-right" style="color:#30363d">|</div>
+    <div class="block orange" onclick="show('grid')">
+      <span class="bicon">&#9889;</span>
+      <div class="btitle">GRID</div>
+      <div class="bsub">Ciclos BTC/ETH/SOL &middot; alvo $5/ciclo</div>
+    </div>
+  </div>
+
+  <div class="arrow-down"><span>&darr;</span></div>
+
+  <div class="phase-label">&mdash; FASE 6: EXECUCAO + GESTAO &mdash;</div>
+  <div class="row">
+    <div class="block green" onclick="show('exec')">
+      <span class="bicon">&#128176;</span>
+      <div class="btitle">Execucao Binance</div>
+      <div class="bsub">Open/Close &middot; SL dinamico &middot; Scale-out 35/35/30%</div>
+    </div>
+    <div class="arrow-right">&rarr;</div>
+    <div class="block orange" onclick="show('trailing')">
+      <span class="bicon">&#127919;</span>
+      <div class="btitle">Trailing Stop</div>
+      <div class="bsub">+3%&rarr;BE &middot; +5%&rarr;+2% &middot; +10%&rarr;+6.5% &middot; +15%&rarr;+10%</div>
+    </div>
+    <div class="arrow-right">&rarr;</div>
+    <div class="block teal" onclick="show('telegram')">
+      <span class="bicon">&#9992;</span>
+      <div class="btitle">Telegram Alert</div>
+      <div class="bsub">Qualidade vela &middot; Sinais confirmados &middot; Alavancagem sugerida &middot; Recomendacao</div>
+      <span class="badge badge-evt">SINAL</span>
+    </div>
+  </div>
+
+</div>
+
+<div class="legend">
+  <div class="legend-item"><div class="legend-dot" style="background:#1f6feb"></div>Coleta / Analise</div>
+  <div class="legend-item"><div class="legend-dot" style="background:#238636"></div>Filtro / Execucao</div>
+  <div class="legend-item"><div class="legend-dot" style="background:#9e6a03"></div>Indicadores / Gestao</div>
+  <div class="legend-item"><div class="legend-dot" style="background:#8957e5"></div>ML / Score / Regime</div>
+  <div class="legend-item"><div class="legend-dot" style="background:#da3633"></div>Risco / Protecao</div>
+</div>
+
+<div class="hint">Clique em qualquer bloco para ver os detalhes internos</div>
+
+<div class="popup-overlay" id="overlay" onclick="closePopup(event)">
+  <div class="popup" id="popup">
+    <button class="close-btn" onclick="closeAll()">&#10005;</button>
+    <h3 id="popup-title"></h3>
+    <ul id="popup-list"></ul>
+    <div class="tip" id="popup-tip"></div>
+  </div>
+</div>
+
+<script>
+const data = {
+  universe: {
+    title: "Universe Builder — a cada 1h",
+    color: "#1f6feb",
+    items: [
+      "Varre todos os ~400 pares USDT da Binance Futures",
+      "Filtra minimo $20M de volume em 24h",
+      "Calcula score: volume crescendo, OI, trades/hora, momentum +-3%, funding extremo, L/S ratio desequilibrado",
+      "Score >= 4 entra no radar; Score < 2 por 48h sai",
+      "Maximo de 80 ativos simultaneos (prioriza maior score)",
+      "Salva estado em universe_state.json"
+    ],
+    tip: "Se watchlist manual estiver definida no menu, ignora o universo dinamico."
+  },
+  ws: {
+    title: "WebSocket Feed — tempo real",
+    color: "#39d0e0",
+    items: [
+      "Conectado em wss://fstream.binance.com (stream permanente)",
+      "Recebe kline 5m e markPrice de 10 simbolos principais",
+      "Atualiza cache de candles sem chamar REST API",
+      "Warm-up: aguarda 50 candles antes de liberar analises",
+      "Reconecta automaticamente em caso de queda"
+    ],
+    tip: "Reduz chamadas REST a API em ~80% para os simbolos monitorados."
+  },
+  news: {
+    title: "News + Dados Macro",
+    color: "#e3b341",
+    items: [
+      "Fear & Greed Index — ajuste direction-aware (+10 LONG em panico, -12 LONG em extrema ganancia)",
+      "Crypto news sentiment — classifica BULLISH / BEARISH / NEUTRAL",
+      "Funding rate de todos os pares — extremo >0.05% = sinal",
+      "Open Interest — crescimento >15% em 4h = atividade forte",
+      "Long/Short ratio — desequilibrio >70/30 = sinal de reversao"
+    ],
+    tip: "O Fear & Greed e direction-aware: panico = bom para LONG, ganancia extrema = reduz LONG."
+  },
+  filter: {
+    title: "Filtro do Universo Dinamico",
+    color: "#bc8cff",
+    items: [
+      "Volume 4h crescendo vs periodo anterior (tolerancia 2%)",
+      "Volume spike: 4h atual vs 1.5x do periodo anterior",
+      "Tendencia clara: variacao +-3% nas ultimas 24h",
+      "Tendencia forte: +-8% nas ultimas 24h — score duplo",
+      "Trades/hora: spike de 1.5x vs media",
+      "OI crescendo >5% nas ultimas 4h",
+      "Funding rate extremo: >0.05%",
+      "Long/Short desequilibrado: >70% ou <30%"
+    ],
+    tip: "Volume abaixo de $20M/24h — removido imediatamente, sem tolerancia."
+  },
+  radar: {
+    title: "Radar de Ativos Ativos",
+    color: "#3fb950",
+    items: [
+      "Ativos com score >= 4 entram automaticamente no radar",
+      "Entrada logada: horario, score, razoes, volume 24h",
+      "Permanece enquanto score >= 2 ou algum fator compensar",
+      "Saida automatica: score < 2 por 48h consecutivas",
+      "Saida automatica: volume < $20M sem compensacao",
+      "Saida automatica: inativo por 5 dias",
+      "Endpoint /universe para visualizar radar em tempo real"
+    ],
+    tip: "Maximo de 80 ativos. Se ultrapassar, os de menor score saem."
+  },
+  ema: {
+    title: "Analise de Tendencia — EMAs",
+    color: "#58a6ff",
+    items: [
+      "SCALP (3m/5m): EMA 9/21 crossover + slope + EMA 55 confirma",
+      "DAY/SWING (15m+): EMA 21/55/200 alinhamento",
+      "Golden Cross (EMA 50 > EMA 200): +12pts de bonus",
+      "Death Cross (EMA 50 < EMA 200): -8pts de penalidade",
+      "Bollinger Bands: squeeze detection (largura < 70% da media = expansao iminente)",
+      "Peso: 20% (SCALP) ou 25% (DAY/SWING) do score total"
+    ],
+    tip: "Timeframe curto usa EMA 9/21 (mais sensivel). Swing usa EMA 21/55/200 (mais robusto)."
+  },
+  momentum: {
+    title: "Momentum — Stoch RSI + MACD",
+    color: "#39d0e0",
+    items: [
+      "SCALP: Stochastic RSI (mais sensivel que RSI simples)",
+      "Stoch RSI < 20 + MACD positivo = sinal LONG forte (+40pts)",
+      "DAY/SWING: RSI 14 periodos + MACD histograma",
+      "RSI divergencia oculta/regular: bonus +8 a +15pts",
+      "MACD aceleracao (histograma crescendo): confirma entrada",
+      "Peso: 20% (SCALP) ou 15% (DAY/SWING) do score total"
+    ],
+    tip: "Stoch RSI substitui RSI simples no scalp — reage 2-3 candles antes."
+  },
+  volume: {
+    title: "Volume + CVD (Cumulative Volume Delta)",
+    color: "#e3b341",
+    items: [
+      "Volume atual vs media 20 velas: ratio calculado por candle",
+      "CVD: diferenca acumulada entre volume de compra e venda",
+      "Fase de mercado: Accumulation / Distribution / Breakout / Exhaustion",
+      "Volume spike: >2x media = sinal forte; >3x = sinal muito forte",
+      "Aceleracao de volume vs vela anterior: fator extra de qualidade",
+      "Peso: 20% em todos os timeframes"
+    ],
+    tip: "CVD identifica quem esta no controle: compradores acumulando (bullish) ou vendedores distribuindo (bearish)."
+  },
+  sr: {
+    title: "Suporte, Resistencia + V6 Structural",
+    color: "#3fb950",
+    items: [
+      "S/R classico: ultimos 3 swing highs / swing lows",
+      "Preco < 2% do suporte: +30pts (entrada otima)",
+      "Preco < 6% do suporte: +15pts (entrada boa)",
+      "Order Blocks (OB): zonas institucionais de reversao",
+      "Fair Value Gaps (FVG): gaps de preco nao preenchidos",
+      "BOS (Break of Structure): rompimento confirmado +bonus 50%",
+      "Peso total S/R: ate 65/100 pontos combinados"
+    ],
+    tip: "S/R e o componente mais pesado do score total — sem ele proximo, dificilmente o sinal passa."
+  },
+  fib: {
+    title: "Fibonacci + Regime Detection",
+    color: "#bc8cff",
+    items: [
+      "Fibonacci: 61.8% = +15pts; outros niveis = +5pts",
+      "Regime Detection via ADX + ATR + EMA:",
+      "TRENDING (ADX > 25): favorece sinais na direcao da tendencia",
+      "RANGING (ADX < 20): ajusta SL para lateralizacao",
+      "VOLATILE (ATR > 2x historico): penaliza score, aumenta SL",
+      "Macro Cycle: tendencia de longo prazo -10 a +15pts"
+    ],
+    tip: "Regime VOLATILE reduz score e exige SL mais largo para compensar o ruido."
+  },
+  funding: {
+    title: "Funding Rate + Open Interest",
+    color: "#39d0e0",
+    items: [
+      "Funding extremo positivo (>0.1%): favorece SHORT",
+      "Funding extremo negativo (<-0.05%): favorece LONG",
+      "OI crescendo com preco subindo: tendencia saudavel",
+      "OI caindo com preco subindo: fraqueza (possivel reversao)",
+      "Long/Short ratio: >70% long = mercado alavancado demais — SHORT",
+      "Peso: 10% (SCALP) ou 15% (DAY/SWING)"
+    ],
+    tip: "Funding extremo e um dos melhores contrarian indicators: quando todos estao long, hora de pensar em short."
+  },
+  score: {
+    title: "Score Engine — 0 a 100",
+    color: "#e3b341",
+    items: [
+      "NORMAL: score minimo >= 75, R:R minimo >= 2.5",
+      "AGGRESSIVE: score minimo >= 60, R:R minimo >= 1.7",
+      "Score adaptativo por timeframe (pesos diferentes)",
+      "Bonus candle patterns: doji, engulf, hammer, shooting star (+5 a +15)",
+      "Walk-Forward analysis: classifica janelas GOOD/MARGINAL/BAD",
+      "Monte Carlo: 1000 simulacoes para validar estrategia"
+    ],
+    tip: "Score < minimo = sinal descartado antes mesmo de calcular R:R."
+  },
+  ml: {
+    title: "ML Boost — RandomForest + XGBoost",
+    color: "#bc8cff",
+    items: [
+      "Ensemble: RandomForest + XGBoost com votacao ponderada",
+      "Features: RSI, MACD, ATR, volume ratio, funding, OI, regime",
+      "Ajuste: -10 a +10 pontos no score final",
+      "Treina automaticamente com trades fechados da sessao",
+      "Sem dados suficientes (< 10 trades): ML inativo, score mantido",
+      "Retraining manual via endpoint /ml/retrain"
+    ],
+    tip: "ML nao substitui o score — ele ajusta em +-10pts com base no historico real de trades."
+  },
+  risk: {
+    title: "Risk Manager — Protecoes",
+    color: "#f85149",
+    items: [
+      "Portfolio VaR parametrico 95%: correlacao entre posicoes",
+      "Correlacao: BTC+ETH+SOL = grupo correlato (max 1 simultaneo)",
+      "Sortino Ratio: pausa bot se < 0.8 com 8+ trades",
+      "Anti-martingale: reduz size apos sequencia de perdas (2x->0.75, 4x->0.5, 6x->0.25)",
+      "Max daily loss: para tudo se perder 3% do saldo no dia",
+      "DCA Engine: 3 entradas 30%/35%/35% a 0%/-2%/-4%"
+    ],
+    tip: "Se o Sortino cair abaixo de 0.8, o bot pausa automaticamente e alerta via Telegram."
+  },
+  sinais: {
+    title: "Modo SINAIS",
+    color: "#8b949e",
+    items: [
+      "Nao executa trades — apenas envia alertas",
+      "Envia para o Telegram com grafico de velas",
+      "Alterna NORMAL/AGGRESSIVE a cada ciclo (60s)",
+      "Pump/Dump em canal separado com analise de intensidade",
+      "Cooldown de 10 min por par para evitar spam",
+      "Inclui: qualidade da vela, sinais confirmados, alavancagem sugerida, recomendacao"
+    ],
+    tip: "Modo ideal para aprender o comportamento do bot antes de operar no AUTONOMOUS."
+  },
+  supervised: {
+    title: "Modo SUPERVISED",
+    color: "#58a6ff",
+    items: [
+      "Gera sinal e envia para aprovacao no Telegram",
+      "Botao APROVAR / REJEITAR na mensagem",
+      "Aguarda resposta por ate 5 minutos",
+      "Sem resposta: sinal expirado, nao executa",
+      "Apos aprovacao: executa igual ao AUTONOMOUS",
+      "Permite watchlist personalizada por modo"
+    ],
+    tip: "Ideal para operar com controle total sem precisar monitorar os graficos."
+  },
+  autonomous: {
+    title: "Modo AUTONOMOUS",
+    color: "#3fb950",
+    items: [
+      "Executa trades automaticamente sem confirmacao",
+      "Notifica Telegram apos abertura (mesmo formato do SUPERVISED)",
+      "Monitora e gerencia trades a cada 30s",
+      "Trailing stop em 5 milestones (+3%, +5%, +8%, +10%, +15%)",
+      "Scale-out automatico: fecha 35% em TP1, 35% em TP2, 30% em TP3",
+      "Sincroniza posicoes com a Binance a cada 120s"
+    ],
+    tip: "Modo de maior retorno potencial — requer banca definida e limite de perda diaria configurado."
+  },
+  grid: {
+    title: "Modo GRID",
+    color: "#e3b341",
+    items: [
+      "Pares fixos: BTC, ETH, SOL, HYPE",
+      "Alavancagem 10x, alvo $5 de lucro por ciclo",
+      "Detecta tendencia forte (ADX) e pausa — nao opera contra",
+      "Reinveste 20% do lucro de cada ciclo na banca efetiva",
+      "Maximo 2 trades GRID simultaneos",
+      "Ciclos ilimitados — opera 24/7"
+    ],
+    tip: "Grid pausa automaticamente em tendencia forte e retoma quando o mercado lateraliza."
+  },
+  exec: {
+    title: "Execucao na Binance",
+    color: "#3fb950",
+    items: [
+      "Open position: ordem a mercado com alavancagem calculada",
+      "SL dinamico: baseado em swing recente + margem de seguranca",
+      "TP1, TP2, TP3: calculados via ATR e estrutura do mercado",
+      "Sincronizacao bidirecional: bot <-> Binance a cada 120s",
+      "Recupera trades abertos apos restart do bot",
+      "Execucao paralela: multiplos trades sem bloqueio"
+    ],
+    tip: "recvWindow de 60s evita erros de timestamp em dessincronias de relogio."
+  },
+  trailing: {
+    title: "Trailing Stop — 5 Milestones",
+    color: "#e3b341",
+    items: [
+      "+3% lucro -> move SL para breakeven (+0.5%)",
+      "+5% lucro -> move SL para +2%",
+      "+8% lucro -> move SL para +4%",
+      "+10% lucro -> move SL para +6.5%",
+      "+15% lucro -> move SL para +10%",
+      "Scale-out em cada TP: 35% + 35% + 30%"
+    ],
+    tip: "O trailing nunca retrocede — se atingir +15%, o SL fica em +10% permanentemente ate fechar."
+  },
+  telegram: {
+    title: "Alertas Telegram — @Trader001_WellBot",
+    color: "#39d0e0",
+    items: [
+      "Grafico de velas gerado automaticamente (matplotlib)",
+      "Qualidade da vela: barra visual corpo/range + volume ratio + RSI",
+      "Sinais confirmados: lista do que disparou o sinal",
+      "Alavancagem sugerida: calculada dinamicamente por ativo + score + SL",
+      "Recomendacao: texto contextual baseado em RSI, volume, R:R",
+      "Resumo diario: 23h55 BRT | Resumo semanal: domingo 20h"
+    ],
+    tip: "Comandos: /status /balance /signals /stop /auto /sinais /supervised"
+  }
+};
+
+function show(key) {
+  const d = data[key];
+  if (!d) return;
+  document.getElementById('popup-title').textContent = d.title;
+  const ul = document.getElementById('popup-list');
+  ul.innerHTML = d.items.map(i =>
+    '<li><span class="dot" style="background:' + d.color + '"></span>' + i + '</li>'
+  ).join('');
+  document.getElementById('popup-tip').textContent = '💡 ' + d.tip;
+  document.getElementById('overlay').classList.add('active');
+}
+
+function closeAll() {
+  document.getElementById('overlay').classList.remove('active');
+}
+
+function closePopup(e) {
+  if (e.target === document.getElementById('overlay')) closeAll();
+}
+</script>
+</body>
+</html>
