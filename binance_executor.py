@@ -15,10 +15,19 @@ from models import ActiveTrade, Direction
 
 
 def _force_paper() -> bool:
-    """KILL-SWITCH de segurança: se FORCE_PAPER_TRADING estiver ligada, NENHUMA
-    ordem de ABERTURA real é enviada à Binance — proteção física da conta,
-    independente de qualquer flag/bug no main.py. Fechamento NUNCA é bloqueado."""
-    return os.getenv("FORCE_PAPER_TRADING", "").strip().lower() in ("1", "true", "yes", "on")
+    """KILL-SWITCH de segurança (proteção da conta a qualquer custo).
+
+    Ordens de ABERTURA real (open_trade / DCA) só são permitidas se houver
+    OPT-IN EXPLÍCITO: env ALLOW_REAL_TRADING=true. Por PADRÃO (sem env), toda
+    abertura real é BLOQUEADA e simulada — assim nenhum bug de flag no main.py
+    consegue abrir posição real sozinho. FORCE_PAPER_TRADING=true também força paper.
+    Fechamento de posição (close_position) NUNCA é bloqueado.
+
+    Para voltar a operar REAL: definir ALLOW_REAL_TRADING=true (e não setar FORCE_PAPER_TRADING)."""
+    _truthy = ("1", "true", "yes", "on")
+    force_paper = os.getenv("FORCE_PAPER_TRADING", "").strip().lower() in _truthy
+    allow_real  = os.getenv("ALLOW_REAL_TRADING", "").strip().lower() in _truthy
+    return force_paper or (not allow_real)
 
 
 # ── Cache do cliente Binance — reutiliza instancia TCP por até 5 minutos ─────
