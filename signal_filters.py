@@ -609,20 +609,26 @@ def evaluate_signal(
     # ── 2b. RSI Overbought/Oversold Penalty ──────────────────────────────────
     # Penaliza LONGs com RSI>72 e SHORTs com RSI<28 (-15pts por nível de excesso)
     import re as _re_rsi
-    _rsi_raw = float(signal.get("rsi", 0) or 0)
+    # FIX jun/2026: o sinal carrega o RSI na chave 'rsi_val' (modelo TradeSignal),
+    # não 'rsi'. Em scalp o reason usa "StochRSI K:" (sem "RSI:" parseável), então o
+    # bloqueio ficava DESATIVADO. Agora lê rsi_val/rsi e cai no regex só como último
+    # recurso (excluindo "StochRSI" para não capturar o K errado).
+    _rsi_raw = float(signal.get("rsi_val", 0) or signal.get("rsi", 0) or 0)
     if _rsi_raw == 0:
-        _m_rsi = _re_rsi.search(r'RSI[=\s:]+(\d+\.?\d*)', signal.get("reason", ""), _re_rsi.IGNORECASE)
+        _reason_clean = _re_rsi.sub(r'Stoch[ -]?RSI', '', signal.get("reason", ""), flags=_re_rsi.IGNORECASE)
+        _m_rsi = _re_rsi.search(r'RSI[=\s:]+(\d+\.?\d*)', _reason_clean, _re_rsi.IGNORECASE)
         if _m_rsi:
             _rsi_raw = float(_m_rsi.group(1))
     if _rsi_raw > 0:
-        if "LONG" in direction and _rsi_raw > 72:
-            _rsi_pen = min(20, int((_rsi_raw - 72) * 1.5))
-            score -= _rsi_pen
-            notes.append(f"RSI sobrecomprado {_rsi_raw:.0f} −{_rsi_pen}pts")
-        elif "SHORT" in direction and _rsi_raw < 28:
-            _rsi_pen = min(20, int((28 - _rsi_raw) * 1.5))
-            score -= _rsi_pen
-            notes.append(f"RSI sobrevendido {_rsi_raw:.0f} −{_rsi_pen}pts")
+        # Bloqueio só em EXTREMOS de exaustão (blow-off top / capitulação):
+        # LONG>75 = comprando no topo; SHORT<25 = vendendo no fundo. A faixa 60-75
+        # (momentum saudável) é permitida; o PROX-GATE estrutural cuida do resto.
+        if "LONG" in direction and _rsi_raw > 75:
+            notes.append(f"REJEITADO: RSI sobrecomprado/topo ({_rsi_raw:.0f} > 75)")
+            return _block("RSI sobrecomprado/topo", notes, score)
+        elif "SHORT" in direction and _rsi_raw < 25:
+            notes.append(f"REJEITADO: RSI sobrevendido/fundo ({_rsi_raw:.0f} < 25)")
+            return _block("RSI sobrevendido/fundo", notes, score)
 
     # ── 3. Staleness Decay ────────────────────────────────────────────────────
     gen_ts = float(signal.get("generated_ts", 0) or signal.get("ts", 0))
