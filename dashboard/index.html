@@ -467,6 +467,33 @@ input:checked + .slider:before {
 .ob-hint{display:block;font-size:9px;color:var(--muted);font-weight:600;margin-top:1px}
 .ob.sel .ob-hint{color:var(--gold)}
 .lever-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:7px}
+/* ══════════ MOBILE / SMARTPHONE (≤768px) ══════════ */
+@media(max-width:768px){
+  body{flex-direction:column;height:auto;min-height:100vh;font-size:14px}
+  /* sidebar vira topo, largura total */
+  .wizard{width:100%;min-width:0;max-width:none;border-right:none;
+          border-bottom:1px solid var(--border);overflow:visible}
+  .main{flex:none;width:100%;min-width:0;overflow:visible;padding:12px}
+  /* grids colapsam para caber no celular */
+  .coin-grid{grid-template-columns:1fr 1fr!important}
+  .sg{grid-template-columns:1fr 1fr 1fr!important}
+  .perf-grid{grid-template-columns:1fr 1fr!important}
+  .mie-row,.ts-row{grid-template-columns:1fr!important}
+  .og,.og2,.og3,.qa-grid{grid-template-columns:1fr 1fr!important}
+  .lever-grid,.exec-pills.three,.exec-pills.four{grid-template-columns:1fr 1fr!important}
+  /* cabeçalho e barras empilham */
+  .hdr{flex-direction:column;align-items:flex-start;gap:10px}
+  .periods{gap:16px;flex-wrap:wrap}
+  .hdr-right{flex-wrap:wrap;gap:8px}
+  .pd-alert{max-width:none;min-width:0}
+  .coin-grid .spark,.spark{height:34px}
+}
+/* telas bem pequenas (≤430px) — 1 coluna nos cartões principais */
+@media(max-width:430px){
+  .coin-grid,.perf-grid,.sg{grid-template-columns:1fr 1fr!important}
+  .main{padding:9px}
+  body{font-size:13px}
+}
 </style>
 </head>
 <body>
