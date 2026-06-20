@@ -4128,7 +4128,12 @@ async def dashboard():
     from pathlib import Path as _Path
     html_path = _Path(__file__).parent / "dashboard" / "index.html"
     with open(html_path, "r", encoding="utf-8") as f:
-        return HTMLResponse(content=f.read())
+        # no-store: garante que o navegador (inclusive celular) sempre baixe a
+        # versão mais recente do dashboard, sem ficar preso em cache antigo.
+        return HTMLResponse(content=f.read(), headers={
+            "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+            "Pragma": "no-cache",
+        })
 
 
 # ── Settings & Operation Mode Control ────────────────────────────────────────
