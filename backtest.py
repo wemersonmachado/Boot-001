@@ -62,7 +62,13 @@ def _download_ohlcv(symbol: str, timeframe: str, days: int) -> pd.DataFrame:
         return pd.DataFrame()
     df = pd.concat(rows, ignore_index=True)
     df[["open","high","low","close","volume"]] = df[["open","high","low","close","volume"]].astype(float)
-    df["ts"] = pd.to_datetime(df["ts"], unit="ms", utc=True)
+    # FIX: a Binance mudou o open_time de alguns datasets para MICROSSEGUNDOS (16 dígitos).
+    # Detecta a unidade pela magnitude para não estourar o pd.to_datetime ('overflows').
+    df["ts"] = pd.to_numeric(df["ts"], errors="coerce")
+    df = df.dropna(subset=["ts"])
+    _ts0 = float(df["ts"].iloc[0]) if len(df) else 0.0
+    _unit = "us" if _ts0 >= 1e14 else ("ms" if _ts0 >= 1e11 else "s")
+    df["ts"] = pd.to_datetime(df["ts"].astype("int64"), unit=_unit, utc=True)
     df = df.sort_values("ts").reset_index(drop=True)
     return df
 
