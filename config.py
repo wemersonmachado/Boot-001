@@ -32,9 +32,9 @@ MIN_RR = 2.5
 # CURRENT_MODE (em main.py) seleciona qual perfil está ativo.
 # Eixo ORTOGONAL ao OPERATION_MODE (AUTONOMOUS/SUPERVISED/GRID/SINAIS).
 #
-# CONSERVATIVE: score>=82, RR>=3.0, scan 90s — só majors, risco 0.5%, lev<=10x
-# NORMAL:       score>=75, RR>=2.5, scan 60s — watchlist+trending, risco 1.0%
-# AGGRESSIVE:   score>=60, RR>=1.7, scan 45s — universo dinâmico, risco 1.5%
+# CONSERVATIVE: score>=74, RR>=2.5, scan 90s — risco 0.5%, lev<=10x (5m/15m)
+# NORMAL:       score>=72, RR>=2.0, scan 60s — watchlist+trending, risco 1.0% (3m/5m/15m)
+# AGGRESSIVE:   score>=65, RR>=1.7, scan 45s — universo dinâmico, risco 1.5% (1m/3m/5m/15m)
 DEFAULT_RISK_PROFILE = "NORMAL"   # perfil padrão de inicialização
 
 # Aliases retrocompatíveis
@@ -52,28 +52,28 @@ TRADING_MODE = DEFAULT_RISK_PROFILE
 #   max_spread_pct         → spread bid/ask máximo aceito (gate de liquidez único)
 MODE_SETTINGS = {
     "CONSERVATIVE": {
-        "min_score": 78,         # era 82 — com VRA COMPRESSION subia para 87, praticamente impossível
-        "min_rr": 3.0,
+        "min_score": 74,         # 2026-06-19: 78→74 — mais oportunidades mantendo seletividade
+        "min_rr": 2.5,           # 2026-06-19: 3.0→2.5 — RR 3.0 filtrava quase tudo
         "scan_interval_s": 90,
         "max_open_trades": 3,
         "risk_pct": 0.5,
-        "timeframes": ["5m", "15m"],  # era ["15m"] — adicionado 5m para mais oportunidades
-        "bonus_cap": 12.0,
+        "timeframes": ["5m", "15m"],
+        "bonus_cap": 14.0,       # 2026-06-19: 12→14
         "leverage_cap": 10,
-        "allowed_assets": None,  # era ["BTCUSDT","ETHUSDT","SOLUSDT"] — removido para ampliar universo
-        "max_spread_pct": 0.10,
+        "allowed_assets": None,
+        "max_spread_pct": 0.16,  # 2026-06-19: 0.10→0.16 — liberar mais ativos líquidos
     },
     "NORMAL": {
-        "min_score": 75,
-        "min_rr": 2.5,
+        "min_score": 72,                 # 2026-06-19: 75→72
+        "min_rr": 2.0,                   # 2026-06-19: 2.5→2.0 — principal gargalo de sinais
         "scan_interval_s": 60,
         "max_open_trades": 5,
         "risk_pct": 1.0,
-        "timeframes": ["5m", "15m"],
-        "bonus_cap": 17.0,
+        "timeframes": ["3m", "5m", "15m"],  # 2026-06-19: +3m para mais oportunidades
+        "bonus_cap": 18.0,               # 2026-06-19: 17→18
         "leverage_cap": None,
         "allowed_assets": None,
-        "max_spread_pct": 0.25,
+        "max_spread_pct": 0.35,          # 2026-06-19: 0.25→0.35
     },
     "AGGRESSIVE": {
         "min_score": 65,  # era 60 — floor elevado para reduzir entradas de baixa qualidade

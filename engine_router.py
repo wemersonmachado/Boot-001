@@ -157,10 +157,10 @@ async def _mean_rev_signal(
             return None
 
         sc = SignalScore(
-            total=round(score, 1),
+            total_override=round(score, 1),
             trend=0.0, volume=round(vol_ratio * 20, 1),
             momentum=30.0 if rsi_val < 32 or rsi_val > 68 else 10.0,
-            structure=20.0, funding=0.0
+            market_structure=20.0, funding_oi=0.0
         )
 
         return TradeSignal(
@@ -268,11 +268,11 @@ async def _vdls_signal(
         rr = abs(tp2 - price) / risk if risk > 0 else 2.0
 
         sc = SignalScore(
-            total=round(score, 1),
+            total_override=round(score, 1),
             trend=10.0,
             volume=min(100.0, float(vol.iloc[-1] / (vol.rolling(20).mean().iloc[-1] or 1.0)) * 15.0),
             momentum=40.0,
-            structure=30.0, funding=0.0
+            market_structure=30.0, funding_oi=0.0
         )
 
         return TradeSignal(
@@ -403,10 +403,10 @@ async def _fade_signal(
         rr = abs(tp2 - entry) / abs(sl - entry) if abs(sl - entry) > 0 else 1.0
 
         sc = SignalScore(
-            total=round(score, 1),
+            total_override=round(score, 1),
             trend=0.0, volume=min(100, vol_ratio * 15),
             momentum=min(100, abs(rsi_val - 50) * 2),
-            structure=30.0, funding=0.0  # Estrutura ganha importância com OB
+            market_structure=30.0, funding_oi=0.0  # Estrutura ganha importância com OB
         )
 
         return TradeSignal(
