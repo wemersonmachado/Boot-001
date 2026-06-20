@@ -110,7 +110,8 @@ EXPOSURE_PCT: float = 10.0     # % da banca por trade (padrão 10%)
 TRADES_PER_SESSION: int = 0    # ilimitado (0 = sem limite de trades por sessao)
 DAILY_TARGET_USDT: float = 0.0 # objetivo diário de lucro em USDT (0 = desativado)
 
-PAPER_TRADING: bool = False    # True = simulação sem dinheiro real
+PAPER_TRADING: bool = False    # True = simulação sem dinheiro real (NÃO é pausa!)
+BOT_PAUSED: bool = False        # True = bot pausado (não abre trades). Separado de PAPER_TRADING.
 
 # Sincronização centralizada com o BotState
 from state import state as bot_state
@@ -865,8 +866,9 @@ async def job_auto_trade(signals: list):
     if _effective_mode in ("SINAIS", "GRID"):
         return
 
-    # Bot pausado (PAPER_TRADING=True via /bot/pause): nao abre novos trades reais
-    if PAPER_TRADING:
+    # Bot pausado (BOT_PAUSED via /bot/pause): nao abre novos trades.
+    # OBS: PAPER_TRADING NÃO pausa mais — em paper o fluxo segue e abre trades SIMULADOS.
+    if BOT_PAUSED:
         print("[AUTO] Bot pausado — sem novos trades.")
         return
 
@@ -1844,8 +1846,9 @@ async def job_sinais_scan():
     if not state.sinais_enabled:
         return
 
-    # Se PAPER_TRADING = True (Bot pausado ou parado), desliga envio de sinais!
-    if PAPER_TRADING:
+    # Se o bot está pausado, desliga envio de sinais. (PAPER_TRADING NÃO pausa — em
+    # simulação os sinais/trades simulados continuam sendo enviados ao Telegram.)
+    if BOT_PAUSED:
         return
 
     if OPERATION_MODE != "SINAIS":
@@ -2398,10 +2401,20 @@ async def job_update_trades():
                     await asyncio.to_thread(
                         lambda: close_position(_asset, _dir, _get_binance_client_synced())
                     )
+                    _exit_px   = float(price)
+                    _entry     = float(trade.entry_price)
+                    _qty       = float(trade.size_usdt) / _entry if _entry > 0 else 0.0
+                    
+                    if trade.direction == "LONG":
+                        _pnl_close = (_exit_px - _entry) * _qty * trade.leverage
+                        _pnl_pct   = ((_exit_px - _entry) / _entry) * 100.0 * trade.leverage
+                    else:
+                        _pnl_close = (_entry - _exit_px) * _qty * trade.leverage
+                        _pnl_pct   = ((_entry - _exit_px) / _entry) * 100.0 * trade.leverage
+                        
                     _closed_dict = trade.model_dump()
-                    _pnl_close = float(_closed_dict.get("pnl_usdt", 0))
-                    _pnl_pct   = float(_closed_dict.get("pnl_pct",  0))
-                    _exit_px   = float(_closed_dict.get("current_price") or price)
+                    _closed_dict["pnl_usdt"] = _pnl_close
+                    _closed_dict["pnl_pct"] = _pnl_pct
 
                     # FIX: grava exit_price e PnL real no DB
                     asyncio.create_task(update_trade_close(
@@ -3128,7 +3141,7 @@ async def _job_universe_builder():
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global OPERATION_MODE, EXEC_MODE, DUAL_MODE_ENABLED, SINAIS_ENABLED, PAPER_TRADING
+    global OPERATION_MODE, EXEC_MODE, DUAL_MODE_ENABLED, SINAIS_ENABLED, PAPER_TRADING, BOT_PAUSED
     await init_db()
     print("[TRADER 001] Database initialized")
 
@@ -3146,7 +3159,8 @@ async def lifespan(app: FastAPI):
         EXEC_MODE         = "SINAIS"
         DUAL_MODE_ENABLED = False      # dual mode removido (1 modo por vez)
         SINAIS_ENABLED    = False      # canal de sinais desligado (ocioso)
-        PAPER_TRADING     = False      # bot rodando, porém ocioso (sem modo ativo)
+        BOT_PAUSED        = False      # bot não-pausado; ocioso é garantido por SINAIS/mode
+        # PAPER_TRADING preservado do DB (não force aqui) — simulação é sticky entre restarts.
         set_alerts_paused(False)       # gate liberado; ativação controla o envio
         await save_global_state_to_db()
         print(f"[STARTUP] Boot OCIOSO (single-mode) — aguardando o usuário. Banca: {BANCA_USDT} | Perfil: {CURRENT_MODE}")
@@ -3309,8 +3323,8 @@ async def _process_webhook_signal(symbol: str, direction: Direction, timeframe: 
     print(f"[WEBHOOK] {symbol} {direction} {timeframe}")
 
     # FIX #5: webhook agora respeita os mesmos guards do fluxo normal
-    if PAPER_TRADING:
-        print(f"[WEBHOOK] Bot pausado (PAPER_TRADING) — sinal ignorado")
+    if BOT_PAUSED:
+        print(f"[WEBHOOK] Bot pausado (BOT_PAUSED) — sinal ignorado")
         return
 
     if not _check_daily_loss():
@@ -4260,7 +4274,7 @@ async def set_banca(banca: float):
 @app.post("/settings/mode")
 async def set_operation_mode(mode: str):
     """Define modo de operação: AUTONOMOUS, SUPERVISED ou GRID (aceita slugs pt-BR)."""
-    global OPERATION_MODE, EXEC_MODE, PAPER_TRADING, SINAIS_ENABLED
+    global OPERATION_MODE, EXEC_MODE, PAPER_TRADING, SINAIS_ENABLED, BOT_PAUSED
     _alias = {
         "supervisao": "SUPERVISED", "supervisionado": "SUPERVISED",
         "autonomo": "AUTONOMOUS", "automatico": "AUTONOMOUS",
@@ -4274,8 +4288,9 @@ async def set_operation_mode(mode: str):
     await bot_state.activate_mode(mode, profile=CURRENT_MODE)
     sync_state_to_globals()
     EXEC_MODE = OPERATION_MODE  # espelha o modo único ativo
-    # Ativar modo retoma automaticamente o bot
-    PAPER_TRADING = False
+    # Ativar modo retoma o bot (un-pausa). NÃO mexe em PAPER_TRADING — simulação
+    # é controlada SÓ por /settings/paper_trading (correção do bug que abria ordem real).
+    BOT_PAUSED = False
     # SINAIS só transmite em modo SINAIS; nos demais o canal de sinais fica off.
     SINAIS_ENABLED = (mode == "SINAIS")
     set_alerts_paused(False)  # garante Telegram liberado ao ativar qualquer modo
@@ -4283,10 +4298,11 @@ async def set_operation_mode(mode: str):
     # modo está no ar, mesmo antes de qualquer sinal qualificar nos filtros.
     _tps = TRADES_PER_SESSION if TRADES_PER_SESSION > 0 else "ilimitado"
     if mode == "AUTONOMOUS":
+        _exec_kind = "📝 SIMULADAS (PAPER)" if PAPER_TRADING else "🔴 REAIS"
         msg = "[BOT] Modo AUTONOMO ativado — bot executa trades automaticamente"
         aviso = (f"🤖 AUTÔNOMO ATIVADO (perfil {CURRENT_MODE})\n"
                  f"Banca ${BANCA_USDT:.2f} · {_tps} trades/sessão · alav. {GRID_LEVERAGE}x\n"
-                 f"O bot vai ABRIR E FECHAR ordens REAIS sozinho quando um sinal passar nos filtros.")
+                 f"O bot vai ABRIR E FECHAR ordens {_exec_kind} sozinho quando um sinal passar nos filtros.")
         asyncio.create_task(job_scan_market())  # scan imediato → 1º sinal sai em segundos, não em até 60s
     elif mode == "GRID":
         pairs_str = " | ".join(GRID_PAIRS)
@@ -4850,30 +4866,31 @@ async def get_sparkline(symbol: str, interval: str = "1h", limit: int = 48):
 @app.post("/bot/pause")
 async def pause_bot():
     """Pausa o bot e bloqueia imediatamente todo envio ao Telegram."""
-    global PAPER_TRADING, SINAIS_ENABLED
+    global BOT_PAUSED, SINAIS_ENABLED
     # Aviso ANTES de bloquear o Telegram, senão a própria notificação seria barrada.
     await send_alert(f"⏸️ BOT PAUSADO — sem novas ordens nem sinais (modo {OPERATION_MODE} preservado).")
-    PAPER_TRADING = True
+    BOT_PAUSED = True          # pausa (separado de PAPER_TRADING — não altera simulação)
     SINAIS_ENABLED = False
     set_alerts_paused(True)   # bloqueia QUALQUER envio ao Telegram, inclusive tasks já agendadas
-    print("[BOT] Pausado via dashboard — PAPER_TRADING=True, SINAIS_ENABLED=False, Telegram bloqueado")
+    print("[BOT] Pausado via dashboard — BOT_PAUSED=True, SINAIS_ENABLED=False, Telegram bloqueado")
     await save_global_state_to_db()
-    return {"status": "paused", "paper_trading": True, "sinais_enabled": False}
+    return {"status": "paused", "bot_paused": True, "paper_trading": PAPER_TRADING, "sinais_enabled": False}
 
 
 @app.post("/bot/resume")
 async def resume_bot():
-    """Retoma operacoes reais e libera envio ao Telegram."""
-    global PAPER_TRADING, SINAIS_ENABLED
-    PAPER_TRADING = False
+    """Retoma operacoes e libera envio ao Telegram. NÃO altera PAPER_TRADING (simulação preservada)."""
+    global BOT_PAUSED, SINAIS_ENABLED
+    BOT_PAUSED = False         # un-pausa (NÃO mexe em PAPER_TRADING — preserva simulação)
     # Só reativa sinais se o modo atual justifica — evita SINAIS=True com SUPERVISED/AUTONOMOUS ativo
     if OPERATION_MODE == "SINAIS":
         SINAIS_ENABLED = True
     set_alerts_paused(False)  # libera Telegram
-    print(f"[BOT] Retomado via dashboard — PAPER_TRADING=False, SINAIS_ENABLED={SINAIS_ENABLED}, modo={OPERATION_MODE}")
-    await send_alert(f"▶️ BOT RETOMADO — modo {OPERATION_MODE} ({CURRENT_MODE}) operando normalmente.")
+    print(f"[BOT] Retomado via dashboard — BOT_PAUSED=False, PAPER_TRADING={PAPER_TRADING}, SINAIS_ENABLED={SINAIS_ENABLED}, modo={OPERATION_MODE}")
+    _kind = "SIMULADO (paper)" if PAPER_TRADING else "REAL"
+    await send_alert(f"▶️ BOT RETOMADO — modo {OPERATION_MODE} ({CURRENT_MODE}) · execução {_kind}.")
     await save_global_state_to_db()
-    return {"status": "running", "paper_trading": False, "sinais_enabled": SINAIS_ENABLED}
+    return {"status": "running", "bot_paused": False, "paper_trading": PAPER_TRADING, "sinais_enabled": SINAIS_ENABLED}
 
 
 @app.post("/bot/reset")

@@ -2,6 +2,7 @@
 Binance Futures order execution.
 Uses python-binance with USDT-M Futures.
 """
+import os
 import math
 import time
 import requests as _requests
@@ -11,6 +12,13 @@ from binance.exceptions import BinanceAPIException
 
 from config import BINANCE_API_KEY, BINANCE_SECRET_KEY, BINANCE_TESTNET
 from models import ActiveTrade, Direction
+
+
+def _force_paper() -> bool:
+    """KILL-SWITCH de segurança: se FORCE_PAPER_TRADING estiver ligada, NENHUMA
+    ordem de ABERTURA real é enviada à Binance — proteção física da conta,
+    independente de qualquer flag/bug no main.py. Fechamento NUNCA é bloqueado."""
+    return os.getenv("FORCE_PAPER_TRADING", "").strip().lower() in ("1", "true", "yes", "on")
 
 
 # ── Cache do cliente Binance — reutiliza instancia TCP por até 5 minutos ─────
@@ -144,6 +152,9 @@ def get_position_qty(client, symbol: str, pos_side: str = "BOTH") -> float:
 
 def open_trade(trade: ActiveTrade) -> dict:
     """Open a futures position with SL and TP orders. Suporta One-Way e Hedge Mode."""
+    if _force_paper():
+        print(f"[EXECUTOR][KILL-SWITCH] FORCE_PAPER_TRADING ativo — ABERTURA REAL BLOQUEADA ({trade.asset}). Simulando.")
+        return {"status": "SIMULATED", "trade_id": trade.id, "blocked_by": "FORCE_PAPER_TRADING"}
     if not BINANCE_API_KEY or BINANCE_API_KEY == "your_api_key_here":
         print("[EXECUTOR] Skipping order — no API keys configured (simulation mode)")
         return {"status": "SIMULATED", "trade_id": trade.id}
@@ -445,6 +456,9 @@ def get_binance_trade_history(watchlist: list, hours: int = 24) -> dict:
 
 def execute_dca_order(symbol: str, side: str, qty_usdt: float, new_sl: float, new_tp: float) -> dict:
     """Executes an additional market order for DCA, cancels existing SL/TP, and sets new SL/TP."""
+    if _force_paper():
+        print(f"[EXECUTOR][KILL-SWITCH] FORCE_PAPER_TRADING ativo — DCA REAL BLOQUEADO ({symbol}). Simulando.")
+        return {"status": "SIMULATED", "msg": "FORCE_PAPER_TRADING", "blocked_by": "FORCE_PAPER_TRADING"}
     if not BINANCE_API_KEY or BINANCE_API_KEY == "your_api_key_here":
         return {"status": "SIMULATED", "msg": "Paper trading"}
     
