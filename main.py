@@ -960,6 +960,14 @@ async def job_auto_trade(signals: list):
         if signal.confidence < mode_cfg["min_score"] or signal.rr < mode_cfg["min_rr"]:
             _blk(f"score/rr<min({mode_cfg['min_score']}/{mode_cfg['min_rr']})")
             continue
+        # MACRO RISK-OFF: com BTC caindo forte (<= -1.5% em 1h), só aceita pares premium
+        # (BTC/ETH/SOL). Bloqueia scalp de low-cap, que é triturado quando o mercado desaba.
+        _btc_chg_1h = float(_market_cache.get("btc_change_1h", 0) or 0)
+        if _btc_chg_1h <= -1.5:
+            _base_sym = signal.asset.upper().replace("USDT", "").replace("USD", "")
+            if _base_sym not in ("BTC", "ETH", "SOL"):
+                _blk(f"risk_off_macro(BTC {_btc_chg_1h:.1f}%/1h)")
+                continue
         if not _check_correlation(signal.asset, open_assets, signal.direction.value, open_trades):
             _blk("correlacao_estatica")
             continue
@@ -1501,6 +1509,14 @@ async def job_grid_scan(pairs: list = None):
                 rsi_last    = float(rsi_series.iloc[-1]) if not rsi_series.isna().all() else 50.0
                 strong_up   = e9 > e21 > e55 and close.iloc[-1] > e9
                 strong_down = e9 < e21 < e55 and close.iloc[-1] < e9
+                # [G7] GRID SÓ OPERA EM RANGE: pula tendência forte direcional. Grid acumula
+                # ordens contra um preço que não para de andar e "explode" a conta em trend.
+                # Exige dupla confirmação (EMA forte + regime TRENDING/VOLATILE) p/ não bloquear consolidações.
+                if strong_up or strong_down:
+                    _rg = (regime_detector.get_cache(symbol) or {}).get("regime", "NEUTRAL")
+                    if _rg in ("TRENDING", "VOLATILE"):
+                        print(f"[GRID] {symbol} skip — regime {_rg} (grid só opera em RANGE)")
+                        continue
                 # RELAXADO v2: só bloqueia quando EMA trend forte E RSI confirma
                 # (RSI sobrecomprado ao tentar LONG contra tendência, ou vice-versa)
                 if signal.direction.value == "LONG" and strong_down and rsi_last > 55:
