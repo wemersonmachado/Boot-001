@@ -109,8 +109,9 @@ class BotState:
                 self.sinais_claude_brain = False
                 self.exec_claude_brain = self.claude_brain_enabled
 
-        # Desativa simulação e retoma operação ao mudar de modo de forma consistente
-        self.paper_trading = False
+        # CORREÇÃO DE SEGURANÇA: NÃO desligar paper_trading ao mudar de modo.
+        # (Antes: self.paper_trading=False aqui causava abertura de ordem REAL ao
+        # ativar Autônomo durante teste de simulação.) Paper só muda via /settings/paper_trading.
 
         # Salva o bloco inteiro de estados de uma só vez no banco de dados
         await self.save_key("operation_mode", self.operation_mode)

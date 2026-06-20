@@ -4584,13 +4584,18 @@ def _update_scan_interval():
         print(f"[MODE] Erro ao reajustar scan: {e}")
 
 
+def _profile_alert(name_pt: str, key: str) -> str:
+    _s = MODE_SETTINGS[key]
+    return (f"Perfil {name_pt} ativado — Score>={_s['min_score']}, RR>={_s['min_rr']}, "
+            f"risco {_s['risk_pct']}%, scan {_s['scan_interval_s']}s, TFs {'/'.join(_s['timeframes'])}")
+
 @app.post("/mode/conservative")
 async def set_conservative_mode():
     global CURRENT_MODE
     CURRENT_MODE = "CONSERVATIVE"
     _update_scan_interval()
     await save_global_state_to_db()
-    await send_alert("Perfil CONSERVADOR ativado — Score>=82, RR>=3.0, risco 0.5%, só majors, scan 90s")
+    await send_alert(_profile_alert("CONSERVADOR", "CONSERVATIVE"))
     asyncio.create_task(job_scan_market())
     return {"mode": "CONSERVATIVE", "settings": MODE_SETTINGS["CONSERVATIVE"]}
 
@@ -4601,7 +4606,7 @@ async def set_normal_mode():
     CURRENT_MODE = "NORMAL"
     _update_scan_interval()
     await save_global_state_to_db()
-    await send_alert("Modo NORMAL ativado — Score>=75, RR>=2.5, scan 60s")
+    await send_alert(_profile_alert("NORMAL", "NORMAL"))
     asyncio.create_task(job_scan_market())
     return {"mode": "NORMAL", "settings": MODE_SETTINGS["NORMAL"]}
 
@@ -4612,7 +4617,7 @@ async def set_aggressive_mode():
     CURRENT_MODE = "AGGRESSIVE"
     _update_scan_interval()
     await save_global_state_to_db()
-    await send_alert("Modo AGRESSIVO ativado — Score>=65, RR>=2.0, scan 45s")
+    await send_alert(_profile_alert("AGRESSIVO", "AGGRESSIVE"))
     asyncio.create_task(job_scan_market())
     return {"mode": "AGGRESSIVE", "settings": MODE_SETTINGS["AGGRESSIVE"]}
 
