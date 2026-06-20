@@ -469,11 +469,13 @@ input:checked + .slider:before {
 .lever-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:7px}
 /* ══════════ MOBILE / SMARTPHONE (≤768px) ══════════ */
 @media(max-width:768px){
-  body{flex-direction:column;height:auto;min-height:100vh;font-size:14px}
+  /* libera o scroll: o desktop trava html/body com overflow:hidden+height:100% */
+  html,body{height:auto!important;min-height:100%;overflow:visible!important;overflow-y:auto!important}
+  body{flex-direction:column;font-size:14px;-webkit-overflow-scrolling:touch}
   /* sidebar vira topo, largura total */
   .wizard{width:100%;min-width:0;max-width:none;border-right:none;
-          border-bottom:1px solid var(--border);overflow:visible}
-  .main{flex:none;width:100%;min-width:0;overflow:visible;padding:12px}
+          border-bottom:1px solid var(--border);overflow:visible;height:auto;flex-shrink:1}
+  .main{flex:none;width:100%;min-width:0;overflow:visible;height:auto;padding:12px}
   /* grids colapsam para caber no celular */
   .coin-grid{grid-template-columns:1fr 1fr!important}
   .sg{grid-template-columns:1fr 1fr 1fr!important}
