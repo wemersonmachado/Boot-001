@@ -1003,7 +1003,7 @@ def dynamic_rr_multipliers(df: pd.DataFrame) -> tuple[float, list]:
     Retorna (sl_mult, [tp1_mult, tp2_mult, tp3_mult]).
     """
     if len(df) < 60:
-        return 1.5, [2.0, 3.5, 5.5]
+        return 1.8, [2.5, 4.0, 6.0]
     try:
         close = df["close"]
         e21  = ema(close, 21).iloc[-1]
@@ -1014,20 +1014,23 @@ def dynamic_rr_multipliers(df: pd.DataFrame) -> tuple[float, list]:
         # Slope da EMA21 — medida de forcda tendencia
         slope = (ema(close, 21).iloc[-1] - ema(close, 21).iloc[-5]) / ema(close, 21).iloc[-5] * 100
 
+        # SL alargado (jun/2026): multiplicadores antigos (1.2–1.5x ATR) estouravam
+        # no ruído de scalp. Novos valores dão espaço para o preço oscilar; o sizing
+        # por risco compensa automaticamente (stop maior => posição menor, mesmo risco $).
         if e200 and e21 > e55 > e200 and slope > 0.3:
-            # Tendencia forte de alta: alvos generosos
-            return 1.3, [2.0, 4.0, 7.0]
+            # Tendencia forte de alta: SL respira, alvos generosos
+            return 1.6, [2.5, 4.5, 7.5]
         elif e200 and e21 < e55 < e200 and slope < -0.3:
             # Tendencia forte de baixa
-            return 1.3, [2.0, 4.0, 7.0]
+            return 1.6, [2.5, 4.5, 7.5]
         elif abs(slope) > 0.2:
             # Tendencia moderada
-            return 1.5, [2.0, 3.5, 5.5]
+            return 1.9, [2.5, 4.0, 6.0]
         else:
-            # Mercado lateral: SL menor, alvos mais conservadores
-            return 1.2, [1.8, 3.0, 4.5]
+            # Mercado lateral: SL precisa de mais espaço (whipsaw), alvos contidos
+            return 1.7, [2.2, 3.5, 5.0]
     except Exception:
-        return 1.5, [2.0, 3.5, 5.5]
+        return 1.8, [2.5, 4.0, 6.0]
 
 
 # ── News Score ────────────────────────────────────────────────────────────────
@@ -1055,22 +1058,43 @@ def calculate_levels(df: pd.DataFrame, direction: Direction, symbol: str,
 
     sl_multiplier, tp_multipliers = dynamic_rr_multipliers(df)
 
+    # ── Reposição estratégica do Stop Loss (jun/2026) ──────────────────────────
+    # Antes: stop = max/min(atr_stop, struct*0.998) -> escolhia o stop MAIS PERTO do
+    # preço, com buffer irrisório (0.2%), estourando no ruído de scalp.
+    # Agora: o stop fica do lado de FORA da estrutura (com folga de ATR) e usa o
+    # mais distante entre ATR e estrutura, respeitando piso (anti-ruído) e teto
+    # (protege o RR). O sizing por risco ajusta o tamanho da posição.
+    struct_buffer = atr_val * 0.35                       # folga além do swing S/R
+    _tf_floor = {"1m": 0.6, "3m": 0.8, "5m": 1.0, "15m": 1.3}.get(timeframe, 1.0)
+    min_sl_dist = price * _tf_floor / 100                # distância mínima (anti-ruído)
+    max_sl_dist = max(atr_val * 3.0, min_sl_dist * 1.5)  # teto (preserva RR)
+
     if direction == Direction.LONG:
-        stop = max(
-            price - atr_val * sl_multiplier,
-            struct["support"] * 0.998,
-        )
-        tp1 = price + atr_val * tp_multipliers[0]
-        tp2 = price + atr_val * tp_multipliers[1]
-        tp3 = price + atr_val * tp_multipliers[2]
+        atr_stop    = price - atr_val * sl_multiplier
+        struct_stop = struct["support"] - struct_buffer
+        stop = min(atr_stop, struct_stop)                # o mais distante = mais espaço
+        stop = min(stop, price - min_sl_dist)            # garante folga mínima
+        stop = max(stop, price - max_sl_dist)            # respeita teto
     else:
-        stop = min(
-            price + atr_val * sl_multiplier,
-            struct["resistance"] * 1.002,
-        )
-        tp1 = price - atr_val * tp_multipliers[0]
-        tp2 = price - atr_val * tp_multipliers[1]
-        tp3 = price - atr_val * tp_multipliers[2]
+        atr_stop    = price + atr_val * sl_multiplier
+        struct_stop = struct["resistance"] + struct_buffer
+        stop = max(atr_stop, struct_stop)                # o mais distante = mais espaço
+        stop = max(stop, price + min_sl_dist)            # garante folga mínima
+        stop = min(stop, price + max_sl_dist)            # respeita teto
+
+    # ── TPs ancorados ao risco real ───────────────────────────────────────────
+    # Distância do TP = MAIOR entre o alvo por ATR e um múltiplo do risco efetivo.
+    # Assim, mesmo quando o piso anti-ruído alarga o SL, o RR(tp2) >= ~2.0 se mantém;
+    # em tendência forte, o alvo por ATR domina (deixa o lucro correr).
+    _risk = abs(price - stop)
+    _rr_floor = [1.2, 2.0, 3.0]   # múltiplos mínimos de RR por TP
+    _td1 = max(atr_val * tp_multipliers[0], _risk * _rr_floor[0])
+    _td2 = max(atr_val * tp_multipliers[1], _risk * _rr_floor[1])
+    _td3 = max(atr_val * tp_multipliers[2], _risk * _rr_floor[2])
+    if direction == Direction.LONG:
+        tp1, tp2, tp3 = price + _td1, price + _td2, price + _td3
+    else:
+        tp1, tp2, tp3 = price - _td1, price - _td2, price - _td3
 
     risk = abs(price - stop)
     reward = abs(tp2 - price)
@@ -1502,6 +1526,28 @@ async def _score_direction(
 
     if total < min_score:
         return None
+
+    # ── Gate de proximidade estrutural (jun/2026) ─────────────────────────────
+    # Bloqueia COMPRA colada na resistência (entrar no topo) e VENDA colada no
+    # suporte (entrar no fundo). Folga mínima exigida = 1.2x ATR ou 1.0% (o maior),
+    # garantindo que o preço tenha espaço real até o alvo estrutural.
+    _prox_struct = identify_structure(df, timeframe)
+    _prox_price  = float(df["close"].iloc[-1])
+    _prox_atr    = float(atr(df).iloc[-1])
+    _prox_atr_pct = (_prox_atr / _prox_price * 100) if _prox_price > 0 else 1.0
+    _min_room_pct = max(1.0, _prox_atr_pct * 1.2)
+    if direction == Direction.LONG and _prox_struct["resistance"] > _prox_price:
+        _room = (_prox_struct["resistance"] - _prox_price) / _prox_price * 100
+        if _room < _min_room_pct:
+            print(f"[PROX-GATE] {symbol} {timeframe} LONG bloqueado: colado na resistência "
+                  f"({_room:.2f}% < {_min_room_pct:.2f}% folga)")
+            return None
+    elif direction == Direction.SHORT and 0 < _prox_struct["support"] < _prox_price:
+        _room = (_prox_price - _prox_struct["support"]) / _prox_price * 100
+        if _room < _min_room_pct:
+            print(f"[PROX-GATE] {symbol} {timeframe} SHORT bloqueado: colado no suporte "
+                  f"({_room:.2f}% < {_min_room_pct:.2f}% folga)")
+            return None
 
     levels = calculate_levels(df, direction, symbol, timeframe)
     if levels["rr"] < min_rr:
