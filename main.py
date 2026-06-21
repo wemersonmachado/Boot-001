@@ -41,7 +41,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from config import (WEBHOOK_SECRET, HOST, PORT, WATCHLIST, MAX_DAILY_LOSS_PCT,
                     CORRELATION_GROUPS, MODE_SETTINGS, TRADING_MODE as _DEFAULT_MODE,
-                    GRID_SETTINGS, CLAUDE_BRAIN_ALL_MODES)
+                    GRID_SETTINGS, CLAUDE_BRAIN_ALL_MODES, AUTO_KILLSWITCH_PCT)
 import market_engine
 from models import WebhookAlert, Direction, ActiveTrade
 from signal_engine import scan_watchlist, analyze_asset, scan_anomalies, analyze_smart_flow
@@ -234,6 +234,13 @@ _sinais_weekly: dict = {"total": 0, "alta": 0, "media": 0, "baixa": 0, "reset_da
 
 _daily_pnl = 0.0
 _session_trades = 0            # contador de trades abertos nesta sessão
+
+# ── Modo AUTÔNOMO: cadência de entradas + kill-switch -20% ───────────────────
+_last_auto_entry_ts: float    = 0.0    # ts da última abertura autônoma (controla cadência por perfil)
+_auto_killswitch_tripped: bool = False # True = perdeu AUTO_KILLSWITCH_PCT da banca → para até reset manual
+_auto_session_start_banca: float = 0.0 # banca de referência (capturada na 1ª entrada autônoma)
+_auto_session_pnl: float      = 0.0    # PnL realizado acumulado da sessão autônoma (base do kill-switch)
+_auto_killswitch_notified: bool = False # evita spam do alerta de kill-switch
 
 # ── Sharpe / Sortino ao vivo ───────────────────────────────────────────────
 _session_returns: list  = []      # pnl_pct de cada trade fechado nesta sessao
@@ -588,6 +595,62 @@ def _check_daily_loss() -> bool:
     return _daily_pnl > -_loss_limit_usdt
 
 
+def _entry_cadence_s() -> int:
+    """Espera mínima (s) entre aberturas no modo AUTÔNOMO, por perfil (MODE_SETTINGS).
+    0 = consecutivas (Conservador). 120 = Normal (2min). 180 = Agressivo (3min)."""
+    cfg = MODE_SETTINGS.get(CURRENT_MODE, MODE_SETTINGS["NORMAL"])
+    return int(cfg.get("entry_cadence_s", 0))
+
+
+def _auto_killswitch_ref_banca() -> float:
+    """Banca de referência do kill-switch — inicial da sessão autônoma, com fallback."""
+    if _auto_session_start_banca > 0:
+        return _auto_session_start_banca
+    if BANCA_USDT > 0:
+        return BANCA_USDT
+    return max(float(_balance_cache.get("wallet_balance", 0) or 0), 0.0)
+
+
+def _check_auto_killswitch() -> bool:
+    """Retorna False se o kill-switch de -AUTO_KILLSWITCH_PCT% da banca disparou.
+    Captura a banca inicial na 1ª chamada e trava (até reset manual) ao atingir o limite."""
+    global _auto_killswitch_tripped, _auto_session_start_banca
+    if _auto_killswitch_tripped:
+        return False
+    if _auto_session_start_banca <= 0:
+        _auto_session_start_banca = _auto_killswitch_ref_banca()
+    ref = _auto_session_start_banca
+    if ref <= 0:
+        return True  # sem banca de referência → não trava (evita falso positivo)
+    loss_limit = ref * AUTO_KILLSWITCH_PCT / 100.0
+    if _auto_session_pnl <= -loss_limit:
+        _auto_killswitch_tripped = True
+        return False
+    return True
+
+
+def _register_auto_pnl(pnl: float):
+    """Acumula PnL realizado da sessão autônoma (alimenta o kill-switch de -20%)."""
+    global _auto_session_pnl
+    _auto_session_pnl += float(pnl or 0.0)
+
+
+def _reset_auto_killswitch() -> dict:
+    """Reinicia a sessão autônoma: libera kill-switch, zera PnL/banca de referência
+    e renova o orçamento de entradas (_session_trades). Chamado na ativação do modo
+    AUTÔNOMO e no reset manual do kill-switch."""
+    global _auto_killswitch_tripped, _auto_session_pnl, _auto_session_start_banca
+    global _auto_killswitch_notified, _session_trades, _last_auto_entry_ts
+    _auto_killswitch_tripped  = False
+    _auto_killswitch_notified = False
+    _auto_session_pnl         = 0.0
+    _auto_session_start_banca = 0.0
+    _session_trades           = 0      # renova orçamento de N entradas da sessão
+    _last_auto_entry_ts       = 0.0    # libera a 1ª entrada sem esperar cadência
+    print("[KILLSWITCH] Sessão autônoma reiniciada (kill-switch liberado, orçamento renovado).")
+    return {"ok": True, "killswitch": "reset", "session_pnl": 0.0}
+
+
 def _build_signal_from_dict(signal_dict: dict):
     """Reconstrói TradeSignal a partir de dict (usado em _execute_trade)."""
     from models import TradeSignal, SignalScore, Direction as Dir
@@ -860,7 +923,7 @@ async def job_auto_trade(signals: list):
     AUTONOMOUS  → executa + notifica Telegram com mesmo formato do supervisionado
     Respeita: limite de trades/sessão, objetivo diário, cooldown de 5min.
     """
-    global _daily_pnl, _session_trades
+    global _daily_pnl, _session_trades, _last_auto_entry_ts, _auto_killswitch_notified
 
     _effective_mode = _resolve_effective_mode()
     if _effective_mode in ("SINAIS", "GRID"):
@@ -885,6 +948,19 @@ async def job_auto_trade(signals: list):
     # ── Verificações de limites ───────────────────────────────────────────────
     if not _check_daily_loss():
         await send_alert(f"🛑 Limite de perda diária atingido ({MAX_DAILY_LOSS_PCT}%). Pausado.")
+        return
+
+    # Kill-switch -20% da banca (modo AUTÔNOMO): para de abrir até reset manual
+    if _effective_mode == "AUTONOMOUS" and not _check_auto_killswitch():
+        if not _auto_killswitch_notified:
+            _auto_killswitch_notified = True
+            _ref = _auto_killswitch_ref_banca()
+            await send_alert(
+                f"🛑 *KILL-SWITCH -{AUTO_KILLSWITCH_PCT:.0f}%* — sessão autônoma parada.\n"
+                f"Perda acumulada: `${_auto_session_pnl:.2f}` sobre banca `${_ref:.2f}`.\n"
+                f"Posições abertas seguem até SL/TP. Para retomar: `/killswitch reset`."
+            )
+        print(f"[AUTO] Kill-switch -{AUTO_KILLSWITCH_PCT:.0f}% ativo — sem novas entradas.")
         return
 
     # Objetivo diário atingido?
@@ -914,6 +990,16 @@ async def job_auto_trade(signals: list):
     now_ts       = time.time()
     from risk_manager import get_leverage
     sent = 0
+
+    # ── Cadência de entradas (modo AUTÔNOMO) ──────────────────────────────────
+    # Conservador (0s) = entradas consecutivas. Normal (120s) e Agressivo (180s)
+    # = 1 entrada por janela. Bloqueia abrir se ainda dentro da janela.
+    _cadence_s     = _entry_cadence_s() if _effective_mode == "AUTONOMOUS" else 0
+    _cadence_block = _cadence_s > 0 and (now_ts - _last_auto_entry_ts) < _cadence_s
+    _cadence_break = False
+    if _cadence_block:
+        _wait = int(_cadence_s - (now_ts - _last_auto_entry_ts))
+        print(f"[AUTO-CADÊNCIA] {CURRENT_MODE}: aguardando {_wait}s p/ próxima entrada (janela {_cadence_s}s).")
 
     # FIX #2 — BTC Veto: aplica em AUTÔNOMO e SUPERVISED (igual ao SINAIS)
     from signal_filters import refresh_btc_veto as _refresh_btc_veto, btc_veto_passes as _btc_veto_passes
@@ -1244,10 +1330,20 @@ async def job_auto_trade(signals: list):
             pass
 
         if _effective_mode == "AUTONOMOUS":
+            # Cadência por perfil: dentro da janela, não abre nova entrada neste ciclo.
+            if _cadence_block:
+                _blk(f"cadencia({_cadence_s}s)")
+                continue
             print(f"[AUTÔNOMO] {signal.asset} {signal.direction.value} score={signal.confidence:.0f}")
+            _before_open = _session_trades
             await _execute_trade(signal_dict)
             # Notificação Telegram disparada por send_trade_opened dentro de _execute_trade_inner (só após sucesso)
             # _session_trades é incrementado dentro de _execute_trade_inner após sucesso
+            if _session_trades > _before_open:
+                _last_auto_entry_ts = now_ts
+                # Normal/Agressivo: 1 entrada por janela de cadência → encerra o ciclo.
+                if _cadence_s > 0:
+                    _cadence_break = True
         elif _effective_mode == "GRID":
             # GRID usa job_grid_scan dedicado, não o fluxo normal
             pass
@@ -1262,6 +1358,10 @@ async def job_auto_trade(signals: list):
         open_assets.add(signal.asset)
         _signal_cooldown[cooldown_key] = now_ts  # marca cooldown SÓ após qualificar/enviar
         sent += 1
+
+        # Cadência (Normal/Agressivo): após abrir 1 entrada, encerra o ciclo.
+        if _cadence_break:
+            break
 
     # Resumo do ciclo de execução — mostra exatamente quantos sinais entraram,
     # quantos enviaram e o detalhamento de cada bloqueio (observabilidade total).
@@ -2263,6 +2363,47 @@ def _check_daily_target_notify():
         print(f"[META] Meta diaria atingida! ${_daily_pnl:.2f} >= ${DAILY_TARGET_USDT:.2f}")
 
 
+def _build_open_positions_summary() -> str:
+    """Resumo Markdown das posições abertas (ativo, direção, entrada, atual, PnL).
+    Usado pelo /status e pelo relatório periódico de 30 min."""
+    trades = [t for t in _active_trades_cache.values() if isinstance(t, dict)]
+    if not trades:
+        return "📭 *Nenhuma posição aberta no momento.*"
+
+    lines = [f"📊 *Posições abertas* ({len(trades)})\n"]
+    _total_pnl = 0.0
+    for t in trades:
+        _dir   = str(t.get("direction", "?")).upper().replace("DIRECTION.", "")
+        _icon  = "🟢" if "LONG" in _dir else "🔴"
+        _entry = float(t.get("entry_price", 0) or 0)
+        _cur   = float(t.get("current_price", 0) or 0) or _entry
+        _pnl_p = float(t.get("pnl_pct", 0) or 0)
+        _pnl_u = float(t.get("pnl_usdt", 0) or 0)
+        _total_pnl += _pnl_u
+        _paper = " 🔸" if t.get("paper") else ""
+        lines.append(
+            f"{_icon} `{t.get('asset','?')}` {_dir}{_paper}\n"
+            f"   entrada `${_entry:.4f}` → atual `${_cur:.4f}`\n"
+            f"   PnL `{'+' if _pnl_p >= 0 else ''}{_pnl_p:.1f}%` / `{'+' if _pnl_u >= 0 else ''}${_pnl_u:.2f}`"
+        )
+    lines.append(f"\n💰 *PnL aberto total:* `{'+' if _total_pnl >= 0 else ''}${_total_pnl:.2f}`")
+    return "\n".join(lines)
+
+
+async def job_open_positions_report():
+    """Relatório periódico (30 min) das posições abertas no Telegram pessoal.
+    Silencioso quando não há posições, para evitar ruído."""
+    try:
+        if not any(isinstance(t, dict) for t in _active_trades_cache.values()):
+            return
+        msg = _build_open_positions_summary()
+        if _auto_killswitch_tripped:
+            msg += f"\n\n🛑 *Kill-switch -{AUTO_KILLSWITCH_PCT:.0f}% ATIVO* — sem novas entradas (use `/killswitch reset`)."
+        await send_alert(msg)
+    except Exception as e:
+        print(f"[STATUS-REPORT] Erro: {e}")
+
+
 async def job_update_trades():
     """Update PnL and trailing stops for all open trades."""
     global _active_trades_cache, _consecutive_losses, _daily_pnl
@@ -2368,6 +2509,7 @@ async def job_update_trades():
                             _consecutive_losses = 0
                             _consecutive_wins = 0
                     _daily_pnl += dca_res["pnl_usdt"]
+                    _register_auto_pnl(dca_res["pnl_usdt"])  # alimenta kill-switch -20%
                     _check_daily_target_notify()
                     _session_returns.append(dca_res["pnl_pct"])
                     _rm = _calc_risk_metrics()
@@ -2482,6 +2624,7 @@ async def job_update_trades():
                             _consecutive_wins   = 0
                     # Meta diária: atualiza PnL
                     _daily_pnl += _pnl_close
+                    _register_auto_pnl(_pnl_close)  # alimenta kill-switch -20%
                     _check_daily_target_notify()
                     # Sharpe/Sortino: registra retorno da sessao
                     _session_returns.append(_pnl_pct)
@@ -2532,12 +2675,26 @@ async def _telegram_command_handler(text: str) -> str:
     cmd   = parts[0].lower()
     args  = parts[1:] if len(parts) > 1 else []
 
+    # /menu ou /painel — cabeçalho do Painel de Controle (os botões são
+    # anexados pelo notifier; aqui só retornamos o texto com o estado atual)
+    if cmd in ("/menu", "/painel"):
+        paper_str = "ON (simulacao)" if PAPER_TRADING else "OFF (conta REAL)"
+        return (
+            f"*🎛️ TRADER 001 — Painel de Controle*\n\n"
+            f"Modo atual: `{OPERATION_MODE}`\n"
+            f"Perfil atual: `{CURRENT_MODE}`\n"
+            f"Paper: `{paper_str}`\n\n"
+            f"Toque abaixo para escolher *modo* e *perfil*.\n"
+            f"_(💰 = opera com dinheiro real, pede confirmacao)_"
+        )
+
     # /ajuda ou /start
     if cmd in ("/ajuda", "/start", "/help"):
         brain_str = "ON" if _claude_brain_enabled else "OFF"
         return (
             f"*TRADER 001 — Menu Completo*\n"
             f"Modo: `{OPERATION_MODE}` | Perfil: `{CURRENT_MODE}` | Brain: `{brain_str}`\n\n"
+            "👉 *Use `/menu` para o painel de botões* (escolher modo e perfil com 1 toque).\n\n"
             "*📊 Informacoes:*\n"
             "`/status` — Estado atual do bot\n"
             "`/resumo` — Snapshot rapido (saldo, PnL, sinais)\n"
@@ -2569,6 +2726,8 @@ async def _telegram_command_handler(text: str) -> str:
             "`/scan` — Forcar varredura agora\n"
             "`/fechar BTCUSDT` — Fechar posicao especifica\n"
             "`/fechar tudo` — Fechar TODAS as posicoes\n"
+            "`/killswitch` — Estado do freio -20% (AUTONOMO)\n"
+            "`/killswitch reset` — Libera apos disparo do -20%\n"
         )
 
     # /status
@@ -2579,16 +2738,48 @@ async def _telegram_command_handler(text: str) -> str:
         brain_str   = "ON" if _claude_brain_enabled else "OFF"
         
         mode_desc = f"Modo: `{OPERATION_MODE}` | Perfil: `{CURRENT_MODE}` | Claude Brain: `{brain_str}`"
-            
+
+        # Estado do kill-switch -20% (modo AUTÔNOMO)
+        if _auto_killswitch_tripped:
+            ks_str = f"🛑 ATIVO (perda `${_auto_session_pnl:.2f}`) — `/killswitch reset` p/ retomar"
+        else:
+            _ks_ref = _auto_killswitch_ref_banca()
+            _ks_lim = _ks_ref * AUTO_KILLSWITCH_PCT / 100.0
+            ks_str  = f"OK — sessao `{'+' if _auto_session_pnl >= 0 else ''}${_auto_session_pnl:.2f}` (limite `-${_ks_lim:.2f}`)"
+
         return (
             f"*TRADER 001 — Status*\n\n"
             f"{mode_desc}\n"
             f"Paper Trading: `{paper_str}`\n"
             f"Banca: `${BANCA_USDT:.2f}` | Trades/sessao: `{TRADES_PER_SESSION}`\n"
+            f"Cadencia entradas: `{_entry_cadence_s()}s` ({CURRENT_MODE})\n"
+            f"Kill-switch -{AUTO_KILLSWITCH_PCT:.0f}%: {ks_str}\n"
             f"Saldo disponivel: `{balance_str}`\n"
-            f"Trades abertos: `{trades_n}`\n"
             f"PnL diario: `{'+' if _daily_pnl >= 0 else ''}${_daily_pnl:.2f}`\n"
-            f"Sinais na fila: `{len(_latest_signals)}`"
+            f"Sinais na fila: `{len(_latest_signals)}`\n\n"
+            f"{_build_open_positions_summary()}"
+        )
+
+    # /killswitch [reset|status] — kill-switch -20% do modo AUTÔNOMO
+    if cmd in ("/killswitch", "/reset20", "/ks"):
+        sub = args[0].lower() if args else "status"
+        if sub in ("reset", "resetar", "off", "liberar"):
+            _reset_auto_killswitch()
+            return (
+                f"✅ *Kill-switch resetado.*\n"
+                f"Sessao autonoma reiniciada (PnL zerado, banca recapturada).\n"
+                f"O bot volta a abrir entradas no proximo ciclo."
+            )
+        _ref = _auto_killswitch_ref_banca()
+        _lim = _ref * AUTO_KILLSWITCH_PCT / 100.0
+        _st  = "🛑 ATIVO (parado)" if _auto_killswitch_tripped else "✅ OK (operando)"
+        return (
+            f"*Kill-switch -{AUTO_KILLSWITCH_PCT:.0f}%*\n\n"
+            f"Estado: {_st}\n"
+            f"Banca ref.: `${_ref:.2f}`\n"
+            f"PnL sessao: `{'+' if _auto_session_pnl >= 0 else ''}${_auto_session_pnl:.2f}`\n"
+            f"Limite de perda: `-${_lim:.2f}`\n\n"
+            f"_Use `/killswitch reset` para liberar após disparo._"
         )
 
     # /scan
@@ -2733,6 +2924,7 @@ async def _telegram_command_handler(text: str) -> str:
             if val == "on":
                 await bot_state.activate_mode("AUTONOMOUS", profile=CURRENT_MODE)
                 sync_state_to_globals()
+                _reset_auto_killswitch()  # sessão autônoma limpa (kill-switch -20%)
                 return (
                     f"{summary}\n\n"
                     f"✅ *Modo AUTONOMO ativado!*\n"
@@ -3213,6 +3405,7 @@ async def lifespan(app: FastAPI):
     scheduler.add_job(_run_walk_forward_job,             "interval", hours=12,   id="walk_forward",       max_instances=1, coalesce=True)
     scheduler.add_job(_job_universe_builder,         "interval", hours=1,    id="universe_builder",   max_instances=1, coalesce=True, jitter=120)
     scheduler.add_job(job_macro_guard,               "interval", minutes=30, id="macro_guard",        max_instances=1, coalesce=True, jitter=60)
+    scheduler.add_job(job_open_positions_report,     "interval", minutes=30, id="positions_report",   max_instances=1, coalesce=True, jitter=30)
     scheduler.add_job(_job_correlation_refresh,      "interval", minutes=30, id="correlation",        max_instances=1, coalesce=True, jitter=60)
     scheduler.add_job(job_pairs_arbitrage,           "interval", minutes=15, id="pairs_arbitrage",      max_instances=1, coalesce=True, jitter=30)
     scheduler.start()
@@ -4314,6 +4507,7 @@ async def set_operation_mode(mode: str):
     # modo está no ar, mesmo antes de qualquer sinal qualificar nos filtros.
     _tps = TRADES_PER_SESSION if TRADES_PER_SESSION > 0 else "ilimitado"
     if mode == "AUTONOMOUS":
+        _reset_auto_killswitch()  # sessão autônoma limpa: zera PnL e recaptura banca p/ o kill-switch -20%
         _exec_kind = "📝 SIMULADAS (PAPER)" if PAPER_TRADING else "🔴 REAIS"
         msg = "[BOT] Modo AUTONOMO ativado — bot executa trades automaticamente"
         aviso = (f"🤖 AUTÔNOMO ATIVADO (perfil {CURRENT_MODE})\n"
@@ -4912,6 +5106,32 @@ async def resume_bot():
     await send_alert(f"▶️ BOT RETOMADO — modo {OPERATION_MODE} ({CURRENT_MODE}) · execução {_kind}.")
     await save_global_state_to_db()
     return {"status": "running", "bot_paused": False, "paper_trading": PAPER_TRADING, "sinais_enabled": SINAIS_ENABLED}
+
+
+@app.post("/bot/killswitch/reset")
+async def killswitch_reset():
+    """Reset manual do kill-switch -20% do modo AUTÔNOMO (libera novas entradas)."""
+    res = _reset_auto_killswitch()
+    await send_alert(
+        f"✅ *Kill-switch -{AUTO_KILLSWITCH_PCT:.0f}% resetado* — sessão autônoma reiniciada. "
+        f"O bot volta a abrir entradas no próximo ciclo."
+    )
+    await save_global_state_to_db()
+    return {"status": "ok", **res}
+
+
+@app.get("/bot/killswitch")
+async def killswitch_status():
+    """Estado atual do kill-switch -20% do modo AUTÔNOMO."""
+    ref = _auto_killswitch_ref_banca()
+    return {
+        "tripped":       _auto_killswitch_tripped,
+        "pct":           AUTO_KILLSWITCH_PCT,
+        "ref_banca":     round(ref, 2),
+        "session_pnl":   round(_auto_session_pnl, 2),
+        "loss_limit":    round(ref * AUTO_KILLSWITCH_PCT / 100.0, 2),
+        "entry_cadence_s": _entry_cadence_s(),
+    }
 
 
 @app.post("/bot/reset")

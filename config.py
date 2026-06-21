@@ -62,6 +62,7 @@ MODE_SETTINGS = {
         "leverage_cap": 10,
         "allowed_assets": None,
         "max_spread_pct": 0.16,  # 2026-06-19: 0.10→0.16 — liberar mais ativos líquidos
+        "entry_cadence_s": 0,    # AUTÔNOMO: entradas consecutivas (sem espera entre aberturas)
     },
     "NORMAL": {
         "min_score": 72,                 # 2026-06-19: 75→72
@@ -74,6 +75,7 @@ MODE_SETTINGS = {
         "leverage_cap": None,
         "allowed_assets": None,
         "max_spread_pct": 0.35,          # 2026-06-19: 0.25→0.35
+        "entry_cadence_s": 120,          # AUTÔNOMO: 1 entrada a cada 2 min
     },
     "AGGRESSIVE": {
         "min_score": 65,  # era 60 — floor elevado para reduzir entradas de baixa qualidade
@@ -86,8 +88,14 @@ MODE_SETTINGS = {
         "leverage_cap": None,
         "allowed_assets": None,
         "max_spread_pct": 0.50,
+        "entry_cadence_s": 180,   # AUTÔNOMO: 1 entrada a cada 3 min
     },
 }
+
+# ── Kill-switch do modo AUTÔNOMO ──────────────────────────────────────────────
+# Se a sessão autônoma perder esta % da banca inicial, PARA TUDO (não abre novas
+# entradas) até reset manual via /killswitch reset ou endpoint /bot/killswitch/reset.
+AUTO_KILLSWITCH_PCT = 20.0
 
 # ── Claude Brain ─────────────────────────────────────────────────────────────
 # Budget diário em USD para o Claude Brain (0 = sem limite definido)

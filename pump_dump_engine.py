@@ -55,16 +55,19 @@ PD_ALERT_COOLDOWN_S = 300  # 5 min — permite re-alertar continuações
 # ── Session context ───────────────────────────────────────────────────────────
 
 def _session_context() -> dict:
+    # GROUND TRUTH: o score NÃO é mais ajustado pela hora (score_bonus = 0 em todas
+    # as sessões). A confiança reflete só o movimento real (volume, ATR, estrutura,
+    # OI). O vol_gate_mult é mantido — é filtro de RUÍDO (exige mais volume relativo
+    # na madrugada de baixa liquidez), não inflação de score.
     h = datetime.datetime.utcnow().hour
     if 13 <= h < 17:
-        return {"name": "NY",   "vol_gate_mult": 1.0, "score_bonus":  5}
+        return {"name": "NY",   "vol_gate_mult": 1.0, "score_bonus": 0}
     elif 7 <= h < 13:
-        return {"name": "EU",   "vol_gate_mult": 1.0, "score_bonus":  2}
+        return {"name": "EU",   "vol_gate_mult": 1.0, "score_bonus": 0}
     elif 1 <= h < 7:
-        return {"name": "ASIA", "vol_gate_mult": 1.1, "score_bonus":  0}
+        return {"name": "ASIA", "vol_gate_mult": 1.1, "score_bonus": 0}
     else:
-        # NY Close + noite: reduzido de 1.6 → 1.2 (ainda ativo, não morto)
-        return {"name": "DEAD", "vol_gate_mult": 1.2, "score_bonus": -3}
+        return {"name": "DEAD", "vol_gate_mult": 1.2, "score_bonus": 0}
 
 
 # ── Funding settlement window ─────────────────────────────────────────────────

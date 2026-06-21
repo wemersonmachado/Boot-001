@@ -56,33 +56,37 @@ def get_session() -> dict:
       NY        13–21 UTC → 10h–18h BRT  | maior volume, breakouts confiáveis
       NY Close  21–00 UTC → 18h–21h BRT  | reversões, profit-taking
     """
+    # GROUND TRUTH: score_adj = 0 em todas as sessões. O score do sinal reflete só o
+    # que o motor V6 realmente encontra (estrutura, tendência, confluência), sem o
+    # relógio inflar NY/Europa nem suprimir a madrugada. block_aggressive permanece —
+    # é controle de RISCO (não opera agressivo nas horas de manipulação), não score.
     h = datetime.now(timezone.utc).hour
 
     if 0 <= h < 8:
         return {
             "name":              "Asia",
-            "score_adj":         -5,
+            "score_adj":         0,
             "block_aggressive":  (1 <= h <= 5),   # bloqueia AGGRESSIVE 01h-05h UTC
             "note":              f"Sessão Ásia ({h}h UTC / {(h-3)%24}h BRT)",
         }
     elif 8 <= h < 13:
         return {
             "name":              "Europa",
-            "score_adj":         +3,
+            "score_adj":         0,
             "block_aggressive":  False,
             "note":              f"Sessão Europa ({h}h UTC)",
         }
     elif 13 <= h < 21:
         return {
             "name":              "NY",
-            "score_adj":         +5,
+            "score_adj":         0,
             "block_aggressive":  False,
             "note":              f"Sessão NY ({h}h UTC)",
         }
     else:
         return {
             "name":              "NY_Close",
-            "score_adj":         -2,
+            "score_adj":         0,
             "block_aggressive":  False,
             "note":              f"Sessão NY Close ({h}h UTC)",
         }
@@ -500,17 +504,10 @@ def rs_score_adj(symbol: str, direction: str, rs_scores: dict) -> float:
 
 def session_score_threshold(base_thresh: int) -> int:
     """
-    Ajusta o SCORE_THRESH mínimo baseado na sessão atual.
-    Sessão Ásia (lateral/manipulação) → thresh +1 (mais seletivo)
-    Sessão NY (alto volume)           → thresh mantido
-    Sessão Off                        → thresh +1
+    GROUND TRUTH: o corte mínimo NÃO é mais ajustado pela hora. O bot envia o que
+    realmente encontra — sem ficar artificialmente mais seletivo na madrugada nem
+    no NY Close. (Mantido como função para não quebrar os call-sites.)
     """
-    session = get_session()
-    name    = session.get("name", "NY")
-    if name == "Asia":
-        return base_thresh + 1
-    if name == "NY_Close":
-        return base_thresh + 1
     return base_thresh
 
 
