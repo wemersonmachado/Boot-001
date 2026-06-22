@@ -44,6 +44,7 @@ from config import (WEBHOOK_SECRET, HOST, PORT, WATCHLIST, MAX_DAILY_LOSS_PCT,
                     GRID_SETTINGS, CLAUDE_BRAIN_ALL_MODES, AUTO_KILLSWITCH_PCT,
                     AUTO_PAPER_WARMUP_MIN, SAME_ASSET_COOLDOWN_MIN, CLEAR_SIGNAL_MIN_SCORE,
                     CIRCUIT_BREAKER_ENABLED, CB_ERROR_THRESHOLD, CB_AUTH_TIMEOUT_S,
+                    CB_LOSS_THRESHOLD, CB_ERROR_TRIGGER_ENABLED,
                     MAX_TOTAL_EXPOSURE_RATIO, MAX_TRADES_PER_DAY,
                     AUTOTUNE_SCORE_ENABLED, AUTOTUNE_LOOKBACK, AUTOTUNE_MAX_TIGHTEN,
                     AUTOTUNE_MAX_LOOSEN, LEVERAGE_BY_VOLATILITY, ATR_PCT_REF, LEVERAGE_VOL_FLOOR,
@@ -259,10 +260,12 @@ _auto_session_started_ts: float = 0.0  # início da sessão autônoma (janela PA
 _asset_last_entry_ts: dict      = {}   # asset -> ts da última abertura (anti-overtrading)
 _trades_today: int              = 0    # nº de entradas autônomas hoje (teto diário)
 _trades_today_date              = None
-# Circuit breaker da Binance (erros consecutivos → autorização Telegram → pausa)
+# Circuit breaker (perdas seguidas OU erros Binance → autorização Telegram → pausa)
 _binance_error_streak: int      = 0
 _cb_pending: bool               = False  # True = aguardando /continuar ou /pausar
 _cb_deadline: float             = 0.0    # prazo (epoch) para autorizar antes de pausar
+_cb_loss_ack_streak: int        = 0      # baseline de perdas já reconhecido (evita re-alertar
+                                         # a cada nova perda após o usuário dar /continuar)
 # Auto-tune do score: deslocamento aplicado ao min_score conforme a taxa de acerto.
 _score_offset: int              = 0
 # Auto-tune e rastreio de acerto ESPECÍFICOS do canal SINAIS (não tocam o autônomo).
@@ -729,31 +732,60 @@ def _register_binance_ok():
     _binance_error_streak = 0
 
 
+async def _cb_arm(reason: str):
+    """Arma o circuit breaker: pede autorização no Telegram e inicia o prazo de pausa.
+    Não re-arma se já está pendente ou o bot já está pausado."""
+    global _cb_pending, _cb_deadline
+    if _cb_pending or BOT_PAUSED:
+        return
+    _cb_pending  = True
+    _cb_deadline = time.time() + CB_AUTH_TIMEOUT_S
+    await send_alert(
+        f"⚠️ *CIRCUIT BREAKER* — {reason}\n"
+        f"Responda em até *{CB_AUTH_TIMEOUT_S // 60} min*:\n"
+        f"`/continuar` — segue operando\n"
+        f"`/pausar` — para agora\n\n"
+        f"_Sem resposta → o bot PAUSA TUDO automaticamente._"
+    )
+
+
+async def _maybe_trip_loss_breaker():
+    """GATILHO PRINCIPAL: dispara o circuit breaker após CB_LOSS_THRESHOLD trades
+    PERDEDORES seguidos. Usa _cb_loss_ack_streak como baseline para só re-alertar a
+    cada novo bloco de CB_LOSS_THRESHOLD perdas (e não a cada perda após /continuar).
+    Chamado logo após cada incremento de _consecutive_losses no fechamento."""
+    global _cb_loss_ack_streak
+    if not CIRCUIT_BREAKER_ENABLED:
+        return
+    # Se o streak de perdas caiu abaixo do baseline (zerado por vitórias), recomeça limpo.
+    if _consecutive_losses < _cb_loss_ack_streak:
+        _cb_loss_ack_streak = 0
+    if _consecutive_losses >= _cb_loss_ack_streak + CB_LOSS_THRESHOLD:
+        print(f"[CIRCUIT-BREAKER] {_consecutive_losses} perdas seguidas → pedindo autorização")
+        await _cb_arm(f"`{_consecutive_losses}` trades *perdedores* seguidos.")
+
+
 async def _register_binance_error(ctx: str = ""):
-    """Conta erros consecutivos da Binance. Ao atingir CB_ERROR_THRESHOLD, dispara o
-    circuit breaker: pede autorização no Telegram e arma o prazo de pausa automática."""
-    global _binance_error_streak, _cb_pending, _cb_deadline
+    """GATILHO SECUNDÁRIO: conta erros consecutivos da Binance. Ao atingir
+    CB_ERROR_THRESHOLD, dispara o mesmo circuit breaker (falha técnica)."""
+    global _binance_error_streak
     if not CIRCUIT_BREAKER_ENABLED:
         return
     _binance_error_streak += 1
     print(f"[CIRCUIT-BREAKER] Erro Binance #{_binance_error_streak} ({ctx})")
-    if _binance_error_streak >= CB_ERROR_THRESHOLD and not _cb_pending and not BOT_PAUSED:
-        _cb_pending  = True
-        _cb_deadline = time.time() + CB_AUTH_TIMEOUT_S
-        await send_alert(
-            f"⚠️ *CIRCUIT BREAKER* — `{_binance_error_streak}` erros seguidos da Binance.\n"
-            f"Responda em até *{CB_AUTH_TIMEOUT_S // 60} min*:\n"
-            f"`/continuar` — segue operando\n"
-            f"`/pausar` — para agora\n\n"
-            f"_Sem resposta → o bot PAUSA TUDO automaticamente._"
-        )
+    # Gatilho por erros DESLIGADO por padrão (era a mensagem chata/constante no Railway).
+    # Conta para log, mas não arma o breaker nem alerta — só se reativado por config.
+    if CB_ERROR_TRIGGER_ENABLED and _binance_error_streak >= CB_ERROR_THRESHOLD:
+        await _cb_arm(f"`{_binance_error_streak}` erros seguidos da Binance.")
 
 
 def _cb_resume() -> str:
-    """Libera o circuit breaker (resposta /continuar)."""
-    global _cb_pending, _binance_error_streak, _cb_deadline
+    """Libera o circuit breaker (resposta /continuar). Reconhece o nível atual de perdas
+    como baseline para não re-alertar imediatamente na próxima perda."""
+    global _cb_pending, _binance_error_streak, _cb_deadline, _cb_loss_ack_streak
     _cb_pending = False
     _binance_error_streak = 0
+    _cb_loss_ack_streak = _consecutive_losses   # baseline = perdas já reconhecidas
     _cb_deadline = 0.0
     print("[CIRCUIT-BREAKER] Autorizado a continuar pelo usuário.")
     return "✅ Circuit breaker liberado — seguindo operando."
@@ -2905,6 +2937,7 @@ async def job_update_trades():
                     if dca_res["pnl_usdt"] < 0:
                         _consecutive_losses += 1
                         _consecutive_wins = 0
+                        await _maybe_trip_loss_breaker()   # circuit breaker por perdas
                     else:
                         _consecutive_wins += 1
                         if _consecutive_wins >= _ANTI_MARTINGALE_WINS_TO_RESET:
@@ -3018,6 +3051,7 @@ async def job_update_trades():
                     if _pnl_close < 0:
                         _consecutive_losses += 1
                         _consecutive_wins    = 0
+                        await _maybe_trip_loss_breaker()   # circuit breaker por perdas
                     else:
                         _consecutive_wins += 1
                         # FIX: exige ANTI_MARTINGALE_WINS_TO_RESET wins para zerar perdas

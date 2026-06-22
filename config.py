@@ -121,10 +121,17 @@ LEVERAGE_VOL_FLOOR     = 3         # alavancagem mínima após redução por vol
 SAME_ASSET_COOLDOWN_MIN = 15
 CLEAR_SIGNAL_MIN_SCORE  = 80        # "sinal claro" = score >= isto para reentrar no ativo
 #
-# (C) Circuit breaker da Binance: após N erros consecutivos, pede autorização no
-#     Telegram (/continuar ou /pausar). Sem resposta em CB_AUTH_TIMEOUT_S → pausa TUDO.
+# (C) Circuit breaker: pede autorização no Telegram (/continuar ou /pausar). Sem
+#     resposta em CB_AUTH_TIMEOUT_S → pausa TUDO. Dois gatilhos:
+#     - CB_LOSS_THRESHOLD trades PERDEDORES seguidos (gatilho principal — proteção de banca).
+#     - CB_ERROR_THRESHOLD erros consecutivos da Binance (gatilho secundário — falha técnica).
 CIRCUIT_BREAKER_ENABLED = True
+CB_LOSS_THRESHOLD       = 3         # nº de trades perdedores seguidos que dispara o breaker
 CB_ERROR_THRESHOLD      = 3
+# Gatilho por ERROS da Binance DESLIGADO por padrão: a fapi no Railway sofre timeout/
+# rate-limit intermitente e isso disparava a mensagem "3 erros seguidos da Binance"
+# constantemente. O circuit breaker agora é só por TRADES PERDEDORES. (True p/ reativar.)
+CB_ERROR_TRIGGER_ENABLED = False
 CB_AUTH_TIMEOUT_S       = 300       # 5 min
 #
 # Teto de exposição agregada (notional_total / banca) e nº máximo de entradas/dia.
