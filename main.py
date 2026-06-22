@@ -2318,8 +2318,40 @@ async def _job_weekly_sinais_stats():
     _sinais_weekly = {"total": 0, "alta": 0, "media": 0, "baixa": 0, "reset_date": None}
 
 
+async def _fetch_realized_pnl(symbol: str, opened_at) -> float:
+    """Busca o PnL REALIZADO da Binance para o símbolo desde a abertura do trade.
+    Soma os registros REALIZED_PNL (futures income). Retorna 0.0 se falhar
+    (mantém o comportamento antigo como fallback seguro)."""
+    try:
+        import calendar
+        start_ms = 0
+        if opened_at:
+            try:
+                _s  = str(opened_at).replace("Z", "").split("+")[0].split(".")[0]
+                _dt = datetime.fromisoformat(_s)
+                start_ms = int(calendar.timegm(_dt.timetuple()) * 1000) - 120_000  # 2min de folga
+            except Exception:
+                start_ms = 0
+
+        def _inc():
+            client = _get_binance_client_synced()
+            kw = {"symbol": symbol, "incomeType": "REALIZED_PNL", "limit": 1000}
+            if start_ms > 0:
+                kw["startTime"] = start_ms
+            return client.futures_income_history(**kw)
+
+        rows = await asyncio.to_thread(_inc)
+        return round(sum(float(r.get("income", 0) or 0) for r in rows), 6)
+    except Exception as e:
+        print(f"[SYNC-PNL] {symbol} falha ao buscar realized PnL: {e}")
+        return 0.0
+
+
 async def _job_sync_binance():
-    """Sincroniza posições abertas da Binance com o DB a cada 2 min."""
+    """Sincroniza posições abertas da Binance com o DB a cada 2 min.
+    Quando a Binance fecha um trade (SL/TP), grava o PnL REALIZADO real
+    (corrige o bug que zerava o PnL) e notifica o fechamento no Telegram."""
+    global _daily_pnl
     try:
         def _fetch_positions():
             client = _get_binance_client_synced()
@@ -2345,11 +2377,35 @@ async def _job_sync_binance():
             db_dir = str(t.get("direction", "LONG")).upper()
             key    = f"{symbol}_{db_dir}"
             if symbol not in open_symbols or key not in open_map:
+                # ── Captura o PnL REALIZADO real da Binance (antes gravava 0) ──
+                _pnl_real = await _fetch_realized_pnl(symbol, t.get("opened_at"))
+                _lev      = float(t.get("leverage", 1) or 1)
+                _margin   = (float(t.get("size_usdt", 0) or 0) / _lev) if _lev else 0.0
+                _pnl_pct  = (_pnl_real / _margin * 100.0) if _margin > 0 else 0.0
+                try:
+                    _exit_px = ws_feed.get_price(symbol) or float(t.get("entry_price", 0) or 0)
+                except Exception:
+                    _exit_px = float(t.get("entry_price", 0) or 0)
+
                 t["status"]    = "CLOSED"
                 t["closed_at"] = datetime.utcnow().isoformat()
-                await save_trade(t)
+                t["current_price"] = _exit_px
+                t["pnl_usdt"]  = _pnl_real
+                t["pnl_pct"]   = _pnl_pct
+                await update_trade_close(t["id"], _exit_px, _pnl_real, _pnl_pct)
                 _active_trades_cache.pop(t.get("id", ""), None)
-                print(f"[SYNC] {symbol} {db_dir} fechado/divergente na Binance → DB atualizado")
+
+                _is_win = _pnl_real > 0
+                _daily_pnl += _pnl_real
+                _register_auto_pnl(_pnl_real)  # alimenta o kill-switch -20%
+                try:
+                    await upsert_daily_stats(_pnl_real, _is_win)
+                except Exception:
+                    pass
+                # Notifica o fechamento (stop/alvo) no Telegram — em QUALQUER modo
+                _res_tag = "🎯 ALVO" if _is_win else "🛑 STOP"
+                asyncio.create_task(send_trade_closed(t, f"{_res_tag} (SL/TP Binance)"))
+                print(f"[SYNC] {symbol} {db_dir} fechado na Binance → PnL realizado ${_pnl_real:.4f} gravado")
     except Exception as e:
         print(f"[SYNC] Erro: {e}")
 
@@ -2364,34 +2420,51 @@ def _check_daily_target_notify():
 
 
 def _build_open_positions_summary() -> str:
-    """Resumo Markdown das posições abertas (ativo, direção, entrada, atual, PnL).
-    Usado pelo /status e pelo relatório periódico de 30 min."""
+    """Resumo das posições abertas no formato MARGEM/ALAVANCAGEM/PnL aberto.
+    MARGEM = margem real comprometida (notional / alavancagem). PnL aberto é
+    calculado AO VIVO (preço atual vs entrada). Usado pelo /status e pelo
+    relatório periódico de 10 min."""
     trades = [t for t in _active_trades_cache.values() if isinstance(t, dict)]
     if not trades:
         return "📭 *Nenhuma posição aberta no momento.*"
 
-    lines = [f"📊 *Posições abertas* ({len(trades)})\n"]
+    lines = [f"⚠️ *POSIÇÕES ABERTAS ({len(trades)})*"]
     _total_pnl = 0.0
     for t in trades:
-        _dir   = str(t.get("direction", "?")).upper().replace("DIRECTION.", "")
-        _icon  = "🟢" if "LONG" in _dir else "🔴"
-        _entry = float(t.get("entry_price", 0) or 0)
-        _cur   = float(t.get("current_price", 0) or 0) or _entry
-        _pnl_p = float(t.get("pnl_pct", 0) or 0)
-        _pnl_u = float(t.get("pnl_usdt", 0) or 0)
+        _dir      = str(t.get("direction", "?")).upper().replace("DIRECTION.", "")
+        _icon     = "🟢" if "LONG" in _dir else "🔴"
+        _lev      = float(t.get("leverage", 1) or 1)
+        _notional = float(t.get("size_usdt", 0) or 0)
+        _margin   = (_notional / _lev) if _lev else _notional
+        _entry    = float(t.get("entry_price", 0) or 0)
+        _cur      = float(t.get("current_price", 0) or 0) or _entry
+        # PnL aberto AO VIVO (preço atual vs entrada), em vez do valor estático do cache
+        if _entry > 0 and _cur > 0 and _notional > 0:
+            _sign  = 1.0 if "LONG" in _dir else -1.0
+            _qty   = _notional / _entry
+            _pnl_u = (_cur - _entry) * _qty * _sign
+            _pnl_p = ((_cur - _entry) / _entry) * 100.0 * _sign * _lev
+        else:
+            _pnl_u = float(t.get("pnl_usdt", 0) or 0)
+            _pnl_p = float(t.get("pnl_pct", 0) or 0)
         _total_pnl += _pnl_u
-        _paper = " 🔸" if t.get("paper") else ""
+        _su = "+" if _pnl_u >= 0 else "-"
+        _sp = "+" if _pnl_p >= 0 else "-"
+        _paper = " 🔸PAPER" if t.get("paper") else ""
         lines.append(
-            f"{_icon} `{t.get('asset','?')}` {_dir}{_paper}\n"
-            f"   entrada `${_entry:.4f}` → atual `${_cur:.4f}`\n"
-            f"   PnL `{'+' if _pnl_p >= 0 else ''}{_pnl_p:.1f}%` / `{'+' if _pnl_u >= 0 else ''}${_pnl_u:.2f}`"
+            f"\n{_icon}{t.get('asset','?')}{_icon}{_dir}{_paper}\n\n"
+            f"MARGEM ${_margin:.2f} (USDT)\n\n"
+            f"ALAVANCAGEM {int(_lev)}X\n\n"
+            f"💰 PNL ABERTO ATUAL: {_su}${abs(_pnl_u):.2f} / {_sp}{abs(_pnl_p):.1f}%"
         )
-    lines.append(f"\n💰 *PnL aberto total:* `{'+' if _total_pnl >= 0 else ''}${_total_pnl:.2f}`")
+    if len(trades) > 1:
+        _st = "+" if _total_pnl >= 0 else "-"
+        lines.append(f"\n━━━━━━━━\n💰 *PNL ABERTO TOTAL: {_st}${abs(_total_pnl):.2f}*")
     return "\n".join(lines)
 
 
 async def job_open_positions_report():
-    """Relatório periódico (30 min) das posições abertas no Telegram pessoal.
+    """Relatório periódico (10 min) das posições abertas no Telegram pessoal.
     Silencioso quando não há posições, para evitar ruído."""
     try:
         if not any(isinstance(t, dict) for t in _active_trades_cache.values()):
@@ -3405,7 +3478,7 @@ async def lifespan(app: FastAPI):
     scheduler.add_job(_run_walk_forward_job,             "interval", hours=12,   id="walk_forward",       max_instances=1, coalesce=True)
     scheduler.add_job(_job_universe_builder,         "interval", hours=1,    id="universe_builder",   max_instances=1, coalesce=True, jitter=120)
     scheduler.add_job(job_macro_guard,               "interval", minutes=30, id="macro_guard",        max_instances=1, coalesce=True, jitter=60)
-    scheduler.add_job(job_open_positions_report,     "interval", minutes=30, id="positions_report",   max_instances=1, coalesce=True, jitter=30)
+    scheduler.add_job(job_open_positions_report,     "interval", minutes=10, id="positions_report",   max_instances=1, coalesce=True, jitter=20)
     scheduler.add_job(_job_correlation_refresh,      "interval", minutes=30, id="correlation",        max_instances=1, coalesce=True, jitter=60)
     scheduler.add_job(job_pairs_arbitrage,           "interval", minutes=15, id="pairs_arbitrage",      max_instances=1, coalesce=True, jitter=30)
     scheduler.start()
