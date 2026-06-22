@@ -371,6 +371,25 @@ def has_structural_tag(signal: dict) -> bool:
     return False
 
 
+def count_structural_tags(signal: dict) -> int:
+    """
+    Conta quantas tags estruturais V6 DISTINTAS o sinal carrega (reason +
+    confirmed_signals). Usado pelo gate de confluência do canal SINAIS: um score
+    alto vindo de 1 fator inflado é frágil; exigir ≥N tags reduz falso-positivo.
+    """
+    reason    = signal.get("reason", "")
+    confirmed = " ".join(str(x) for x in signal.get("confirmed_signals", []))
+    haystack  = f"{reason} {confirmed}"
+    # Conta da tag mais longa para a mais curta, consumindo o trecho casado — assim
+    # FIB618 não recontaria como FIB (substring) inflando a confluência.
+    n = 0
+    for tag in sorted(STRUCTURAL_TAGS, key=len, reverse=True):
+        if tag in haystack:
+            n += 1
+            haystack = haystack.replace(tag, " ")
+    return n
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # 11. LIQUIDATION SCORE — clusters de liquidação como catalisador
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -653,6 +672,16 @@ def evaluate_signal(
 
     # ── 4. MTF Confirmation ───────────────────────────────────────────────────
     mtf = check_mtf(signal, all_signals)
+    # SINAIS hard gate: divergência com o TF superior BLOQUEIA (antes só penalizava).
+    # check_mtf só retorna confirmed=False quando há TF superior no cache E ele
+    # diverge; ausência de TF superior é neutra (confirmed=True, bonus 0).
+    try:
+        from config import SINAIS_MTF_HARD_GATE as _MTF_GATE
+    except Exception:
+        _MTF_GATE = False
+    if _MTF_GATE and not mtf["confirmed"]:
+        notes.append(mtf["note"])
+        return _block(f"MTF divergente ({mtf['note']})", notes, score)
     score += mtf["bonus"]
     if mtf["note"]:
         notes.append(mtf["note"])
@@ -677,9 +706,24 @@ def evaluate_signal(
             score += 3
             notes.append("CMC trending +3pts")
 
-    # ── 10. Structural Tag (NORMAL obrigatório) ───────────────────────────────
-    if mode == "NORMAL" and not has_structural_tag(signal):
+    # ── 10. Structural Tag + Confluência (SINAIS) ─────────────────────────────
+    # Tag estrutural V6 obrigatória em TODOS os perfis (antes só NORMAL) e exigência
+    # de confluência mínima (≥N tags distintas) por perfil — corta momentum "pelado"
+    # e o "score alto solitário". Configurável; fallback ao comportamento antigo.
+    try:
+        from config import (SINAIS_REQUIRE_STRUCT_ALL as _REQ_STRUCT,
+                            SINAIS_MIN_CONFLUENCE as _MIN_CONF)
+    except Exception:
+        _REQ_STRUCT, _MIN_CONF = False, {}
+    _struct_required = _REQ_STRUCT or mode == "NORMAL"
+    if _struct_required and not has_structural_tag(signal):
         return _block("Sem tag estrutural V6", notes, score)
+    _need = int(_MIN_CONF.get(mode, 1)) if isinstance(_MIN_CONF, dict) else 1
+    if _struct_required and _need > 1:
+        _have = count_structural_tags(signal)
+        if _have < _need:
+            return _block(f"Confluência {_have}/{_need} tags", notes, score)
+        notes.append(f"Confluência {_have} tags ✓")
 
     # ── Score efetivo vs threshold ─────────────────────────────────────────────
     effective_min = base_min_score + vra_adj["score_delta"]

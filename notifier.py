@@ -511,10 +511,51 @@ def set_close_handler(handler):
     _close_handler = handler
 
 
+def _build_control_keyboard() -> dict:
+    """Painel de controle: escolher modo e perfil com um toque.
+
+    Modos seguros (Sinais/Supervisionado) ativam direto.
+    Modos de dinheiro REAL (Autônomo/Grid) pedem confirmação em 2 toques.
+    """
+    return {"inline_keyboard": [
+        [{"text": "── MODO ──", "callback_data": "noop"}],
+        [{"text": "📡 Sinais",         "callback_data": "setmode_sinais"},
+         {"text": "👤 Supervisionado", "callback_data": "setmode_off"}],
+        [{"text": "🤖 Autônomo 💰",    "callback_data": "setmode_on"},
+         {"text": "⚡ Grid 💰",         "callback_data": "setmode_grid"}],
+        [{"text": "── PERFIL ──", "callback_data": "noop"}],
+        [{"text": "🟢 Conservador", "callback_data": "setprofile_conservador"},
+         {"text": "🟡 Normal",      "callback_data": "setprofile_normal"},
+         {"text": "🔴 Agressivo",   "callback_data": "setprofile_agressivo"}],
+        [{"text": "📊 Status", "callback_data": "panel_status"},
+         {"text": "🔄 Atualizar", "callback_data": "panel_refresh"}],
+    ]}
+
+
+async def send_control_panel(chat_id: str = None):
+    """Envia o painel de controle (texto de status + botões)."""
+    chat_id = chat_id or TELEGRAM_CHAT_ID
+    header = "*🎛️ TRADER 001 — Painel de Controle*\n\nToque para escolher *modo* e *perfil*."
+    if _command_handler:
+        try:
+            header = await _command_handler("/menu")
+        except Exception:
+            pass
+    await _post("sendMessage", {
+        "chat_id": chat_id, "text": header, "parse_mode": "Markdown",
+        "reply_markup": _build_control_keyboard(),
+    })
+
+
 async def _handle_text_command(text: str, chat_id: str):
     if _command_handler is None:
         await _post("sendMessage", {"chat_id": chat_id,
             "text": "⚠️ Bot ainda inicializando, tente em alguns segundos."})
+        return
+    # /menu, /painel e /start abrem o painel de botões (modo + perfil)
+    first = text.strip().lower().split()[0] if text.strip() else ""
+    if first in ("/menu", "/painel", "/start"):
+        await send_control_panel(chat_id)
         return
     try:
         response = await _command_handler(text.strip())
@@ -677,6 +718,70 @@ async def poll_telegram_responses():
                     if resp:
                         await _post("sendMessage", {"chat_id": chat_id, "text": resp,
                                                     "parse_mode": "Markdown"})
+
+            # ── PAINEL: ignora rótulos (cabeçalhos não-clicáveis) ─────────────
+            elif data_str == "noop":
+                pass
+
+            # ── PAINEL: escolher PERFIL (seguro, ativa direto) ────────────────
+            elif data_str.startswith("setprofile_"):
+                perfil = data_str[len("setprofile_"):]   # conservador/normal/agressivo
+                if _command_handler:
+                    resp = await _command_handler(f"/modo {perfil}")
+                    if resp:
+                        await _post("sendMessage", {"chat_id": chat_id, "text": resp,
+                                                    "parse_mode": "Markdown"})
+
+            # ── PAINEL: escolher MODO ─────────────────────────────────────────
+            elif data_str.startswith("setmode_"):
+                val = data_str[len("setmode_"):]   # sinais/off/on/grid
+                # Sinais e Supervisionado são seguros → ativam direto
+                if val in ("sinais", "off"):
+                    if _command_handler:
+                        resp = await _command_handler(f"/auto {val}")
+                        if resp:
+                            await _post("sendMessage", {"chat_id": chat_id, "text": resp,
+                                                        "parse_mode": "Markdown"})
+                # Autônomo e Grid mexem com dinheiro REAL → pedem confirmação
+                else:
+                    nome = "🤖 AUTÔNOMO" if val == "on" else "⚡ GRID"
+                    await _post("sendMessage", {
+                        "chat_id": chat_id,
+                        "text": (f"⚠️ *{nome}* opera com *dinheiro REAL*.\n"
+                                 f"Confirma a ativação?"),
+                        "parse_mode": "Markdown",
+                        "reply_markup": {"inline_keyboard": [[
+                            {"text": f"✅ Confirmar {nome}", "callback_data": f"confmode_{val}"},
+                            {"text": "❌ Cancelar",          "callback_data": "panel_refresh"},
+                        ]]},
+                    })
+
+            # ── PAINEL: confirmação de modo REAL (2º toque) ───────────────────
+            elif data_str.startswith("confmode_"):
+                val = data_str[len("confmode_"):]   # on/grid
+                await _post("editMessageReplyMarkup", {
+                    "chat_id": chat_id, "message_id": msg_id,
+                    "reply_markup": {"inline_keyboard": [[
+                        {"text": "Ativando...", "callback_data": "done"}
+                    ]]},
+                })
+                if _command_handler:
+                    resp = await _command_handler(f"/auto {val} confirmar")
+                    if resp:
+                        await _post("sendMessage", {"chat_id": chat_id, "text": resp,
+                                                    "parse_mode": "Markdown"})
+
+            # ── PAINEL: botão Status ──────────────────────────────────────────
+            elif data_str == "panel_status":
+                if _command_handler:
+                    resp = await _command_handler("/status")
+                    if resp:
+                        await _post("sendMessage", {"chat_id": chat_id, "text": resp,
+                                                    "parse_mode": "Markdown"})
+
+            # ── PAINEL: botão Atualizar (reabre o painel) ─────────────────────
+            elif data_str == "panel_refresh":
+                await send_control_panel(str(chat_id))
 
             # ── FECHAR TRADE (botão na mensagem de trade aberto) ──────────────
             elif data_str.startswith("close_"):
@@ -860,8 +965,23 @@ async def _generate_signal_chart(asset: str, timeframe: str, signal: dict) -> by
         elif not tf_normal.endswith(("m", "h", "d")):
             tf_normal = f"{tf_normal}m"
 
-        from data_fetcher import get_klines
-        df = await get_klines(asset, tf_normal, limit=100)
+        # Usa o CACHE de klines (já populado pelo scan de mercado) em vez de uma
+        # chamada fapi nova — no Railway a fapi sofre rate-limit/timeout e a chamada
+        # extra só p/ o gráfico falhava, mandando o sinal SEM gráfico. Fallback p/
+        # get_klines direto se o cache estiver frio/indisponível.
+        df = None
+        try:
+            from klines_cache import get_klines_cached
+            df = await get_klines_cached(asset, tf_normal, limit=100)
+        except Exception as _kc_ex:
+            print(f"[CHART] cache klines falhou ({_kc_ex}); tentando fapi direto")
+        if df is None or len(df) < 15:
+            try:
+                from data_fetcher import get_klines
+                df = await get_klines(asset, tf_normal, limit=100)
+            except Exception as _gk_ex:
+                print(f"[CHART] get_klines fapi falhou: {_gk_ex}")
+                return None
         if df is None or len(df) < 15:
             print(f"[CHART] Klines insuficientes para {asset} {tf_normal}: df={df is not None and len(df) or 'None'}")
             return None
@@ -2173,10 +2293,9 @@ async def test_connection() -> bool:
     if result.get("ok"):
         name = result["result"].get("username", "?")
         print(f"[TELEGRAM] Conectado: @{name}")
-        await _post("sendMessage", {
-            "chat_id": TELEGRAM_CHAT_ID,
-            "text": _startup_message(),
-        })
+        # NOTA: a mensagem de boot é enviada UMA única vez por
+        # _send_startup_test_notification() no main.py ("TRADER 001 Online!").
+        # Não enviar _startup_message() aqui para evitar msg duplicada no boot.
         return True
     return False
 
@@ -2186,6 +2305,7 @@ async def register_bot_commands():
     if not _is_configured():
         return
     commands = [
+        {"command": "menu",        "description": "🎛️ Painel de botoes: escolher modo e perfil"},
         {"command": "status",      "description": "Estado atual: modo, saldo, trades abertos"},
         {"command": "resumo",      "description": "Snapshot rapido: saldo, PnL, sinais, modo"},
         {"command": "sinais",      "description": "Ultimos sinais gerados com scores"},
@@ -2197,7 +2317,6 @@ async def register_bot_commands():
         {"command": "mercado",     "description": "Market Intelligence: vies, funding, OI, noticias"},
         {"command": "scan",        "description": "Forcar varredura de mercado agora"},
         {"command": "auto",        "description": "Modo: /auto on|off|grid|sinais [confirmar]"},
-        {"command": "dual",        "description": "Dual mode: /dual sinais+auto | sinais+sup | off"},
         {"command": "brain",       "description": "Claude Brain: /brain on|off|sinais|exec"},
         {"command": "modo",        "description": "Perfil: /modo normal|agressivo|conservador"},
         {"command": "banca",       "description": "Definir banca: /banca 500"},

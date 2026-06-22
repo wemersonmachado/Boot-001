@@ -33,7 +33,8 @@ CREATE TABLE IF NOT EXISTS trades (
     timeframe   TEXT,
     score_json  TEXT,
     opened_at   TEXT,
-    closed_at   TEXT
+    closed_at   TEXT,
+    mode        TEXT
 );
 
 CREATE TABLE IF NOT EXISTS signals (
@@ -188,6 +189,11 @@ async def init_db():
                     await db.execute(s)
                 except Exception:
                     pass
+        # Migração: garante a coluna 'mode' em bancos antigos (ignora se já existe).
+        try:
+            await db.execute("ALTER TABLE trades ADD COLUMN mode TEXT")
+        except Exception:
+            pass
         await db.commit()
 
 
@@ -201,8 +207,8 @@ async def save_trade(trade: dict):
             """INSERT OR REPLACE INTO trades
                (id, asset, direction, entry_price, exit_price, stop_loss, tp1, tp2, tp3,
                 rr, leverage, size_usdt, pnl_pct, pnl_usdt, status, reason, confidence,
-                timeframe, score_json, opened_at, closed_at)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                timeframe, score_json, opened_at, closed_at, mode)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 trade["id"], trade["asset"], trade["direction"],
                 trade["entry_price"], trade.get("exit_price"),
@@ -211,10 +217,42 @@ async def save_trade(trade: dict):
                 trade.get("pnl_pct", 0), trade.get("pnl_usdt", 0),
                 trade["status"], trade["reason"], trade["confidence"],
                 trade.get("timeframe", ""), trade.get("score_json", "{}"),
-                trade["opened_at"], trade.get("closed_at"),
+                trade["opened_at"], trade.get("closed_at"), trade.get("mode"),
             ),
         )
         await db.commit()
+
+
+async def get_recent_trade_stats(limit: int = 30) -> dict:
+    """Estatística dos últimos N trades fechados (base do auto-tune do score)."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        await _configure_db(db)
+        cur = await db.execute(
+            "SELECT pnl_usdt FROM trades WHERE status='CLOSED' AND pnl_usdt IS NOT NULL "
+            "ORDER BY closed_at DESC LIMIT ?", (int(limit),)
+        )
+        rows = await cur.fetchall()
+    n    = len(rows)
+    wins = sum(1 for r in rows if float(r[0] or 0) > 0)
+    wr   = (wins / n * 100.0) if n > 0 else 0.0
+    return {"n": n, "wins": wins, "win_rate": round(wr, 1)}
+
+
+async def get_recent_signal_stats(limit: int = 30) -> dict:
+    """Acerto dos últimos N sinais SINAIS resolvidos (base do auto-tune do SINAIS).
+    Considera WIN/LOSS (TIMEOUT entra como acerto se pnl_pct>0)."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        await _configure_db(db)
+        cur = await db.execute(
+            "SELECT outcome, pnl_pct FROM signal_outcomes "
+            "WHERE outcome IS NOT NULL ORDER BY id DESC LIMIT ?", (int(limit),)
+        )
+        rows = await cur.fetchall()
+    n    = len(rows)
+    wins = sum(1 for o, p in rows
+               if str(o).upper() == "WIN" or (str(o).upper() == "TIMEOUT" and float(p or 0) > 0))
+    wr   = (wins / n * 100.0) if n > 0 else 0.0
+    return {"n": n, "wins": wins, "win_rate": round(wr, 1)}
 
 
 async def update_trade_close(trade_id: str, exit_price: float,

@@ -97,6 +97,65 @@ MODE_SETTINGS = {
 # entradas) até reset manual via /killswitch reset ou endpoint /bot/killswitch/reset.
 AUTO_KILLSWITCH_PCT = 20.0
 
+# ── Melhorias de segurança/eficácia do modo AUTÔNOMO (2026-06-22) ──────────────
+# NÃO ENVIADO AO RAILWAY — ver Documento_Melhorias_Nao_Enviadas.docx.
+#
+# (A) [REMOVIDO a pedido] Janela em PAPER ao ativar o AUTÔNOMO. O bot agora opera
+#     assim que acionado e encontrar entradas do perfil, sem espera. Constante
+#     mantida apenas por compatibilidade de import (sem efeito).
+AUTO_PAPER_WARMUP_MIN = 0          # DESATIVADO
+
+# (D) Auto-tune do score: ajusta o min_score conforme a taxa de acerto recente.
+AUTOTUNE_SCORE_ENABLED = True
+AUTOTUNE_LOOKBACK      = 30        # nº de trades fechados considerados
+AUTOTUNE_MAX_TIGHTEN   = 8         # quanto pode SUBIR o corte (mais seletivo)
+AUTOTUNE_MAX_LOOSEN    = 3         # quanto pode BAIXAR o corte (quando ganha muito)
+
+# (E) Alavancagem por volatilidade (ATR%): reduz a alavancagem em ativos mais voláteis.
+LEVERAGE_BY_VOLATILITY = True
+ATR_PCT_REF            = 1.5       # ATR% de referência (acima disto, reduz proporcional)
+LEVERAGE_VOL_FLOOR     = 3         # alavancagem mínima após redução por volatilidade
+#
+# (B) Anti-overtrading: após abrir uma entrada num ativo, só permite NOVA entrada no
+#     MESMO ativo depois de SAME_ASSET_COOLDOWN_MIN, e apenas se o sinal for "claro".
+SAME_ASSET_COOLDOWN_MIN = 15
+CLEAR_SIGNAL_MIN_SCORE  = 80        # "sinal claro" = score >= isto para reentrar no ativo
+#
+# (C) Circuit breaker da Binance: após N erros consecutivos, pede autorização no
+#     Telegram (/continuar ou /pausar). Sem resposta em CB_AUTH_TIMEOUT_S → pausa TUDO.
+CIRCUIT_BREAKER_ENABLED = True
+CB_ERROR_THRESHOLD      = 3
+CB_AUTH_TIMEOUT_S       = 300       # 5 min
+#
+# Teto de exposição agregada (notional_total / banca) e nº máximo de entradas/dia.
+MAX_TOTAL_EXPOSURE_RATIO = 1.5      # bloqueia nova entrada se exposição > isto
+MAX_TRADES_PER_DAY       = 30       # 0 = sem limite
+
+# ── Acurácia do canal SINAIS (2026-06-22) — NÃO ENVIADO AO RAILWAY ────────────
+# Melhorias que afetam SOMENTE o canal SINAIS (evaluate_signal é chamado apenas
+# pelo job_sinais_scan; o modo autônomo/real NÃO é tocado por estes gates).
+#
+# (1) MTF como GATE: se o timeframe superior diverge da direção, BLOQUEIA o sinal
+#     (antes era só penalidade de -5/-8 e o sinal ainda passava se o score fosse alto).
+SINAIS_MTF_HARD_GATE      = True
+# (2) Tag estrutural V6 obrigatória em TODOS os perfis (antes só no NORMAL). Sem
+#     pelo menos 1 tag (BOS/OB-FVG/sweep/FIB/divergência/...) o sinal é bloqueado.
+SINAIS_REQUIRE_STRUCT_ALL = True
+# (3) Confluência mínima: nº de tags estruturais DISTINTAS que devem concordar.
+#     Bloqueia o "score alto solitário" (1 fator inflado). Por perfil.
+SINAIS_MIN_CONFLUENCE     = {"CONSERVATIVE": 2, "NORMAL": 2, "AGGRESSIVE": 1}
+# (5) Claude Brain avalia o sinal a partir deste score (antes era 65 — sinais de
+#     55-64 do Agressivo escapavam da IA).
+SINAIS_BRAIN_MIN_SCORE    = 55
+# (6/7) Rastreio de resultado dos sinais transmitidos (paper) + auto-tune do corte
+#     do SINAIS conforme a taxa de acerto MEDIDA. Sem isto não há como medir acerto.
+SINAIS_OUTCOME_TRACKING   = True
+SINAIS_OUTCOME_MAX_AGE_H  = 6        # tempo máx. para resolver um sinal (senão TIMEOUT)
+SINAIS_AUTOTUNE_ENABLED   = True
+SINAIS_AUTOTUNE_LOOKBACK  = 30       # nº de sinais resolvidos considerados
+SINAIS_AUTOTUNE_MAX_TIGHTEN = 8      # quanto o corte do SINAIS pode SUBIR
+SINAIS_AUTOTUNE_MAX_LOOSEN  = 3      # quanto pode BAIXAR
+
 # ── Claude Brain ─────────────────────────────────────────────────────────────
 # Budget diário em USD para o Claude Brain (0 = sem limite definido)
 CLAUDE_BRAIN_BUDGET_USD = float(os.getenv("CLAUDE_BRAIN_BUDGET_USD", "5.0"))
@@ -213,7 +272,18 @@ TIMEFRAMES = ["1m", "3m", "5m", "15m"]
 
 # Caminho absoluto ancorado na pasta deste arquivo — independe do diretório de
 # onde o processo foi iniciado (evita criar um DB vazio em CWD diferente).
-DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "trader_001.db")
+# Banco PERSISTENTE: por padrão fica ao lado do código (zera no deploy do Railway).
+# Defina a env DB_PATH apontando para um VOLUME montado (ex.: /data/trader_001.db)
+# para o histórico/kill-switch/sessão SOBREVIVEREM aos deploys.
+DB_PATH = os.environ.get(
+    "DB_PATH",
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "trader_001.db"),
+)
+# Garante que o diretório do banco exista (caso aponte para um volume novo).
+try:
+    os.makedirs(os.path.dirname(os.path.abspath(DB_PATH)), exist_ok=True)
+except Exception:
+    pass
 
 # Telegram (preencher após criar o bot — ver SETUP.md)
 TELEGRAM_TOKEN   = os.getenv("TELEGRAM_TOKEN", "")

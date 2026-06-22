@@ -41,7 +41,15 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from config import (WEBHOOK_SECRET, HOST, PORT, WATCHLIST, MAX_DAILY_LOSS_PCT,
                     CORRELATION_GROUPS, MODE_SETTINGS, TRADING_MODE as _DEFAULT_MODE,
-                    GRID_SETTINGS, CLAUDE_BRAIN_ALL_MODES, AUTO_KILLSWITCH_PCT)
+                    GRID_SETTINGS, CLAUDE_BRAIN_ALL_MODES, AUTO_KILLSWITCH_PCT,
+                    AUTO_PAPER_WARMUP_MIN, SAME_ASSET_COOLDOWN_MIN, CLEAR_SIGNAL_MIN_SCORE,
+                    CIRCUIT_BREAKER_ENABLED, CB_ERROR_THRESHOLD, CB_AUTH_TIMEOUT_S,
+                    MAX_TOTAL_EXPOSURE_RATIO, MAX_TRADES_PER_DAY,
+                    AUTOTUNE_SCORE_ENABLED, AUTOTUNE_LOOKBACK, AUTOTUNE_MAX_TIGHTEN,
+                    AUTOTUNE_MAX_LOOSEN, LEVERAGE_BY_VOLATILITY, ATR_PCT_REF, LEVERAGE_VOL_FLOOR,
+                    SINAIS_BRAIN_MIN_SCORE, SINAIS_OUTCOME_TRACKING, SINAIS_OUTCOME_MAX_AGE_H,
+                    SINAIS_AUTOTUNE_ENABLED, SINAIS_AUTOTUNE_LOOKBACK,
+                    SINAIS_AUTOTUNE_MAX_TIGHTEN, SINAIS_AUTOTUNE_MAX_LOOSEN)
 import market_engine
 from models import WebhookAlert, Direction, ActiveTrade
 from signal_engine import scan_watchlist, analyze_asset, scan_anomalies, analyze_smart_flow
@@ -59,6 +67,7 @@ from database import (
     update_trade_close, mark_signal_executed,
     upsert_asset_profile, upsert_confluence_pattern,
     record_signal_outcome, upsert_daily_stats, get_score_adjustment,
+    get_recent_trade_stats, get_recent_signal_stats,
 )
 from notifier import (
     send_signal_alert, send_trade_opened, send_trade_closed,
@@ -86,6 +95,9 @@ _active_trades_cache: dict = {}  # id → ActiveTrade
 _anomalies_cache: list = []
 _trending_cache: list = []
 _last_scan_at: str = ""
+_last_scan_ts: float = 0.0          # epoch do último scan de mercado concluído
+_last_scan_count: int = 0           # nº de sinais do último scan
+_sinais_last_empty_alert_ts: float = 0.0   # throttle do alerta de cache vazio
 _mode_started_at: str = ""
 CURRENT_MODE: str = "AGGRESSIVE"   # inicia sempre em AGGRESSIVE
 scheduler = AsyncIOScheduler()
@@ -241,6 +253,23 @@ _auto_killswitch_tripped: bool = False # True = perdeu AUTO_KILLSWITCH_PCT da ba
 _auto_session_start_banca: float = 0.0 # banca de referência (capturada na 1ª entrada autônoma)
 _auto_session_pnl: float      = 0.0    # PnL realizado acumulado da sessão autônoma (base do kill-switch)
 _auto_killswitch_notified: bool = False # evita spam do alerta de kill-switch
+
+# ── Segurança/eficácia AUTÔNOMO (2026-06-22, NÃO enviado ao Railway) ──────────
+_auto_session_started_ts: float = 0.0  # início da sessão autônoma (janela PAPER warmup)
+_asset_last_entry_ts: dict      = {}   # asset -> ts da última abertura (anti-overtrading)
+_trades_today: int              = 0    # nº de entradas autônomas hoje (teto diário)
+_trades_today_date              = None
+# Circuit breaker da Binance (erros consecutivos → autorização Telegram → pausa)
+_binance_error_streak: int      = 0
+_cb_pending: bool               = False  # True = aguardando /continuar ou /pausar
+_cb_deadline: float             = 0.0    # prazo (epoch) para autorizar antes de pausar
+# Auto-tune do score: deslocamento aplicado ao min_score conforme a taxa de acerto.
+_score_offset: int              = 0
+# Auto-tune e rastreio de acerto ESPECÍFICOS do canal SINAIS (não tocam o autônomo).
+_sinais_score_offset: int       = 0          # deslocamento no min_score do SINAIS
+_sinais_pending_outcomes: list  = []         # sinais transmitidos aguardando resolução
+                                             # cada item: dict(asset,direction,timeframe,
+                                             # entry,sl,tp,score,tags,rsi,ts,db_id)
 
 # ── Sharpe / Sortino ao vivo ───────────────────────────────────────────────
 _session_returns: list  = []      # pnl_pct de cada trade fechado nesta sessao
@@ -439,6 +468,7 @@ def _prune_cooldowns():
 
 async def job_scan_market():
     global _latest_signals, _market_cache, _news_cache, _trending_cache, _last_scan_at
+    global _last_scan_ts, _last_scan_count
     _prune_cooldowns()
     # Scan de mercado roda sempre; só bloqueia execução de trades (job_auto_trade verifica PAPER_TRADING)
     print(f"[SCHEDULER] Scanning @ {datetime.utcnow().strftime('%H:%M:%S')} | {CURRENT_MODE} | {'PAUSADO' if PAPER_TRADING else 'ATIVO'}")
@@ -512,6 +542,8 @@ async def job_scan_market():
             for s in signals[:20]
         ]
         _last_scan_at = datetime.now().strftime('%H:%M:%S')
+        _last_scan_ts = time.time()
+        _last_scan_count = len(signals)
         print(f"[SCHEDULER] {len(signals)} sinais encontrados")
         await log_event("SCAN", f"{len(signals)} sinais encontrados", {"mode": CURRENT_MODE})
 
@@ -641,14 +673,224 @@ def _reset_auto_killswitch() -> dict:
     AUTÔNOMO e no reset manual do kill-switch."""
     global _auto_killswitch_tripped, _auto_session_pnl, _auto_session_start_banca
     global _auto_killswitch_notified, _session_trades, _last_auto_entry_ts
+    global _auto_session_started_ts, _asset_last_entry_ts
     _auto_killswitch_tripped  = False
     _auto_killswitch_notified = False
     _auto_session_pnl         = 0.0
     _auto_session_start_banca = 0.0
     _session_trades           = 0      # renova orçamento de N entradas da sessão
     _last_auto_entry_ts       = 0.0    # libera a 1ª entrada sem esperar cadência
-    print("[KILLSWITCH] Sessão autônoma reiniciada (kill-switch liberado, orçamento renovado).")
+    _auto_session_started_ts  = time.time()  # inicia janela PAPER warmup
+    _asset_last_entry_ts      = {}     # zera cooldown anti-overtrading por ativo
+    print("[KILLSWITCH] Sessão autônoma reiniciada (kill-switch liberado, orçamento renovado, warmup iniciado).")
     return {"ok": True, "killswitch": "reset", "session_pnl": 0.0}
+
+
+# ── Helpers: anti-overtrading + teto diário/exposição ────────────────────────
+# (Janela PAPER warm-up REMOVIDA a pedido: o autônomo opera assim que acionado e
+#  encontrar entradas conforme o perfil, sem espera.)
+def _same_asset_blocked(asset: str, score: float) -> bool:
+    """Anti-overtrading: bloqueia reentrada no MESMO ativo dentro de
+    SAME_ASSET_COOLDOWN_MIN; passado o cooldown, só libera se sinal 'claro'
+    (score >= CLEAR_SIGNAL_MIN_SCORE)."""
+    last = _asset_last_entry_ts.get(asset, 0)
+    if last <= 0:
+        return False
+    if (time.time() - last) < SAME_ASSET_COOLDOWN_MIN * 60:
+        return True
+    return float(score or 0) < CLEAR_SIGNAL_MIN_SCORE
+
+
+def _trades_today_blocked() -> bool:
+    """Teto diário de entradas autônomas (MAX_TRADES_PER_DAY; 0 = sem limite)."""
+    global _trades_today, _trades_today_date
+    today = datetime.utcnow().date()
+    if today != _trades_today_date:
+        _trades_today = 0
+        _trades_today_date = today
+    return MAX_TRADES_PER_DAY > 0 and _trades_today >= MAX_TRADES_PER_DAY
+
+
+async def _exposure_blocked() -> bool:
+    """True se a exposição agregada (notional_total / banca) excede o teto."""
+    try:
+        open_trades = await get_open_trades()
+        notional = sum(float(t.get("size_usdt", 0) or 0) for t in open_trades)
+        banca = BANCA_USDT if BANCA_USDT > 0 else max(float(_balance_cache.get("wallet_balance", 0) or 0), 1.0)
+        return banca > 0 and (notional / banca) > MAX_TOTAL_EXPOSURE_RATIO
+    except Exception:
+        return False
+
+
+# ── Circuit breaker da Binance (erros consecutivos → autorização → pausa) ─────
+def _register_binance_ok():
+    """Zera o contador de erros consecutivos após uma chamada Binance bem-sucedida."""
+    global _binance_error_streak
+    _binance_error_streak = 0
+
+
+async def _register_binance_error(ctx: str = ""):
+    """Conta erros consecutivos da Binance. Ao atingir CB_ERROR_THRESHOLD, dispara o
+    circuit breaker: pede autorização no Telegram e arma o prazo de pausa automática."""
+    global _binance_error_streak, _cb_pending, _cb_deadline
+    if not CIRCUIT_BREAKER_ENABLED:
+        return
+    _binance_error_streak += 1
+    print(f"[CIRCUIT-BREAKER] Erro Binance #{_binance_error_streak} ({ctx})")
+    if _binance_error_streak >= CB_ERROR_THRESHOLD and not _cb_pending and not BOT_PAUSED:
+        _cb_pending  = True
+        _cb_deadline = time.time() + CB_AUTH_TIMEOUT_S
+        await send_alert(
+            f"⚠️ *CIRCUIT BREAKER* — `{_binance_error_streak}` erros seguidos da Binance.\n"
+            f"Responda em até *{CB_AUTH_TIMEOUT_S // 60} min*:\n"
+            f"`/continuar` — segue operando\n"
+            f"`/pausar` — para agora\n\n"
+            f"_Sem resposta → o bot PAUSA TUDO automaticamente._"
+        )
+
+
+def _cb_resume() -> str:
+    """Libera o circuit breaker (resposta /continuar)."""
+    global _cb_pending, _binance_error_streak, _cb_deadline
+    _cb_pending = False
+    _binance_error_streak = 0
+    _cb_deadline = 0.0
+    print("[CIRCUIT-BREAKER] Autorizado a continuar pelo usuário.")
+    return "✅ Circuit breaker liberado — seguindo operando."
+
+
+async def job_circuit_breaker_watch():
+    """Se o circuit breaker está pendente e o prazo de autorização expirou,
+    pausa TUDO (BOT_PAUSED=True). Roda a cada 30s."""
+    global _cb_pending, BOT_PAUSED
+    if not _cb_pending:
+        return
+    if time.time() >= _cb_deadline:
+        BOT_PAUSED  = True
+        _cb_pending = False
+        print("[CIRCUIT-BREAKER] Timeout sem resposta → BOT_PAUSED=True")
+        await send_alert(
+            "🛑 *BOT PAUSADO* — sem resposta ao circuit breaker em "
+            f"{CB_AUTH_TIMEOUT_S // 60} min.\nUse `/continuar` (ou `/bot/resume`) para retomar."
+        )
+
+
+# ── #12 Auto-tune do min_score por taxa de acerto recente ────────────────────
+def _eff_min_score(mode_cfg: dict) -> int:
+    """min_score efetivo = base do perfil + deslocamento do auto-tune (com piso)."""
+    base = int(mode_cfg.get("min_score", 70))
+    return max(40, base + _score_offset)
+
+
+async def job_autotune_score():
+    """Ajusta _score_offset conforme a taxa de acerto dos últimos N trades fechados:
+    win-rate baixa → corte MAIS alto (seletivo); win-rate alta → corte mais baixo.
+    Conservador e com limites (AUTOTUNE_MAX_TIGHTEN / AUTOTUNE_MAX_LOOSEN)."""
+    global _score_offset
+    if not AUTOTUNE_SCORE_ENABLED:
+        return
+    try:
+        stats = await get_recent_trade_stats(AUTOTUNE_LOOKBACK)
+        if stats["n"] < 8:           # amostra pequena → não mexe
+            return
+        wr  = stats["win_rate"]
+        old = _score_offset
+        if   wr < 35:  _score_offset = min(AUTOTUNE_MAX_TIGHTEN,  _score_offset + 2)
+        elif wr < 45:  _score_offset = min(AUTOTUNE_MAX_TIGHTEN,  _score_offset + 1)
+        elif wr > 60:  _score_offset = max(-AUTOTUNE_MAX_LOOSEN,  _score_offset - 1)
+        else:          _score_offset = 0 if _score_offset == 0 else (_score_offset - (1 if _score_offset > 0 else -1))
+        if _score_offset != old:
+            print(f"[AUTOTUNE] win-rate {wr:.0f}% ({stats['n']} trades) → score_offset {old:+d} -> {_score_offset:+d}")
+    except Exception as e:
+        print(f"[AUTOTUNE] Erro: {e}")
+
+
+# ── SINAIS: rastreio de resultado dos sinais transmitidos + auto-tune ─────────
+async def job_sinais_outcome_watch():
+    """Resolve os sinais SINAIS transmitidos comparando os candles após a entrada
+    com TP1/SL: WIN se o preço tocou o alvo primeiro, LOSS se tocou o stop. Após
+    SINAIS_OUTCOME_MAX_AGE_H sem resolver, fecha como TIMEOUT pelo preço atual.
+    Alimenta signal_outcomes → base do win-rate medível e do auto-tune do SINAIS.
+    Conservador: na dúvida (TP e SL no mesmo candle) conta como LOSS."""
+    global _sinais_pending_outcomes
+    if not SINAIS_OUTCOME_TRACKING or not _sinais_pending_outcomes:
+        return
+    import pandas as pd
+    from klines_cache import get_klines_cached as _gkl
+    _still: list = []
+    _now = time.time()
+    for it in _sinais_pending_outcomes:
+        try:
+            asset, dirx = it["asset"], it["direction"]
+            entry, sl, tp = it["entry"], it["sl"], it["tp"]
+            is_long = "LONG" in dirx
+            kl = await _gkl(asset, it["timeframe"], limit=120)
+            hit_tp = hit_sl = False
+            if kl is not None and len(kl) > 0:
+                # só candles a partir da entrada (índice = timestamp datetime UTC)
+                _entry_dt = pd.Timestamp(it["ts"], unit="s")
+                _sub = kl[kl.index >= (_entry_dt - pd.Timedelta(seconds=60))]
+                for hi, lo in zip(_sub["high"].values, _sub["low"].values):
+                    hi, lo = float(hi), float(lo)
+                    if is_long:
+                        if hi >= tp: hit_tp = True
+                        if lo <= sl: hit_sl = True
+                    else:
+                        if lo <= tp: hit_tp = True
+                        if hi >= sl: hit_sl = True
+                    if hit_tp or hit_sl:
+                        break
+            outcome = None
+            exit_px = entry
+            if hit_sl:                       # conservador: SL tem prioridade
+                outcome, exit_px = "LOSS", sl
+            elif hit_tp:
+                outcome, exit_px = "WIN", tp
+            elif _now - it["ts"] > SINAIS_OUTCOME_MAX_AGE_H * 3600:
+                # timeout: resolve pelo último preço conhecido
+                try:
+                    exit_px = float(kl["close"].iloc[-1]) if kl is not None and len(kl) else entry
+                except Exception:
+                    exit_px = entry
+                outcome = "TIMEOUT"
+            if outcome is None:
+                _still.append(it)            # ainda em aberto
+                continue
+            pnl_pct = ((exit_px - entry) / entry * 100.0) if is_long else ((entry - exit_px) / entry * 100.0)
+            asyncio.create_task(record_signal_outcome(
+                int(it.get("db_id", 0) or 0), asset, dirx, it["timeframe"],
+                entry, exit_px, round(pnl_pct, 3), outcome,
+                tags=it.get("tags", ""), rsi_val=it.get("rsi", 0.0),
+            ))
+            print(f"[SINAIS-OUTCOME] {asset} {dirx} {it['timeframe']} → {outcome} ({pnl_pct:+.2f}%)")
+        except Exception as e:
+            # erro pontual: mantém o sinal em aberto para nova tentativa
+            print(f"[SINAIS-OUTCOME] erro {it.get('asset')}: {e}")
+            _still.append(it)
+    _sinais_pending_outcomes = _still
+
+
+async def job_sinais_autotune():
+    """Ajusta _sinais_score_offset conforme o acerto MEDIDO dos sinais SINAIS
+    (signal_outcomes). win-rate baixa → corte mais alto; alta → corte mais baixo.
+    Espelha o auto-tune dos trades, mas alimentado pelos resultados dos sinais."""
+    global _sinais_score_offset
+    if not SINAIS_AUTOTUNE_ENABLED:
+        return
+    try:
+        stats = await get_recent_signal_stats(SINAIS_AUTOTUNE_LOOKBACK)
+        if stats["n"] < 10:              # amostra pequena → não mexe
+            return
+        wr  = stats["win_rate"]
+        old = _sinais_score_offset
+        if   wr < 35:  _sinais_score_offset = min(SINAIS_AUTOTUNE_MAX_TIGHTEN, _sinais_score_offset + 2)
+        elif wr < 45:  _sinais_score_offset = min(SINAIS_AUTOTUNE_MAX_TIGHTEN, _sinais_score_offset + 1)
+        elif wr > 60:  _sinais_score_offset = max(-SINAIS_AUTOTUNE_MAX_LOOSEN, _sinais_score_offset - 1)
+        else:          _sinais_score_offset = 0 if _sinais_score_offset == 0 else (_sinais_score_offset - (1 if _sinais_score_offset > 0 else -1))
+        if _sinais_score_offset != old:
+            print(f"[SINAIS-AUTOTUNE] win-rate {wr:.0f}% ({stats['n']} sinais) → offset {old:+d} -> {_sinais_score_offset:+d}")
+    except Exception as e:
+        print(f"[SINAIS-AUTOTUNE] Erro: {e}")
 
 
 def _build_signal_from_dict(signal_dict: dict):
@@ -739,6 +981,21 @@ async def _execute_trade_inner(signal_dict: dict):
                 print(f"[LEVERAGE ADAPTIVE] Reducao por exposicao ({exposure_ratio:.1%} exp): {old_lev}x -> {user_leverage}x")
     except Exception as _le_ex:
         print(f"[LEVERAGE ADAPTIVE] Erro ao calcular reducao: {_le_ex}")
+
+    # ── #3 Alavancagem por VOLATILIDADE (ATR%) — reduz em ativos mais voláteis ──
+    if LEVERAGE_BY_VOLATILITY:
+        try:
+            _entry_px = float(signal.entry or 0)
+            _atr_abs  = float(signal_dict.get("atr") or abs(_entry_px - float(signal.stop_loss)))
+            _atr_pct  = (_atr_abs / _entry_px * 100.0) if _entry_px > 0 else 0.0
+            if _atr_pct > ATR_PCT_REF and ATR_PCT_REF > 0:
+                _vol_factor = ATR_PCT_REF / _atr_pct
+                _old = user_leverage
+                user_leverage = max(int(LEVERAGE_VOL_FLOOR), int(user_leverage * _vol_factor))
+                if user_leverage < _old:
+                    print(f"[LEVERAGE VOL] {signal.asset} ATR%={_atr_pct:.2f} > {ATR_PCT_REF} → {_old}x -> {user_leverage}x")
+        except Exception as _ve_ex:
+            print(f"[LEVERAGE VOL] Erro: {_ve_ex}")
 
     # ── Sizing: Usa Sizing baseado em Risco com Margin Cap quando banca definida ──
     if BANCA_USDT > 0:
@@ -859,6 +1116,7 @@ async def _execute_trade_inner(signal_dict: dict):
         trade_dict["timeframe"]  = signal.timeframe
         trade_dict["trade_type"] = signal_dict.get("trade_type", "DAY_TRADE")
         trade_dict["paper"] = PAPER_TRADING
+        trade_dict["mode"]  = OPERATION_MODE   # tag de modo (#11): separa AUTÔNOMO/SINAIS/etc.
         await save_trade(trade_dict)
         _active_trades_cache[trade.id] = trade_dict
         _session_trades += 1  # conta trades abertos (funciona em todos os modos)
@@ -923,7 +1181,7 @@ async def job_auto_trade(signals: list):
     AUTONOMOUS  → executa + notifica Telegram com mesmo formato do supervisionado
     Respeita: limite de trades/sessão, objetivo diário, cooldown de 5min.
     """
-    global _daily_pnl, _session_trades, _last_auto_entry_ts, _auto_killswitch_notified
+    global _daily_pnl, _session_trades, _last_auto_entry_ts, _auto_killswitch_notified, _trades_today
 
     _effective_mode = _resolve_effective_mode()
     if _effective_mode in ("SINAIS", "GRID"):
@@ -961,6 +1219,16 @@ async def job_auto_trade(signals: list):
                 f"Posições abertas seguem até SL/TP. Para retomar: `/killswitch reset`."
             )
         print(f"[AUTO] Kill-switch -{AUTO_KILLSWITCH_PCT:.0f}% ativo — sem novas entradas.")
+        return
+
+    # Circuit breaker pendente: aguardando /continuar ou /pausar — não abre nada.
+    if _cb_pending:
+        print("[AUTO] Circuit breaker pendente — aguardando autorização, sem novas entradas.")
+        return
+
+    # Teto de exposição agregada (notional_total / banca).
+    if _effective_mode == "AUTONOMOUS" and await _exposure_blocked():
+        print(f"[AUTO] Exposição agregada > {MAX_TOTAL_EXPOSURE_RATIO:.1f}x banca — sem novas entradas.")
         return
 
     # Objetivo diário atingido?
@@ -1043,8 +1311,9 @@ async def job_auto_trade(signals: list):
         if _mode_wl and signal.asset not in _mode_wl:
             _blk("fora_watchlist_modo")
             continue  # Fora da watchlist do modo atual
-        if signal.confidence < mode_cfg["min_score"] or signal.rr < mode_cfg["min_rr"]:
-            _blk(f"score/rr<min({mode_cfg['min_score']}/{mode_cfg['min_rr']})")
+        _min_score_eff = _eff_min_score(mode_cfg)
+        if signal.confidence < _min_score_eff or signal.rr < mode_cfg["min_rr"]:
+            _blk(f"score/rr<min({_min_score_eff}/{mode_cfg['min_rr']})")
             continue
         # MACRO RISK-OFF: com BTC caindo forte (<= -1.5% em 1h), só aceita pares premium
         # (BTC/ETH/SOL). Bloqueia scalp de low-cap, que é triturado quando o mercado desaba.
@@ -1173,8 +1442,8 @@ async def job_auto_trade(signals: list):
                     signal_dict["ml_bonus"]   = ml_bonus
                     print(f"[ML] {signal.asset} score {prev_conf:.1f} → {signal_dict['confidence']:.1f} (bonus {ml_bonus:+.1f})")
                 # Revalida threshold após ajuste ML
-                if signal_dict["confidence"] < mode_cfg["min_score"]:
-                    print(f"[ML] {signal.asset} reprovado após ajuste ML ({signal_dict['confidence']:.1f} < {mode_cfg['min_score']})")
+                if signal_dict["confidence"] < _eff_min_score(mode_cfg):
+                    print(f"[ML] {signal.asset} reprovado após ajuste ML ({signal_dict['confidence']:.1f} < {_eff_min_score(mode_cfg)})")
                     _blk("ml_reprovou")
                     continue
 
@@ -1334,6 +1603,14 @@ async def job_auto_trade(signals: list):
             if _cadence_block:
                 _blk(f"cadencia({_cadence_s}s)")
                 continue
+            # Teto diário de entradas autônomas.
+            if _trades_today_blocked():
+                _blk("max-trades-dia")
+                continue
+            # Anti-overtrading: mesmo ativo só após 15min e com sinal claro (score alto).
+            if _same_asset_blocked(signal.asset, signal.confidence):
+                _blk("anti-overtrading(mesmo-ativo)")
+                continue
             print(f"[AUTÔNOMO] {signal.asset} {signal.direction.value} score={signal.confidence:.0f}")
             _before_open = _session_trades
             await _execute_trade(signal_dict)
@@ -1341,6 +1618,8 @@ async def job_auto_trade(signals: list):
             # _session_trades é incrementado dentro de _execute_trade_inner após sucesso
             if _session_trades > _before_open:
                 _last_auto_entry_ts = now_ts
+                _asset_last_entry_ts[signal.asset] = now_ts  # arma cooldown anti-overtrading
+                _trades_today += 1                            # conta no teto diário
                 # Normal/Agressivo: 1 entrada por janela de cadência → encerra o ciclo.
                 if _cadence_s > 0:
                     _cadence_break = True
@@ -1955,7 +2234,7 @@ async def job_sinais_scan():
     Usa o perfil de risco ativo (CURRENT_MODE) para os thresholds.
     Prioridade: 60% pump/dump, 40% outros movimentos.
     """
-    global _sinais_toggle, _sinais_cooldown, _signal_fingerprints, _sinais_session_count, _sinais_weekly, _latest_signals, SINAIS_PROFILE, DUAL_MODE_ENABLED, _sinais_empty_cycles
+    global _sinais_toggle, _sinais_cooldown, _signal_fingerprints, _sinais_session_count, _sinais_weekly, _latest_signals, SINAIS_PROFILE, DUAL_MODE_ENABLED, _sinais_empty_cycles, _sinais_last_empty_alert_ts
     
     from state import state
     # Se sinais_enabled está OFF, o motor de sinais deve parar completamente.
@@ -1982,13 +2261,26 @@ async def job_sinais_scan():
     signals = _latest_signals[:]
     if not signals:
         _sinais_empty_cycles += 1
-        print(f"[SINAIS] Sem sinais em cache — ciclo vazio #{_sinais_empty_cycles}.")
-        if _sinais_empty_cycles >= 2:
-            asyncio.create_task(send_alert(
-                f"⚠️ SINAIS: {_sinais_empty_cycles} ciclos consecutivos sem sinais no cache. "
-                f"Verifique se o scan de mercado está rodando."
-            ))
-            _sinais_empty_cycles = 0  # reset após alerta
+        # Diferencia DOIS casos antes de alarmar:
+        #  (a) SCAN CAÍDO: o job_scan_market não conclui há >3min → problema real.
+        #  (b) DEDUP/MERCADO QUIETO: o scan rodou e até achou sinais, mas todos já
+        #      foram enviados (fingerprint/cooldown) ou o mercado não dá setup. NÃO
+        #      é falha do scan — não faz sentido pedir "verifique o scan".
+        _scan_age = time.time() - _last_scan_ts if _last_scan_ts else 1e9
+        _scan_down = _scan_age > 180
+        if _scan_down:
+            print(f"[SINAIS] Cache vazio + scan parado há {_scan_age:.0f}s (ciclo #{_sinais_empty_cycles}).")
+            # Alerta no máx. 1x a cada 30min para não floodar o canal.
+            if time.time() - _sinais_last_empty_alert_ts > 1800:
+                _sinais_last_empty_alert_ts = time.time()
+                asyncio.create_task(send_alert(
+                    f"⚠️ SINAIS: scan de mercado parado há {_scan_age/60:.0f}min "
+                    f"(sem sinais no cache). Verifique conectividade Binance/rate-limit."
+                ))
+        else:
+            # scan saudável; só não há sinais NOVOS a enviar agora
+            print(f"[SINAIS] Sem sinais novos a enviar (scan ok há {_scan_age:.0f}s, "
+                  f"últimos {_last_scan_count} já deduplicados). Ciclo #{_sinais_empty_cycles}.")
         return
     _sinais_empty_cycles = 0  # reset quando há sinais
 
@@ -2064,7 +2356,8 @@ async def job_sinais_scan():
         if not _passes_dedup(s, SINAIS_COOLDOWN_PD):
             continue
         # Pipeline de 9 filtros
-        result = evaluate_signal(s, ctx, pre_filtered, scan_mode, mode_cfg["min_score"])
+        result = evaluate_signal(s, ctx, pre_filtered, scan_mode,
+                                 mode_cfg["min_score"] + _sinais_score_offset)
         if not result["passes"]:
             blocked_log.append(f"{s.get('asset')} [{result['block_reason']}]")
             continue
@@ -2080,7 +2373,8 @@ async def job_sinais_scan():
             break
         if not _passes_dedup(s, SINAIS_COOLDOWN_REG):
             continue
-        result = evaluate_signal(s, ctx, pre_filtered, scan_mode, mode_cfg["min_score"])
+        result = evaluate_signal(s, ctx, pre_filtered, scan_mode,
+                                 mode_cfg["min_score"] + _sinais_score_offset)
         if not result["passes"]:
             blocked_log.append(f"{s.get('asset')} [{result['block_reason']}]")
             continue
@@ -2104,7 +2398,7 @@ async def job_sinais_scan():
 
         # ── Filtro Claude Brain (opcional) — só acima de score 65 ────────────
         _brain_active = _claude_brain_enabled
-        if _brain_active and signal_dict.get("confidence", 0) >= 65:
+        if _brain_active and signal_dict.get("confidence", 0) >= SINAIS_BRAIN_MIN_SCORE:
             try:
                 from data_fetcher import get_ticker as _gt, get_funding_rate as _gfr
                 from klines_cache import get_klines_cached as _gkl_s
@@ -2197,6 +2491,27 @@ async def job_sinais_scan():
                     _db_sig_id, signal_dict.get("asset", ""), "vip"
                 ))
             asyncio.create_task(upsert_daily_stats(0, False, signals_delta=1))
+            # ── Rastreio de resultado do sinal (paper) — base do win-rate medível ──
+            if SINAIS_OUTCOME_TRACKING:
+                try:
+                    _entry = float(signal_dict.get("entry", 0) or 0)
+                    _sl    = float(signal_dict.get("stop_loss", 0) or 0)
+                    _tp    = float(signal_dict.get("tp1", 0) or 0)
+                    if _entry > 0 and _sl > 0 and _tp > 0:
+                        _sinais_pending_outcomes.append({
+                            "asset":     signal_dict.get("asset", ""),
+                            "direction": str(signal_dict.get("direction", "")).split(".")[-1].upper(),
+                            "timeframe": signal_dict.get("timeframe", "15m"),
+                            "entry":     _entry, "sl": _sl, "tp": _tp,
+                            "score":     float(signal_dict.get("effective_score",
+                                              signal_dict.get("confidence", 0)) or 0),
+                            "tags":      signal_dict.get("reason", "")[:120],
+                            "rsi":       float(signal_dict.get("rsi_val", 0) or 0),
+                            "ts":        time.time(),
+                            "db_id":     _db_sig_id or 0,
+                        })
+                except Exception as _to_ex:
+                    print(f"[SINAIS-OUTCOME] registro falhou: {_to_ex}")
         _sinais_session_count += 1
         await asyncio.sleep(1)
 
@@ -2405,9 +2720,23 @@ async def _job_sync_binance():
                 # Notifica o fechamento (stop/alvo) no Telegram — em QUALQUER modo
                 _res_tag = "🎯 ALVO" if _is_win else "🛑 STOP"
                 asyncio.create_task(send_trade_closed(t, f"{_res_tag} (SL/TP Binance)"))
+                # #10/#14 — fecha o loop de aprendizado: registra o resultado real
+                # (alimenta signal_outcomes -> base do ML/score adaptativo), que antes
+                # só era gravado no fechamento manual.
+                try:
+                    asyncio.create_task(record_signal_outcome(
+                        int(t.get("signal_db_id", 0) or 0), symbol, db_dir,
+                        t.get("timeframe", "15m") or "15m",
+                        float(t.get("entry_price", 0) or 0), _exit_px, _pnl_pct,
+                        "WIN" if _is_win else "LOSS", str(t.get("reason", ""))[:80], 0.0,
+                    ))
+                except Exception as _ro_ex:
+                    print(f"[SYNC] record_signal_outcome falhou: {_ro_ex}")
                 print(f"[SYNC] {symbol} {db_dir} fechado na Binance → PnL realizado ${_pnl_real:.4f} gravado")
+        _register_binance_ok()  # chamada Binance bem-sucedida → zera streak de erros
     except Exception as e:
         print(f"[SYNC] Erro: {e}")
+        await _register_binance_error("sync")  # alimenta o circuit breaker
 
 
 def _check_daily_target_notify():
@@ -2743,10 +3072,22 @@ async def _telegram_command_handler(text: str) -> str:
     global OPERATION_MODE, CURRENT_MODE, BANCA_USDT, TRADES_PER_SESSION, PAPER_TRADING
     global GRID_PROFIT_TARGET_USDT, GRID_PAIRS, GRID_LEVERAGE, EXEC_MODE
     global DUAL_MODE_ENABLED, SINAIS_PROFILE, _claude_brain_enabled, _sinais_claude_brain, _exec_claude_brain
+    global BOT_PAUSED
 
     parts = text.strip().split()
     cmd   = parts[0].lower()
     args  = parts[1:] if len(parts) > 1 else []
+
+    # /continuar e /pausar — resposta ao CIRCUIT BREAKER (e pausa/retomada manual)
+    if cmd in ("/continuar", "/continue", "/retomar"):
+        BOT_PAUSED = False
+        return _cb_resume()
+    if cmd in ("/pausar", "/pause", "/parar"):
+        BOT_PAUSED = True
+        global _cb_pending
+        _cb_pending = False
+        print("[CIRCUIT-BREAKER] Pausado pelo usuário via /pausar.")
+        return "🛑 *Bot pausado* — não abre novas entradas. Use `/continuar` para retomar."
 
     # /menu ou /painel — cabeçalho do Painel de Controle (os botões são
     # anexados pelo notifier; aqui só retornamos o texto com o estado atual)
@@ -3479,6 +3820,10 @@ async def lifespan(app: FastAPI):
     scheduler.add_job(_job_universe_builder,         "interval", hours=1,    id="universe_builder",   max_instances=1, coalesce=True, jitter=120)
     scheduler.add_job(job_macro_guard,               "interval", minutes=30, id="macro_guard",        max_instances=1, coalesce=True, jitter=60)
     scheduler.add_job(job_open_positions_report,     "interval", minutes=10, id="positions_report",   max_instances=1, coalesce=True, jitter=20)
+    scheduler.add_job(job_circuit_breaker_watch,     "interval", seconds=30, id="circuit_breaker",    max_instances=1, coalesce=True)
+    scheduler.add_job(job_autotune_score,            "interval", minutes=15, id="autotune_score",     max_instances=1, coalesce=True)
+    scheduler.add_job(job_sinais_outcome_watch,      "interval", minutes=3,  id="sinais_outcome",     max_instances=1, coalesce=True, jitter=20)
+    scheduler.add_job(job_sinais_autotune,           "interval", minutes=20, id="sinais_autotune",    max_instances=1, coalesce=True)
     scheduler.add_job(_job_correlation_refresh,      "interval", minutes=30, id="correlation",        max_instances=1, coalesce=True, jitter=60)
     scheduler.add_job(job_pairs_arbitrage,           "interval", minutes=15, id="pairs_arbitrage",      max_instances=1, coalesce=True, jitter=30)
     scheduler.start()
