@@ -682,6 +682,15 @@ def fibonacci_levels(df: pd.DataFrame, lookback: int = 50) -> dict:
     }
 
 
+_FIB_TOL_MAJORS = {"BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT"}
+
+
+def fib_tolerance_for(symbol: str) -> float:
+    """Tolerância % do Fibonacci por ativo (2026-06-23) — majors se movem menos
+    em % por candle, então pedem zona mais estreita; micro-caps pedem zona mais larga."""
+    return 0.3 if symbol in _FIB_TOL_MAJORS else 0.8
+
+
 def score_fibonacci_confluence(df: pd.DataFrame, direction: Direction, tol_pct: float = 0.5) -> float:
     """
     Bônus quando preço está numa zona de Fibonacci (golden zones: 0.382/0.5/0.618).
@@ -864,6 +873,39 @@ def score_liquidity_sweep(df: pd.DataFrame, direction: Direction) -> float:
     return 0.0
 
 
+# ── Override de reversão genuína (2026-06-23) ────────────────────────────────
+# Usado pelos gates de proximidade (PROX-GATE, ANTI-TOPO/FUNDO, MTF-GATE,
+# TOPO/FUNDO-FRESCO): em vez de bloquear tudo que está "colado"/"fresco", libera
+# quando há evidência REAL de reversão — fundo verdadeiro (absorção/exaustão de
+# venda) ou topo fraco (exaustão de compra) — em vez de bloquear por padrão.
+# "Só caiu"/"só subiu" sem nenhuma dessas 3 assinaturas continua bloqueado.
+def detect_reversal_override(df: pd.DataFrame, direction: Direction) -> tuple[bool, str]:
+    """Retorna (liberado, motivo) — motivo em {RSI-DIV, CVD-DIV, SWEEP, ''}."""
+    try:
+        found_rsi, _ = detect_rsi_divergence(df, direction)
+        if found_rsi:
+            return True, "RSI-DIV"
+    except Exception:
+        pass
+    try:
+        found_cvd, _ = detect_cvd_divergence(df, direction)
+        if found_cvd:
+            return True, "CVD-DIV"
+    except Exception:
+        pass
+    try:
+        import supply_demand as _sd
+        _res = _sd.detect_liquidity_sweep(df)
+        if _res.get("sweep"):
+            _st = _res.get("type")
+            if (direction == Direction.LONG and _st == "BULLISH_SWEEP") or \
+               (direction == Direction.SHORT and _st == "BEARISH_SWEEP"):
+                return True, "SWEEP"
+    except Exception:
+        pass
+    return False, ""
+
+
 # ── Golden Cross / Death Cross EMA 50/200 ────────────────────────────────────
 
 def score_golden_death_cross(df: pd.DataFrame, direction: Direction) -> float:
@@ -993,6 +1035,55 @@ def score_macro_cycle(df: pd.DataFrame, direction: Direction) -> float:
     return 0.0
 
 
+# ── Score Squeeze Breakout (2026-06-23) ──────────────────────────────────────
+# Detecta o "sobe devagar e constante até explodir": ATR% contraindo + range
+# Donchian estreitando ENQUANTO a estrutura já é HH/HL (LONG) ou LH/LL (SHORT).
+# Os scores de tendência puro (EMA, macro) só confirmam tendência já em curso;
+# este score pega a fase de compressão/acumulação ANTES do movimento esticar.
+def score_squeeze_breakout(df: pd.DataFrame, direction: Direction) -> float:
+    if len(df) < 45:
+        return 0.0
+    try:
+        atr_pct = atr(df, 14) / df["close"] * 100
+        atr_now = atr_pct.iloc[-1]
+        atr_avg20 = atr_pct.iloc[-20:].mean()
+        if atr_avg20 <= 0 or pd.isna(atr_now) or pd.isna(atr_avg20):
+            return 0.0
+        atr_ratio = atr_now / atr_avg20  # < 1 = volatilidade contraindo
+
+        donch_range = df["high"].rolling(20).max() - df["low"].rolling(20).min()
+        donch_now = donch_range.iloc[-1]
+        donch_prev = donch_range.iloc[-40:-20].mean()
+        if donch_prev <= 0 or pd.isna(donch_now) or pd.isna(donch_prev):
+            return 0.0
+        donch_ratio = donch_now / donch_prev  # < 1 = range estreitando
+
+        # Só vale bônus se a estrutura já estiver alinhada à direção
+        # (squeeze direcional, não compressão de mercado morto/lateral)
+        _struct = identify_structure(df)["structure"]
+        aligned = (
+            (direction == Direction.LONG and _struct == "UPTREND") or
+            (direction == Direction.SHORT and _struct == "DOWNTREND")
+        )
+        if not aligned:
+            return 0.0
+
+        score = 0.0
+        if atr_ratio < 0.75:
+            score += 10.0
+        elif atr_ratio < 0.9:
+            score += 5.0
+
+        if donch_ratio < 0.75:
+            score += 10.0
+        elif donch_ratio < 0.9:
+            score += 5.0
+
+        return min(20.0, score)
+    except Exception:
+        return 0.0
+
+
 # ── R/R Dinâmico ─────────────────────────────────────────────────────────────
 
 def dynamic_rr_multipliers(df: pd.DataFrame) -> tuple[float, list]:
@@ -1082,22 +1173,29 @@ def calculate_levels(df: pd.DataFrame, direction: Direction, symbol: str,
         stop = max(stop, price + min_sl_dist)            # garante folga mínima
         stop = min(stop, price + max_sl_dist)            # respeita teto
 
-    # ── TPs ancorados ao risco real ───────────────────────────────────────────
-    # Distância do TP = MAIOR entre o alvo por ATR e um múltiplo do risco efetivo.
-    # Assim, mesmo quando o piso anti-ruído alarga o SL, o RR(tp2) >= ~2.0 se mantém;
-    # em tendência forte, o alvo por ATR domina (deixa o lucro correr).
+    # ── TP único (2026-06-23) — captura o movimento completo ────────────────
+    # Antes: 3 alvos escalonados (tp1/tp2/tp3) — saída parcial no tp1 cortava o
+    # lucro antes do movimento esticar. Agora um único alvo, ancorado na maior
+    # distância (equivalente ao antigo tp3) entre ATR e múltiplo do risco real.
+    # tp1=tp2=tp3 = mesmo valor para manter compatibilidade com o resto do código
+    # (mensagens, execução de trades, tracking de outcome) sem saída antecipada.
     _risk = abs(price - stop)
     _rr_floor = [1.2, 2.0, 3.0]   # múltiplos mínimos de RR por TP
-    _td1 = max(atr_val * tp_multipliers[0], _risk * _rr_floor[0])
-    _td2 = max(atr_val * tp_multipliers[1], _risk * _rr_floor[1])
-    _td3 = max(atr_val * tp_multipliers[2], _risk * _rr_floor[2])
+    # 15m: TP próximo (RR 1.2) — avg RR 3.33 nunca atingido na janela 15m
+    # empiricamente; TP mais perto aumenta WR real. Outros TFs mantêm RR 3.0.
+    _rr_idx = 0 if timeframe == "15m" else 2
+    _td_single = max(atr_val * tp_multipliers[_rr_idx], _risk * _rr_floor[_rr_idx])
+    # ── Teto de alvo por timeframe (2026-06-24, rev 2026-06-29) ──────────────
+    # 15m: teto 3.5% (era 7%) — preço de 15m raramente move 7% antes de reverter.
+    _tp_cap_pct = {"1m": 0.020, "3m": 0.030, "5m": 0.040, "15m": 0.035, "1h": 0.080}.get(timeframe, 0.040)
+    _td_single = min(_td_single, price * _tp_cap_pct)
     if direction == Direction.LONG:
-        tp1, tp2, tp3 = price + _td1, price + _td2, price + _td3
+        tp1 = tp2 = tp3 = price + _td_single
     else:
-        tp1, tp2, tp3 = price - _td1, price - _td2, price - _td3
+        tp1 = tp2 = tp3 = price - _td_single
 
     risk = abs(price - stop)
-    reward = abs(tp2 - price)
+    reward = abs(tp1 - price)
     rr = reward / risk if risk > 0 else 0
 
     return {
@@ -1279,13 +1377,226 @@ async def analyze_asset(
         return None
 
 
+# ── Sub-score recalibrado para 15m (Opção 5-B) ─────────────────────────────────
+# Dados empíricos (30 dias): score estava inversamente correlacionado com WIN no 15m.
+# WIN avg score 75.0 vs LOSS avg 76.5. Esta função reajusta com variáveis que SÃO
+# correlacionadas: estrutura de tendência, ADX, direção, dia da semana, tags de qualidade.
+
+def _apply_15m_subscore(total: float, df: pd.DataFrame, direction: Direction,
+                         v6_tags: list) -> float:
+    """Recalibra o score final para sinais 15m com base em dados reais de WR."""
+    import datetime as _dt
+    adj = 0.0
+
+    # Estrutura de tendência + ADX (combinação mais preditiva no 15m)
+    try:
+        struct_info = identify_structure(df, "15m")
+        adx_val = float(adx(df).iloc[-1])
+        struct_lbl = struct_info["structure"]
+
+        if struct_lbl == "UPTREND":
+            if adx_val >= 30:
+                adj += 10.0   # tendência forte confirmada = melhor setup 15m
+            elif adx_val >= 25:
+                adj += 5.0
+            else:
+                adj += 1.0    # tendência fraca = pouco ajuste
+        elif struct_lbl == "DOWNTREND":
+            if adx_val >= 30:
+                adj += 8.0
+            elif adx_val >= 25:
+                adj += 4.0
+        # RANGING já penalizado em -22 antes; sem ajuste extra aqui
+
+        # Alinhamento direção × estrutura (LONG em UPTREND = melhor WR empiricamente)
+        if direction == Direction.LONG and struct_lbl == "UPTREND":
+            adj += 5.0    # 27.3% WR LONG vs 17.5% SHORT no 15m
+        elif direction == Direction.SHORT and struct_lbl == "DOWNTREND":
+            adj += 2.0    # SHORT funciona mas menos que LONG em tendência
+        elif direction == Direction.SHORT and struct_lbl == "UPTREND":
+            adj -= 10.0   # contratendência no 15m = péssimo
+        elif direction == Direction.LONG and struct_lbl == "DOWNTREND":
+            adj -= 7.0    # comprar em queda no 15m = ruim
+    except Exception:
+        pass
+
+    # MEANREV nas tags ainda = penalidade extra (0% WR empírico)
+    if "MEANREV" in v6_tags:
+        adj -= 12.0
+
+    # Bônus por tags de qualidade comprovadamente preditivas no 15m
+    _good_tags = {"DIV-REG", "DIV-OCC", "GOLDEN-X", "BULL-TREND", "BEAR-TREND",
+                  "SQUEEZE", "BOS", "OB/FVG", "CHART-DBL-BTM", "CHART-DBL-TOP",
+                  "CHART-BULL-FLAG", "CHART-BEAR-FLAG", "CHART-ASC-TRI",
+                  "CHART-DESC-TRI", "CHART-IHS", "CHART-HS", "CHART-FALL-WEDGE",
+                  "CHART-RISE-WEDGE"}
+    _quality_hits = sum(1 for t in v6_tags if t in _good_tags)
+    adj += min(_quality_hits * 3.0, 9.0)   # até +9 por múltiplos padrões
+
+    # Dia da semana (empírico): Domingo = catastrófico, Ter/Qui = melhor
+    weekday = _dt.datetime.utcnow().weekday()
+    if weekday == 6:      # Domingo: 0W / 19L
+        adj -= 20.0
+    elif weekday in (1, 3):  # Terça (33% WR) e Quinta (31% WR)
+        adj += 4.0
+    elif weekday == 0:    # Segunda (14% WR)
+        adj -= 6.0
+
+    return max(0.0, min(100.0, total + adj))
+
+
+# ── Figuras gráficas de tendência para 15m (2026-06-29) ───────────────────────
+# Detecta padrões de múltiplas velas (além dos candlestick patterns individuais):
+# Double Bottom/Top, Bull/Bear Flag, Triângulos, H&S, Wedges.
+# Retorna (bonus_pts, tag_str). Bonus máximo: 18pts.
+
+def score_chart_patterns_15m(df: pd.DataFrame, direction: Direction) -> tuple[float, str]:
+    """Detecta figuras gráficas de médio prazo no 15m: reversão, continuação e exaustão."""
+    try:
+        if df is None or len(df) < 40:
+            return 0.0, ""
+
+        close  = df["close"].values
+        high   = df["high"].values
+        low    = df["low"].values
+        n      = len(close)
+        price  = close[-1]
+
+        # Utilitários internos
+        def _local_min(arr, i, window=3):
+            lo = max(0, i - window); hi = min(len(arr), i + window + 1)
+            return all(arr[i] <= arr[j] for j in range(lo, hi) if j != i)
+
+        def _local_max(arr, i, window=3):
+            lo = max(0, i - window); hi = min(len(arr), i + window + 1)
+            return all(arr[i] >= arr[j] for j in range(lo, hi) if j != i)
+
+        # Coleta pivôs dos últimos 80 candles (lookback 15m ≈ 20h)
+        look = min(80, n - 1)
+        ph = [(i, high[i])  for i in range(n - look, n - 2) if _local_max(high, i)]
+        pl = [(i, low[i])   for i in range(n - look, n - 2) if _local_min(low, i)]
+
+        # ── Double Bottom (LONG) ─────────────────────────────────────────────
+        if direction == Direction.LONG and len(pl) >= 2:
+            b1, b2 = pl[-2][1], pl[-1][1]
+            tol = abs(b1 - b2) / max(b1, b2) * 100
+            if tol <= 1.5 and b2 >= b1 * 0.995:  # dois fundos similares, 2º não abaixo
+                # Confirma: preço atual acima do pico entre os dois fundos
+                peak_between = max(high[pl[-2][0]:pl[-1][0]+1]) if pl[-1][0] > pl[-2][0] else 0
+                if price > peak_between * 0.998:
+                    return 16.0, "CHART-DBL-BTM"
+
+        # ── Double Top (SHORT) ───────────────────────────────────────────────
+        if direction == Direction.SHORT and len(ph) >= 2:
+            t1, t2 = ph[-2][1], ph[-1][1]
+            tol = abs(t1 - t2) / max(t1, t2) * 100
+            if tol <= 1.5 and t2 <= t1 * 1.005:
+                trough_between = min(low[ph[-2][0]:ph[-1][0]+1]) if ph[-1][0] > ph[-2][0] else 9e9
+                if price < trough_between * 1.002:
+                    return 16.0, "CHART-DBL-TOP"
+
+        # ── Bull Flag (LONG): impulso + consolidação descendente ─────────────
+        if direction == Direction.LONG and len(close) >= 25:
+            # Impulso: alta de >=3% nos últimos 10-20 candles
+            impulse_start = n - 20
+            impulse_high  = max(high[impulse_start: n - 5])
+            impulse_low   = min(low[impulse_start: n - 15])
+            impulse_pct   = (impulse_high - impulse_low) / impulse_low * 100 if impulse_low > 0 else 0
+            # Consolidação: últimos 5 candles em canal descendente estreito
+            flag_high = high[-6:-1]; flag_low = low[-6:-1]
+            flag_range_pct = (max(flag_high) - min(flag_low)) / price * 100 if price > 0 else 99
+            flag_slope = (flag_high[-1] - flag_high[0]) / flag_high[0] * 100 if flag_high[0] > 0 else 0
+            if impulse_pct >= 2.5 and flag_range_pct <= 1.5 and -1.5 <= flag_slope <= 0.1:
+                return 14.0, "CHART-BULL-FLAG"
+
+        # ── Bear Flag (SHORT): impulso de queda + consolidação ascendente ────
+        if direction == Direction.SHORT and len(close) >= 25:
+            impulse_start = n - 20
+            impulse_high  = max(high[impulse_start: n - 15])
+            impulse_low   = min(low[impulse_start: n - 5])
+            impulse_pct   = (impulse_high - impulse_low) / impulse_high * 100 if impulse_high > 0 else 0
+            flag_high = high[-6:-1]; flag_low = low[-6:-1]
+            flag_range_pct = (max(flag_high) - min(flag_low)) / price * 100 if price > 0 else 99
+            flag_slope = (flag_low[-1] - flag_low[0]) / flag_low[0] * 100 if flag_low[0] > 0 else 0
+            if impulse_pct >= 2.5 and flag_range_pct <= 1.5 and 0.0 <= flag_slope <= 1.5:
+                return 14.0, "CHART-BEAR-FLAG"
+
+        # ── Ascending Triangle (LONG): resistência flat + suportes crescentes ─
+        if direction == Direction.LONG and len(ph) >= 3 and len(pl) >= 3:
+            recent_highs = [p[1] for p in ph[-3:]]
+            recent_lows  = [p[1] for p in pl[-3:]]
+            flat_res = max(recent_highs) / min(recent_highs) - 1 < 0.012
+            rising_sup = all(recent_lows[i] > recent_lows[i-1] for i in range(1, len(recent_lows)))
+            if flat_res and rising_sup and price >= min(recent_highs) * 0.995:
+                return 15.0, "CHART-ASC-TRI"
+
+        # ── Descending Triangle (SHORT): suporte flat + resistências decrescentes
+        if direction == Direction.SHORT and len(ph) >= 3 and len(pl) >= 3:
+            recent_highs = [p[1] for p in ph[-3:]]
+            recent_lows  = [p[1] for p in pl[-3:]]
+            flat_sup = max(recent_lows) / min(recent_lows) - 1 < 0.012
+            falling_res = all(recent_highs[i] < recent_highs[i-1] for i in range(1, len(recent_highs)))
+            if flat_sup and falling_res and price <= max(recent_lows) * 1.005:
+                return 15.0, "CHART-DESC-TRI"
+
+        # ── Inverse Head & Shoulders (LONG): 3 fundos, do meio mais baixo ────
+        if direction == Direction.LONG and len(pl) >= 3:
+            ls, hd, rs = pl[-3][1], pl[-2][1], pl[-1][1]
+            ls_hi = ph[-2][1] if len(ph) >= 2 else 0
+            rs_hi = ph[-1][1] if len(ph) >= 1 else 0
+            neckline = (ls_hi + rs_hi) / 2 if ls_hi and rs_hi else 0
+            shoulders_sym = abs(ls - rs) / max(ls, rs) < 0.025
+            head_lower = hd < ls * 0.98 and hd < rs * 0.98
+            if shoulders_sym and head_lower and neckline > 0 and price >= neckline * 0.997:
+                return 18.0, "CHART-IHS"
+
+        # ── Head & Shoulders (SHORT): 3 topos, do meio mais alto ─────────────
+        if direction == Direction.SHORT and len(ph) >= 3:
+            ls, hd, rs = ph[-3][1], ph[-2][1], ph[-1][1]
+            ls_lo = pl[-2][1] if len(pl) >= 2 else 9e9
+            rs_lo = pl[-1][1] if len(pl) >= 1 else 9e9
+            neckline = (ls_lo + rs_lo) / 2 if ls_lo < 9e9 and rs_lo < 9e9 else 0
+            shoulders_sym = abs(ls - rs) / max(ls, rs) < 0.025
+            head_higher = hd > ls * 1.02 and hd > rs * 1.02
+            if shoulders_sym and head_higher and neckline > 0 and price <= neckline * 1.003:
+                return 18.0, "CHART-HS"
+
+        # ── Falling Wedge (LONG): ambas as linhas caindo mas convergindo ──────
+        if direction == Direction.LONG and len(ph) >= 3 and len(pl) >= 3:
+            ph3 = [p[1] for p in ph[-3:]]
+            pl3 = [p[1] for p in pl[-3:]]
+            res_falling = ph3[0] > ph3[1] > ph3[2]
+            sup_falling = pl3[0] > pl3[1] > pl3[2]
+            # Convergência: resistência cai mais rápido que suporte
+            res_drop = (ph3[0] - ph3[2]) / ph3[0]
+            sup_drop = (pl3[0] - pl3[2]) / pl3[0]
+            if res_falling and sup_falling and res_drop > sup_drop * 1.2:
+                return 13.0, "CHART-FALL-WEDGE"
+
+        # ── Rising Wedge (SHORT): ambas as linhas subindo mas convergindo ─────
+        if direction == Direction.SHORT and len(ph) >= 3 and len(pl) >= 3:
+            ph3 = [p[1] for p in ph[-3:]]
+            pl3 = [p[1] for p in pl[-3:]]
+            res_rising = ph3[0] < ph3[1] < ph3[2]
+            sup_rising = pl3[0] < pl3[1] < pl3[2]
+            res_rise = (ph3[2] - ph3[0]) / ph3[0]
+            sup_rise = (pl3[2] - pl3[0]) / pl3[0]
+            if res_rising and sup_rising and sup_rise > res_rise * 1.2:
+                return 13.0, "CHART-RISE-WEDGE"
+
+        return 0.0, ""
+
+    except Exception:
+        return 0.0, ""
+
+
 async def _score_direction(
     symbol: str, df: pd.DataFrame, direction: Direction, timeframe: str,
     news_data: list = None, mode: str = None, is_backtest: bool = False
 ) -> Optional[TradeSignal]:
 
-    # Restringe o bot a timeframes de scalp (1m, 3m, 5m, 15m)
-    if timeframe not in {"1m", "3m", "5m", "15m"}:
+    # Timeframes aceitos: scalp (1m, 3m, 5m, 15m) + swing (1h, adicionado 2026-06-26).
+    if timeframe not in {"1m", "3m", "5m", "15m", "1h"}:
         return None
 
     scalp = timeframe in {"1m", "3m", "5m", "15m"}
@@ -1339,12 +1650,42 @@ async def _score_direction(
     )
 
     # Penalidade por mercado lateral (RANGING = setup fraco)
+    # 15m: penalidade dobrada — [RANGE] tem 0% WR no 15m (empiricamente)
     try:
         _struct_label = identify_structure(df, timeframe)["structure"]
         if _struct_label == "RANGING":
-            raw_total = max(0.0, raw_total - 12.0)
+            _rang_pen = 22.0 if timeframe == "15m" else 12.0
+            raw_total = max(0.0, raw_total - _rang_pen)
     except Exception:
-        pass
+        _struct_label = "UNKNOWN"
+
+    # ── Gate 1h: confluência obrigatória com 4h e 1d (2026-06-29) ────────────
+    # 1h só é enviado se: não-domingo + sem RANGING + 4h E 1d confirmam direção.
+    # Evita sinais 1h contra tendência macro ou em lateralização.
+    if timeframe == "1h" and not is_backtest:
+        import datetime as _dt
+        if _dt.datetime.utcnow().weekday() == 6:
+            print(f"[1H-GATE] {symbol} 1h bloqueado: domingo (histórico 0% WR)")
+            return None
+        if _struct_label == "RANGING":
+            print(f"[1H-GATE] {symbol} 1h bloqueado: mercado lateral no 1h")
+            return None
+        _1h_tfs_ok = 0
+        for _htf_chk, _htf_lim in (("4h", 100), ("1d", 50)):
+            try:
+                _htf_df = await get_klines(symbol, _htf_chk, limit=_htf_lim)
+                if _htf_df is not None and len(_htf_df) >= 20:
+                    _htf_struct = identify_structure(_htf_df, _htf_chk)["structure"]
+                    if direction == Direction.LONG and _htf_struct == "UPTREND":
+                        _1h_tfs_ok += 1
+                    elif direction == Direction.SHORT and _htf_struct == "DOWNTREND":
+                        _1h_tfs_ok += 1
+            except Exception:
+                pass
+        if _1h_tfs_ok < 2:
+            print(f"[1H-GATE] {symbol} 1h {direction.value} bloqueado: "
+                  f"confluência insuficiente ({_1h_tfs_ok}/2 TFs maiores confirmam)")
+            return None
 
     # Penalidade por volume fraco (< 0.6x média = liquidez insuficiente)
     try:
@@ -1440,7 +1781,7 @@ async def _score_direction(
 
     fib_bonus = 0.0
     if not scalp:
-        fib_bonus = score_fibonacci_confluence(df, direction)
+        fib_bonus = score_fibonacci_confluence(df, direction, tol_pct=fib_tolerance_for(symbol))
         if fib_bonus >= 10.0:
             v6_tags.append("FIB618")
         elif fib_bonus >= 5.0:
@@ -1462,6 +1803,12 @@ async def _score_direction(
         v6_tags.append("MACRO-BULL" if direction == Direction.LONG else "MACRO-BEAR")
     elif macro_bonus <= -8.0:
         v6_tags.append("MACRO-CONTRA")
+
+    squeeze_bonus = score_squeeze_breakout(df, direction)
+    if squeeze_bonus >= 10.0:
+        v6_tags.append("SQUEEZE")
+        print(f"[SQUEEZE] {symbol} {timeframe} {direction.value} | bônus={squeeze_bonus:.0f}pts "
+              f"— compressão de volatilidade alinhada à tendência")
 
     # Liquidation cascade (tempo real via ws_feed) — reversão por short-squeeze/long-flush
     liq_bonus, liq_tag = score_liquidation_cascade(symbol, direction)
@@ -1498,6 +1845,46 @@ async def _score_direction(
     if sweep_bonus > 0:
         v6_tags.append("sweep")
 
+    # ── Fase 1 (2026-06-29): Volume Profile + regime de volatilidade ──────────
+    try:
+        from market_context import score_volume_profile, score_volatility_regime
+        _vp_price = float(df["close"].iloc[-1])
+        vp_bonus = score_volume_profile(df, direction, _vp_price)
+        vol_regime_bonus, vol_regime_tag = score_volatility_regime(df)
+        if vol_regime_tag:
+            v6_tags.append(vol_regime_tag)
+    except Exception:
+        vp_bonus = 0.0
+        vol_regime_bonus = 0.0
+
+    # ── Fase 2 (2026-06-29): SMC CHoCH/EQH-EQL, Mean Reversion, ADX regime ────
+    choch_bonus, choch_tag = score_choch(df, direction)
+    if choch_tag:
+        v6_tags.append(choch_tag)
+    eql_bonus, eql_tag = score_equal_highs_lows(df, direction)
+    if eql_tag:
+        v6_tags.append(eql_tag)
+    meanrev_bonus, meanrev_tag = score_mean_reversion(df, direction)
+    # 15m: MEANREV tem 0% WR empiricamente — anula bônus e penaliza raw_total
+    if timeframe == "15m" and meanrev_bonus > 0:
+        raw_total = max(0.0, raw_total - 8.0)
+        meanrev_bonus = 0.0
+        meanrev_tag = ""
+    if meanrev_tag:
+        v6_tags.append(meanrev_tag)
+    adx_bonus, adx_tag = score_adx_regime(df)
+    if adx_tag:
+        v6_tags.append(adx_tag)
+
+    # ── Figuras gráficas de tendência para 15m (2026-06-29) ──────────────────
+    chart15m_bonus = 0.0
+    chart15m_tag   = ""
+    if timeframe == "15m":
+        chart15m_bonus, chart15m_tag = score_chart_patterns_15m(df, direction)
+        if chart15m_tag:
+            v6_tags.append(chart15m_tag)
+            print(f"[CHART-15m] {symbol} {chart15m_tag} +{chart15m_bonus:.0f}pts")
+
     # ── Teto global de bônus ──────────────────────────────────────────────────────
     # Bônus positivos somados limitados a 20pts (AGGRESSIVE) / 17pts (NORMAL).
     # Penalidades negativas (cross, macro, regime) aplicam integralmente.
@@ -1506,11 +1893,14 @@ async def _score_direction(
         candle_bonus + v6_bonus + fib_bonus + rsi_div_bonus
         + cvd_div_bonus + sweep_bonus
         + max(0.0, cross_bonus) + max(0.0, macro_bonus) + max(0.0, regime_adj)
-        + trend_cont_bonus + max(0.0, liq_bonus)
+        + trend_cont_bonus + max(0.0, liq_bonus) + squeeze_bonus
+        + max(0.0, vp_bonus) + max(0.0, vol_regime_bonus)
+        + choch_bonus + eql_bonus + meanrev_bonus + chart15m_bonus
     )
     negative_adj = (
         min(0.0, cross_bonus) + min(0.0, macro_bonus) + min(0.0, regime_adj)
-        + min(0.0, liq_bonus)
+        + min(0.0, liq_bonus) + min(0.0, vp_bonus) + min(0.0, vol_regime_bonus)
+        + adx_bonus
     )
 
     total = raw_total + min(positive_bonus, _BONUS_CAP) + negative_adj
@@ -1520,9 +1910,28 @@ async def _score_direction(
 
     total = min(100.0, max(0.0, total))
 
+    # ── Sub-score recalibrado para 15m (5-B) — 2026-06-29 ────────────────────
+    # Score geral está levemente invertido no 15m (LOSS avg 76.5 vs WIN 75.0).
+    # Aplica ajustes baseados em variáveis com correlação real de WIN no 15m.
+    if timeframe == "15m":
+        total = _apply_15m_subscore(total, df, direction, v6_tags)
+
+    # ── Filtro de performance por ativo/timeframe (Fase 0, calibrado 2026-06-29) ──
+    from config import ASSET_PERFORMANCE_BLOCKLIST, ASSET_PERFORMANCE_MALUS, TIMEFRAME_PERFORMANCE_MALUS
+    if symbol.upper() in ASSET_PERFORMANCE_BLOCKLIST:
+        print(f"[PERF-FILTER] {symbol} {timeframe} bloqueado: WR histórico abaixo do mínimo")
+        return None
+    total += ASSET_PERFORMANCE_MALUS.get(symbol.upper(), 0)
+    total += TIMEFRAME_PERFORMANCE_MALUS.get(timeframe, 0)
+    total = min(100.0, max(0.0, total))
+
     # Usa thresholds do modo atual (settings já definido no início da função)
     min_score = settings["min_score"]
     min_rr = settings["min_rr"]
+
+    # 1h exige score mínimo de 85 independente do perfil (poucos sinais, alta exigência)
+    if timeframe == "1h":
+        min_score = max(min_score, 85.0)
 
     if total < min_score:
         return None
@@ -1536,21 +1945,187 @@ async def _score_direction(
     _prox_atr    = float(atr(df).iloc[-1])
     _prox_atr_pct = (_prox_atr / _prox_price * 100) if _prox_price > 0 else 1.0
     _min_room_pct = max(1.0, _prox_atr_pct * 1.2)
+
+    # Override de reversão genuína — calculado 1x, reusado pelos 4 gates abaixo.
+    try:
+        from config import PROX_REVERSAL_OVERRIDE as _ROV
+    except Exception:
+        _ROV = False
+    _rev_ok, _rev_why = (False, "")
+    if _ROV and not is_backtest:
+        _rev_ok, _rev_why = detect_reversal_override(df, direction)
+
+    # ── STOCH-SATURADO (2026-06-23) ───────────────────────────────────────────
+    # Achado real (164 outcomes): LONG comprando com StochRSI K>=90 (já no topo
+    # do momentum) só ganhou 27.8% (5/18) — pior que moeda jogada. Bloqueia
+    # LONG/SHORT entrando em momentum já saturado, salvo reversão confirmada
+    # (mesmo override de RSI-div/CVD-div/sweep usado nos gates de proximidade).
+    try:
+        from config import (STOCH_SATURATION_GATE as _SSG, STOCH_SATURATION_HIGH as _SSH,
+                            STOCH_SATURATION_LOW as _SSL)
+    except Exception:
+        _SSG, _SSH, _SSL = True, 90.0, 10.0
+    if _SSG and not is_backtest:
+        try:
+            _stoch_k, _ = stoch_rsi(df["close"])
+            _k_val = float(_stoch_k.iloc[-1])
+            if direction == Direction.LONG and _k_val >= _SSH:
+                if _rev_ok:
+                    print(f"[OVERRIDE-{_rev_why}] {symbol} {timeframe} LONG liberado apesar do STOCH-SATURADO "
+                          f"(K={_k_val:.1f} >= {_SSH:.0f}) — fundo/reversão confirmada")
+                else:
+                    print(f"[STOCH-SATURADO] {symbol} {timeframe} LONG bloqueado: StochRSI K={_k_val:.1f} "
+                          f"já no topo do momentum (>= {_SSH:.0f})")
+                    return None
+            elif direction == Direction.SHORT and _k_val <= _SSL:
+                if _rev_ok:
+                    print(f"[OVERRIDE-{_rev_why}] {symbol} {timeframe} SHORT liberado apesar do STOCH-SATURADO "
+                          f"(K={_k_val:.1f} <= {_SSL:.0f}) — topo/exaustão confirmada")
+                else:
+                    print(f"[STOCH-SATURADO] {symbol} {timeframe} SHORT bloqueado: StochRSI K={_k_val:.1f} "
+                          f"já no fundo do momentum (<= {_SSL:.0f})")
+                    return None
+        except Exception:
+            pass
+
     if direction == Direction.LONG and _prox_struct["resistance"] > _prox_price:
         _room = (_prox_struct["resistance"] - _prox_price) / _prox_price * 100
         if _room < _min_room_pct:
-            print(f"[PROX-GATE] {symbol} {timeframe} LONG bloqueado: colado na resistência "
-                  f"({_room:.2f}% < {_min_room_pct:.2f}% folga)")
-            return None
+            if _rev_ok:
+                print(f"[OVERRIDE-{_rev_why}] {symbol} {timeframe} LONG liberado apesar do PROX-GATE "
+                      f"(colado na resistência, {_room:.2f}% < {_min_room_pct:.2f}%) — fundo/reversão confirmada")
+            else:
+                print(f"[PROX-GATE] {symbol} {timeframe} LONG bloqueado: colado na resistência "
+                      f"({_room:.2f}% < {_min_room_pct:.2f}% folga)")
+                return None
     elif direction == Direction.SHORT and 0 < _prox_struct["support"] < _prox_price:
         _room = (_prox_price - _prox_struct["support"]) / _prox_price * 100
         if _room < _min_room_pct:
-            print(f"[PROX-GATE] {symbol} {timeframe} SHORT bloqueado: colado no suporte "
-                  f"({_room:.2f}% < {_min_room_pct:.2f}% folga)")
-            return None
+            if _rev_ok:
+                print(f"[OVERRIDE-{_rev_why}] {symbol} {timeframe} SHORT liberado apesar do PROX-GATE "
+                      f"(colado no suporte, {_room:.2f}% < {_min_room_pct:.2f}%) — topo/exaustão confirmada")
+            else:
+                print(f"[PROX-GATE] {symbol} {timeframe} SHORT bloqueado: colado no suporte "
+                      f"({_room:.2f}% < {_min_room_pct:.2f}% folga)")
+                return None
+
+    # ── Anti-topo/fundo REFORÇADO (2026-06-22) — fecha a brecha do breakout pelado ────
+    try:
+        from config import (PROX_BLOCK_NAKED_BREAKOUT as _NB, PROX_BREAKOUT_VOL_MULT as _NBV,
+                            PROX_BREAKOUT_CLOSE_PCT as _NBC, PROX_MULTI_TF_GATE as _MTF,
+                            PROX_HIGHER_TF as _HTF)
+    except Exception:
+        _NB = _MTF = False; _NBV = 1.8; _NBC = 0.70; _HTF = {}
+
+    # (#1/#3) Breakout PELADO: preço já rompeu a resistência (LONG) / suporte (SHORT).
+    # Entrar agora = comprar topo / vender fundo. Só passa com CONFIRMAÇÃO forte
+    # (volume ≥ _NBV× a média E fechamento na ponta da vela); senão BLOQUEIA (espera reteste).
+    if _NB and not is_backtest:
+        _hi = float(df["high"].iloc[-1]); _lo = float(df["low"].iloc[-1])
+        _cl = float(df["close"].iloc[-1]); _rng = (_hi - _lo) or 1e-9
+        _vavg  = float(df["volume"].iloc[-21:-1].mean()) if len(df) >= 21 else float(df["volume"].mean())
+        _vlast = float(df["volume"].iloc[-1])
+        _vol_ok    = _vavg > 0 and _vlast >= _vavg * _NBV
+        _close_pos = (_cl - _lo) / _rng          # 1.0 = fechou na máxima da vela
+        if direction == Direction.LONG and _prox_price >= _prox_struct["resistance"] > 0:
+            if not (_vol_ok and _close_pos >= _NBC):
+                if _rev_ok:
+                    print(f"[OVERRIDE-{_rev_why}] {symbol} {timeframe} LONG liberado apesar do ANTI-TOPO "
+                          f"(breakout sem confirmação de volume/fechamento) — fundo/reversão confirmada")
+                else:
+                    print(f"[ANTI-TOPO] {symbol} {timeframe} LONG bloqueado: breakout pelado acima da "
+                          f"resistência sem confirmação (vol_ok={_vol_ok}, close={_close_pos:.0%}) — espera reteste")
+                    return None
+        elif direction == Direction.SHORT and 0 < _prox_struct["support"] >= _prox_price:
+            if not (_vol_ok and _close_pos <= (1 - _NBC)):
+                if _rev_ok:
+                    print(f"[OVERRIDE-{_rev_why}] {symbol} {timeframe} SHORT liberado apesar do ANTI-FUNDO "
+                          f"(breakdown sem confirmação de volume/fechamento) — topo/exaustão confirmada")
+                else:
+                    print(f"[ANTI-FUNDO] {symbol} {timeframe} SHORT bloqueado: breakdown pelado abaixo do "
+                          f"suporte sem confirmação (vol_ok={_vol_ok}, close={_close_pos:.0%}) — espera reteste")
+                    return None
+
+    # (#2) Multi-TF: não entrar colado na resistência/suporte do TF MAIOR (ex.: LONG de
+    # 1m logo abaixo da resistência de 15m). Klines do TF maior vêm do cache.
+    if _MTF and not is_backtest:
+        _htf = _HTF.get(timeframe)
+        if _htf:
+            try:
+                _hdf = await get_klines(symbol, _htf, limit=120)
+            except Exception:
+                _hdf = None
+            if _hdf is not None and len(_hdf) >= 30:
+                _hs = identify_structure(_hdf, _htf)
+                if direction == Direction.LONG and _hs["resistance"] > _prox_price:
+                    _hr = (_hs["resistance"] - _prox_price) / _prox_price * 100
+                    if _hr < _min_room_pct:
+                        if _rev_ok:
+                            print(f"[OVERRIDE-{_rev_why}] {symbol} {timeframe} LONG liberado apesar do MTF-GATE "
+                                  f"(colado na resistência de {_htf}) — fundo/reversão confirmada")
+                        else:
+                            print(f"[MTF-GATE] {symbol} {timeframe} LONG bloqueado: colado na resistência "
+                                  f"de {_htf} ({_hr:.2f}% < {_min_room_pct:.2f}%)")
+                            return None
+                elif direction == Direction.SHORT and 0 < _hs["support"] < _prox_price:
+                    _hr = (_prox_price - _hs["support"]) / _prox_price * 100
+                    if _hr < _min_room_pct:
+                        if _rev_ok:
+                            print(f"[OVERRIDE-{_rev_why}] {symbol} {timeframe} SHORT liberado apesar do MTF-GATE "
+                                  f"(colado no suporte de {_htf}) — topo/exaustão confirmada")
+                        else:
+                            print(f"[MTF-GATE] {symbol} {timeframe} SHORT bloqueado: colado no suporte "
+                                  f"de {_htf} ({_hr:.2f}% < {_min_room_pct:.2f}%)")
+                            return None
+
+    # (#4) Topo/fundo FRESCO (2026-06-23) — pega o caso que o gate estrutural (swing
+    # confirmado, exige vela seguinte) não vê: o preço ACABOU de fazer máxima/mínima
+    # nova agora mesmo, sem qualquer pullback. Testado em dry-run: bloqueia ~1/3 dos
+    # sinais atuais (NOKUSDT/BNBUSDT/AVAXUSDT/AAVEUSDT a 0.03%-0.25% do extremo).
+    try:
+        from config import (PROX_BLOCK_FRESH_EXTREME as _FE, PROX_FRESH_EXTREME_N as _FEN,
+                            PROX_FRESH_EXTREME_PCT as _FEP)
+    except Exception:
+        _FE = False; _FEN = 10; _FEP = 0.3
+
+    if _FE and not is_backtest and len(df) >= _FEN + 1:
+        _hiN = float(df["high"].iloc[-(_FEN + 1):-1].max())
+        _loN = float(df["low"].iloc[-(_FEN + 1):-1].min())
+        if direction == Direction.LONG:
+            _distN = (_hiN - _prox_price) / _prox_price * 100
+            if _distN < _FEP:
+                if _rev_ok:
+                    print(f"[OVERRIDE-{_rev_why}] {symbol} {timeframe} LONG liberado apesar do TOPO-FRESCO "
+                          f"(a {_distN:.2f}% da máxima de {_FEN} velas) — fundo/reversão confirmada")
+                else:
+                    print(f"[TOPO-FRESCO] {symbol} {timeframe} LONG bloqueado: a {_distN:.2f}% da "
+                          f"máxima das últimas {_FEN} velas (mín {_FEP}%)")
+                    return None
+        elif direction == Direction.SHORT:
+            _distN = (_prox_price - _loN) / _prox_price * 100
+            if _distN < _FEP:
+                if _rev_ok:
+                    print(f"[OVERRIDE-{_rev_why}] {symbol} {timeframe} SHORT liberado apesar do FUNDO-FRESCO "
+                          f"(a {_distN:.2f}% da mínima de {_FEN} velas) — topo/exaustão confirmada")
+                else:
+                    print(f"[FUNDO-FRESCO] {symbol} {timeframe} SHORT bloqueado: a {_distN:.2f}% da "
+                          f"mínima das últimas {_FEN} velas (mín {_FEP}%)")
+                    return None
 
     levels = calculate_levels(df, direction, symbol, timeframe)
-    if levels["rr"] < min_rr:
+    # ── Opção 3 (2026-06-24): RR relaxado por SCORE ────────────────────────────
+    # O teto de alvo encurta o TP e derruba o RR. Para não perder os sinais FORTES,
+    # afrouxamos o min_rr só para score alto (nunca aperta — usa min()):
+    #   score >= 95 → RR >= 1.0 (excepcionais, ex.: score 98)
+    #   score >= 90 → RR >= 1.2 (fortes)
+    #   demais      → min_rr do perfil (ex.: 1.7 no Agressivo)
+    if total >= 95:
+        _eff_min_rr = min(min_rr, 1.0)
+    elif total >= 90:
+        _eff_min_rr = min(min_rr, 1.2)
+    else:
+        _eff_min_rr = min_rr
+    if levels["rr"] < _eff_min_rr:
         return None
 
     # ── Orderbook Liquidity Gate ──────────────────────────────────────────────
@@ -1734,7 +2309,10 @@ def _get_scan_semaphore() -> asyncio.Semaphore:
 
 async def _analyze_with_limit(symbol: str, tf: str, **kwargs) -> Optional[TradeSignal]:
     async with _get_scan_semaphore():
-        return await analyze_asset(symbol, tf, **kwargs)
+        result = await analyze_asset(symbol, tf, **kwargs)
+        # Checkpoint explícito — vide nota equivalente em engine_router.scan_with_router.
+        await asyncio.sleep(0)
+        return result
 
 
 async def scan_watchlist(news_data: list = None, mode: str = None, trending: list = None,
@@ -1876,6 +2454,98 @@ def _v6_structure(ph, pl) -> str:
     if lh and ll:
         return "down"
     return "ranging"
+
+
+# ── Fase 2 (2026-06-29): SMC — CHoCH, Equal Highs/Lows ────────────────────────
+def score_choch(df: pd.DataFrame, direction: Direction) -> tuple[float, str]:
+    """Change of Character: estrutura recente (3 últimos pivots) inverteu de
+    down→up ou up→down. É mais forte que BOS simples — sinaliza possível
+    início de novo regime. Bonus 0-10pts, só a favor da direção do sinal."""
+    try:
+        ph, pl = _v6_detect_pivots(df, lb=5)
+        if len(ph) < 3 or len(pl) < 3:
+            return 0.0, ""
+        struct_now = _v6_structure(ph, pl)
+        struct_prev = _v6_structure(ph[:-1], pl[:-1])
+        if struct_prev == "down" and struct_now == "up" and direction == Direction.LONG:
+            return 10.0, "CHoCH-UP"
+        if struct_prev == "up" and struct_now == "down" and direction == Direction.SHORT:
+            return 10.0, "CHoCH-DOWN"
+        return 0.0, ""
+    except Exception:
+        return 0.0, ""
+
+
+def score_equal_highs_lows(df: pd.DataFrame, direction: Direction, tol_pct: float = 0.15) -> tuple[float, str]:
+    """Equal Highs/Equal Lows: pool de liquidez óbvio (dois topos/fundos quase
+    iguais) que tende a ser varrido antes da reversão. Bonus quando o preço
+    atual já varreu esse nível na direção do sinal (ver score_liquidity_sweep
+    para a varredura em si — aqui só identificamos o pool)."""
+    try:
+        ph, pl = _v6_detect_pivots(df, lb=3)
+        price = float(df["close"].iloc[-1])
+        if direction == Direction.LONG and len(pl) >= 2:
+            l1, l2 = pl[-1][1], pl[-2][1]
+            if abs(l1 - l2) / max(l1, l2) * 100 <= tol_pct and price > min(l1, l2):
+                return 6.0, "EQL"
+        if direction == Direction.SHORT and len(ph) >= 2:
+            h1, h2 = ph[-1][1], ph[-2][1]
+            if abs(h1 - h2) / max(h1, h2) * 100 <= tol_pct and price < max(h1, h2):
+                return 6.0, "EQH"
+        return 0.0, ""
+    except Exception:
+        return 0.0, ""
+
+
+# ── Fase 2: Mean Reversion (Z-score) ──────────────────────────────────────────
+def score_mean_reversion(df: pd.DataFrame, direction: Direction, period: int = 20) -> tuple[float, str]:
+    """Z-score do preço vs média móvel: extremos estatísticos (|z|>=2) na
+    direção contrária à tendência de curtíssimo prazo sugerem reversão à
+    média. Só soma bonus quando a direção do sinal aponta PARA a média."""
+    try:
+        if df is None or len(df) < period + 5:
+            return 0.0, ""
+        close = df["close"]
+        mean = close.rolling(period).mean().iloc[-1]
+        std = close.rolling(period).std().iloc[-1]
+        if std == 0 or np.isnan(std):
+            return 0.0, ""
+        price = float(close.iloc[-1])
+        z = (price - mean) / std
+        if z <= -2.0 and direction == Direction.LONG:
+            return min(10.0, abs(z) * 3), "MEANREV"
+        if z >= 2.0 and direction == Direction.SHORT:
+            return min(10.0, abs(z) * 3), "MEANREV"
+        return 0.0, ""
+    except Exception:
+        return 0.0, ""
+
+
+# ── Fase 2: ADX — filtro de regime tendência vs lateral ───────────────────────
+def adx(df: pd.DataFrame, period: int = 14) -> pd.Series:
+    h, l, c = df["high"], df["low"], df["close"]
+    up_move = h.diff()
+    down_move = -l.diff()
+    plus_dm = up_move.where((up_move > down_move) & (up_move > 0), 0.0)
+    minus_dm = down_move.where((down_move > up_move) & (down_move > 0), 0.0)
+    tr = pd.concat([h - l, (h - c.shift()).abs(), (l - c.shift()).abs()], axis=1).max(axis=1)
+    atr_s = tr.ewm(alpha=1/period, adjust=False).mean()
+    plus_di = 100 * plus_dm.ewm(alpha=1/period, adjust=False).mean() / atr_s.replace(0, np.nan)
+    minus_di = 100 * minus_dm.ewm(alpha=1/period, adjust=False).mean() / atr_s.replace(0, np.nan)
+    dx = 100 * (plus_di - minus_di).abs() / (plus_di + minus_di).replace(0, np.nan)
+    return dx.ewm(alpha=1/period, adjust=False).mean().fillna(0.0)
+
+
+def score_adx_regime(df: pd.DataFrame) -> tuple[float, str]:
+    """ADX<20 = mercado lateral — penaliza estratégias trend-following (a
+    maioria do motor atual). ADX>=25 = tendência confirmada, sem ajuste."""
+    try:
+        adx_val = float(adx(df).iloc[-1])
+        if adx_val < 20:
+            return -5.0, "ADX-LATERAL"
+        return 0.0, ""
+    except Exception:
+        return 0.0, ""
 
 
 def _v6_find_obs(df: pd.DataFrame, atr_s: pd.Series, impulse: float = 1.8) -> list:

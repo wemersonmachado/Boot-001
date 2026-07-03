@@ -1,6 +1,6 @@
 import aiosqlite
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
 from config import DB_PATH
 
 
@@ -34,7 +34,10 @@ CREATE TABLE IF NOT EXISTS trades (
     score_json  TEXT,
     opened_at   TEXT,
     closed_at   TEXT,
-    mode        TEXT
+    mode        TEXT,
+    paper       INTEGER DEFAULT 1,
+    execution_status TEXT,
+    order_id    TEXT
 );
 
 CREATE TABLE IF NOT EXISTS signals (
@@ -145,6 +148,28 @@ CREATE TABLE IF NOT EXISTS settings (
     value        TEXT,
     updated_at   TEXT
 );
+
+-- Fase 4 (2026-06-29): memória de estratégias — vencedoras, rejeitadas e seus
+-- parâmetros/métricas, para não retestar o que já falhou e reusar o que funcionou.
+CREATE TABLE IF NOT EXISTS strategy_registry (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    name            TEXT    NOT NULL,
+    version         TEXT,
+    status          TEXT    NOT NULL,   -- WINNING | REJECTED | TESTING
+    timeframe_ideal TEXT,
+    params_json      TEXT,              -- parâmetros otimizados (json)
+    market_conditions TEXT,             -- condições em que funciona (texto livre)
+    backtest_metrics_json  TEXT,        -- PF, WR, Sharpe, expectancy etc. (json)
+    validation_metrics_json TEXT,       -- métricas em produção/out-of-sample (json)
+    score_final     REAL,
+    risk_avg_pct     REAL,
+    best_sl_pct      REAL,
+    best_tp_pct      REAL,
+    best_rr          REAL,
+    rejection_reason TEXT,
+    trained_at       TEXT,
+    created_at       TEXT    NOT NULL
+);
 """
 
 _INDEXES = """
@@ -157,9 +182,12 @@ CREATE INDEX IF NOT EXISTS idx_trades_asset      ON trades(asset);
 CREATE INDEX IF NOT EXISTS idx_logs_type         ON logs(event_type);
 CREATE INDEX IF NOT EXISTS idx_logs_ts           ON logs(timestamp);
 CREATE INDEX IF NOT EXISTS idx_outcomes_asset    ON signal_outcomes(asset);
+CREATE INDEX IF NOT EXISTS idx_outcomes_signal    ON signal_outcomes(signal_db_id);
+CREATE INDEX IF NOT EXISTS idx_telegram_signal    ON telegram_sent(signal_db_id, destination);
 CREATE INDEX IF NOT EXISTS idx_profiles_asset    ON asset_profiles(asset, timeframe);
 CREATE INDEX IF NOT EXISTS idx_cp_asset_ts       ON candlestick_patterns(asset, detected_at);
 CREATE INDEX IF NOT EXISTS idx_cp_signal         ON candlestick_patterns(signal, detected_at);
+CREATE INDEX IF NOT EXISTS idx_registry_status    ON strategy_registry(status, name);
 """
 
 
@@ -194,6 +222,15 @@ async def init_db():
             await db.execute("ALTER TABLE trades ADD COLUMN mode TEXT")
         except Exception:
             pass
+        for stmt in (
+            "ALTER TABLE trades ADD COLUMN paper INTEGER DEFAULT 1",
+            "ALTER TABLE trades ADD COLUMN execution_status TEXT",
+            "ALTER TABLE trades ADD COLUMN order_id TEXT",
+        ):
+            try:
+                await db.execute(stmt)
+            except Exception:
+                pass
         await db.commit()
 
 
@@ -207,8 +244,8 @@ async def save_trade(trade: dict):
             """INSERT OR REPLACE INTO trades
                (id, asset, direction, entry_price, exit_price, stop_loss, tp1, tp2, tp3,
                 rr, leverage, size_usdt, pnl_pct, pnl_usdt, status, reason, confidence,
-                timeframe, score_json, opened_at, closed_at, mode)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                timeframe, score_json, opened_at, closed_at, mode, paper, execution_status, order_id)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 trade["id"], trade["asset"], trade["direction"],
                 trade["entry_price"], trade.get("exit_price"),
@@ -218,9 +255,35 @@ async def save_trade(trade: dict):
                 trade["status"], trade["reason"], trade["confidence"],
                 trade.get("timeframe", ""), trade.get("score_json", "{}"),
                 trade["opened_at"], trade.get("closed_at"), trade.get("mode"),
+                1 if trade.get("paper", True) else 0,
+                trade.get("execution_status"),
+                str(trade.get("order_id")) if trade.get("order_id") is not None else None,
             ),
         )
         await db.commit()
+
+
+async def prune_old_rows(days: int = 30) -> dict:
+    """Limpeza de retenção (2026-07-02): apaga linhas com mais de N dias das
+    tabelas de alto volume (signals, market_snapshots, logs, telegram_sent).
+    signal_outcomes NUNCA é apagada — é a base histórica do auto-tune e dos
+    filtros de performance. trades também fica (volume baixo, valor alto)."""
+    cutoff = (datetime.utcnow() - timedelta(days=days)).isoformat()
+    deleted: dict = {}
+    async with aiosqlite.connect(DB_PATH) as db:
+        await _configure_db(db)
+        for table, col in (
+            ("signals", "timestamp"),
+            ("market_snapshots", "timestamp"),
+            ("logs", "timestamp"),
+            ("telegram_sent", "sent_at"),
+        ):
+            cur = await db.execute(
+                f"DELETE FROM {table} WHERE {col} < ?", (cutoff,)
+            )
+            deleted[table] = cur.rowcount
+        await db.commit()
+    return deleted
 
 
 async def get_recent_trade_stats(limit: int = 30) -> dict:
@@ -253,6 +316,131 @@ async def get_recent_signal_stats(limit: int = 30) -> dict:
                if str(o).upper() == "WIN" or (str(o).upper() == "TIMEOUT" and float(p or 0) > 0))
     wr   = (wins / n * 100.0) if n > 0 else 0.0
     return {"n": n, "wins": wins, "win_rate": round(wr, 1)}
+
+
+async def get_unresolved_sinais_signals(max_age_h: float, limit: int = 200) -> list:
+    """Sinais SINAIS (destino 'vip') ainda sem outcome — lidos direto do banco em vez
+    de uma lista em memória, para que o rastreio sobreviva a reinícios do bot local.
+    Janela de busca = max_age_h*4 (margem de segurança p/ não perder sinal nenhum)."""
+    cutoff = (datetime.utcnow() - timedelta(hours=max_age_h * 4)).isoformat()
+    async with aiosqlite.connect(DB_PATH) as db:
+        await _configure_db(db)
+        cur = await db.execute(
+            """SELECT s.id, s.asset, s.direction, s.entry, s.stop_loss, s.tp1,
+                      s.timeframe, s.timestamp, s.reason
+               FROM signals s
+               JOIN telegram_sent t ON t.signal_db_id = s.id AND t.destination = 'vip'
+               WHERE s.id NOT IN (SELECT signal_db_id FROM signal_outcomes
+                                   WHERE signal_db_id IS NOT NULL)
+                 AND s.entry > 0 AND s.stop_loss > 0 AND s.tp1 > 0
+                 AND s.timestamp >= ?
+               ORDER BY s.id DESC LIMIT ?""",
+            (cutoff, int(limit)),
+        )
+        rows = await cur.fetchall()
+    return [
+        {
+            "db_id": r[0], "asset": r[1], "direction": r[2],
+            "entry": r[3], "sl": r[4], "tp": r[5],
+            "timeframe": r[6] or "15m", "timestamp": r[7], "tags": (r[8] or "")[:120],
+        }
+        for r in rows
+    ]
+
+
+async def register_strategy(
+    name: str, status: str, version: str = "1.0", timeframe_ideal: str = "",
+    params: dict | None = None, market_conditions: str = "",
+    backtest_metrics: dict | None = None, validation_metrics: dict | None = None,
+    score_final: float = 0.0, risk_avg_pct: float = 0.0,
+    best_sl_pct: float = 0.0, best_tp_pct: float = 0.0, best_rr: float = 0.0,
+    rejection_reason: str = "",
+) -> int:
+    """Grava (ou atualiza histórico de) uma estratégia no registry — WINNING,
+    REJECTED ou TESTING. Cada chamada cria um novo registro (histórico
+    versionado), não faz upsert — para manter rastro de evolução/tentativas."""
+    now = datetime.utcnow().isoformat()
+    async with aiosqlite.connect(DB_PATH) as db:
+        await _configure_db(db)
+        cur = await db.execute(
+            """INSERT INTO strategy_registry
+               (name, version, status, timeframe_ideal, params_json, market_conditions,
+                backtest_metrics_json, validation_metrics_json, score_final, risk_avg_pct,
+                best_sl_pct, best_tp_pct, best_rr, rejection_reason, trained_at, created_at)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (
+                name, version, status, timeframe_ideal,
+                json.dumps(params or {}), market_conditions,
+                json.dumps(backtest_metrics or {}), json.dumps(validation_metrics or {}),
+                score_final, risk_avg_pct, best_sl_pct, best_tp_pct, best_rr,
+                rejection_reason, now, now,
+            ),
+        )
+        await db.commit()
+        return cur.lastrowid
+
+
+async def get_strategy_registry(status: str | None = None) -> list[dict]:
+    """Lista estratégias do registry, mais recentes primeiro. status=None retorna todas."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        await _configure_db(db)
+        db.row_factory = aiosqlite.Row
+        if status:
+            cur = await db.execute(
+                "SELECT * FROM strategy_registry WHERE status = ? ORDER BY id DESC", (status,)
+            )
+        else:
+            cur = await db.execute("SELECT * FROM strategy_registry ORDER BY id DESC")
+        rows = await cur.fetchall()
+    out = []
+    for r in rows:
+        d = dict(r)
+        for k in ("params_json", "backtest_metrics_json", "validation_metrics_json"):
+            try:
+                d[k] = json.loads(d[k]) if d[k] else {}
+            except Exception:
+                d[k] = {}
+        out.append(d)
+    return out
+
+
+async def get_signal_kpi_summary(window_h: float = 24.0) -> dict:
+    """KPIs do canal SINAIS para o dashboard, recortados nas últimas `window_h`
+    horas: total enviado (signals + telegram_sent destino 'vip') e
+    positivos/negativos/% acerto resolvidos (signal_outcomes), ambos filtrados
+    pelo horário ORIGINAL do sinal (não pelo horário em que foi resolvido).
+    Atualiza sozinho conforme job_sinais_outcome_watch resolve cada sinal por
+    TP1/TP2/SL."""
+    cutoff = (datetime.utcnow() - timedelta(hours=window_h)).isoformat()
+    async with aiosqlite.connect(DB_PATH) as db:
+        await _configure_db(db)
+        cur = await db.execute(
+            """SELECT COUNT(DISTINCT s.id) FROM signals s
+               JOIN telegram_sent t ON t.signal_db_id = s.id AND t.destination = 'vip'
+               WHERE s.timestamp >= ?""",
+            (cutoff,),
+        )
+        total_sent = (await cur.fetchone())[0] or 0
+        cur = await db.execute(
+            """SELECT o.outcome, o.pnl_pct FROM signal_outcomes o
+               JOIN signals s ON s.id = o.signal_db_id
+               WHERE o.outcome IS NOT NULL AND s.timestamp >= ?""",
+            (cutoff,),
+        )
+        rows = await cur.fetchall()
+    positive = sum(1 for o, p in rows
+                   if str(o).upper() == "WIN" or (str(o).upper() == "TIMEOUT" and float(p or 0) > 0))
+    negative = sum(1 for o, p in rows
+                   if str(o).upper() == "LOSS" or (str(o).upper() == "TIMEOUT" and float(p or 0) <= 0))
+    resolved = positive + negative
+    win_rate = (positive / resolved * 100.0) if resolved > 0 else 0.0
+    return {
+        "total_sent": int(total_sent),
+        "positive":   positive,
+        "negative":   negative,
+        "resolved":   resolved,
+        "win_rate_pct": round(win_rate, 1),
+    }
 
 
 async def update_trade_close(trade_id: str, exit_price: float,
@@ -445,25 +633,36 @@ async def get_asset_stats(asset: str) -> dict:
     }
 
 
-async def upsert_daily_stats(pnl_usdt: float, is_win: bool, signals_delta: int = 0):
-    """Atualiza o resumo do dia atual."""
+async def upsert_daily_stats(pnl_usdt: float = 0.0, is_win: bool | None = None, signals_delta: int = 0):
+    """Atualiza o resumo diario.
+
+    `is_win is None` registra apenas sinais enviados, sem incrementar trades
+    nem perdas. Isso evita classificar sinal SINAIS como trade perdido.
+    """
     today = datetime.utcnow().strftime("%Y-%m-%d")
     now   = datetime.utcnow().isoformat()
+    trade_delta = 1 if is_win is not None else 0
+    win_delta   = 1 if is_win is True else 0
+    loss_delta  = 1 if is_win is False else 0
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(
             """INSERT INTO daily_stats (date, total_trades, wins, losses, pnl_usdt, signals_sent, updated_at)
-               VALUES (?,1,?,?,?,?,?)
+               VALUES (?,?,?,?,?,?,?)
                ON CONFLICT(date) DO UPDATE SET
-                   total_trades = total_trades + 1,
+                   total_trades = total_trades + ?,
                    wins         = wins + ?,
                    losses       = losses + ?,
                    pnl_usdt     = pnl_usdt + ?,
                    signals_sent = signals_sent + ?,
-                   win_rate     = (wins + ?) * 100.0 / (total_trades + 1),
+                   win_rate     = CASE
+                                      WHEN (total_trades + ?) > 0
+                                      THEN (wins + ?) * 100.0 / (total_trades + ?)
+                                      ELSE 0
+                                  END,
                    updated_at   = ?""",
-            (today, 1 if is_win else 0, 0 if is_win else 1, pnl_usdt, signals_delta, now,
-             1 if is_win else 0, 0 if is_win else 1, pnl_usdt, signals_delta,
-             1 if is_win else 0, now),
+            (today, trade_delta, win_delta, loss_delta, pnl_usdt, signals_delta, now,
+             trade_delta, win_delta, loss_delta, pnl_usdt, signals_delta,
+             trade_delta, win_delta, trade_delta, now),
         )
         await db.commit()
 
@@ -491,7 +690,7 @@ async def get_all_trades(limit: int = 100) -> list:
 async def get_performance_stats() -> dict:
     async with aiosqlite.connect(DB_PATH) as db:
         async with db.execute(
-            "SELECT status, pnl_usdt, pnl_pct FROM trades WHERE status='CLOSED'"
+            "SELECT status, pnl_usdt, pnl_pct, exit_price FROM trades WHERE status='CLOSED'"
         ) as cur:
             rows = await cur.fetchall()
 
@@ -499,15 +698,21 @@ async def get_performance_stats() -> dict:
         return {"total": 0, "wins": 0, "losses": 0, "win_rate": 0,
                 "total_pnl": 0, "profit_factor": 1, "max_drawdown": 0}
 
-    wins         = [r[1] for r in rows if r[1] > 0]
-    losses       = [r[1] for r in rows if r[1] <= 0]
-    total_pnl    = sum(r[1] for r in rows)
+    valid_rows = [r for r in rows if r[1] is not None and r[2] is not None and r[3] is not None]
+    if not valid_rows:
+        return {"total": 0, "wins": 0, "losses": 0, "win_rate": 0,
+                "total_pnl": 0, "profit_factor": 1, "max_drawdown": 0,
+                "data_quality": "no_realized_pnl"}
+
+    wins         = [r[1] for r in valid_rows if r[1] > 0]
+    losses       = [r[1] for r in valid_rows if r[1] <= 0]
+    total_pnl    = sum(r[1] for r in valid_rows)
     gross_profit = sum(wins)   if wins   else 0
     gross_loss   = abs(sum(losses)) if losses else 0
     profit_factor = round(gross_profit / gross_loss, 2) if gross_loss > 0 else 999
 
     cumulative = []; running = 0; peak = 0; max_dd = 0
-    for r in rows:
+    for r in valid_rows:
         running += r[1]
         if running > peak: peak = running
         dd = peak - running
@@ -515,14 +720,15 @@ async def get_performance_stats() -> dict:
         cumulative.append(running)
 
     return {
-        "total":        len(rows),
+        "total":        len(valid_rows),
         "wins":         len(wins),
         "losses":       len(losses),
-        "win_rate":     round(len(wins) / len(rows) * 100, 1) if rows else 0,
+        "win_rate":     round(len(wins) / len(valid_rows) * 100, 1) if valid_rows else 0,
         "total_pnl":    round(total_pnl, 2),
         "profit_factor": profit_factor,
         "max_drawdown": round(max_dd, 2),
         "equity_curve": cumulative[-50:],
+        "data_quality": "ok",
     }
 
 

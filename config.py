@@ -57,7 +57,7 @@ MODE_SETTINGS = {
         "scan_interval_s": 90,
         "max_open_trades": 3,
         "risk_pct": 0.5,
-        "timeframes": ["5m", "15m"],
+        "timeframes": ["5m", "15m", "1h"],  # 2026-06-26: +1h (swing) — pedido do usuário
         "bonus_cap": 14.0,       # 2026-06-19: 12→14
         "leverage_cap": 10,
         "allowed_assets": None,
@@ -70,7 +70,7 @@ MODE_SETTINGS = {
         "scan_interval_s": 60,
         "max_open_trades": 5,
         "risk_pct": 1.0,
-        "timeframes": ["3m", "5m", "15m"],  # 2026-06-19: +3m para mais oportunidades
+        "timeframes": ["3m", "5m", "15m", "1h"],  # 2026-06-19: +3m | 2026-06-26: +1h
         "bonus_cap": 18.0,               # 2026-06-19: 17→18
         "leverage_cap": None,
         "allowed_assets": None,
@@ -83,7 +83,7 @@ MODE_SETTINGS = {
         "scan_interval_s": 45,    # mínimo seguro após IP ban — nunca < 45s
         "max_open_trades": 8,
         "risk_pct": 1.5,
-        "timeframes": ["1m", "3m", "5m", "15m"],
+        "timeframes": ["1m", "3m", "5m", "15m", "1h"],  # 2026-06-26: +1h
         "bonus_cap": 20.0,
         "leverage_cap": None,
         "allowed_assets": None,
@@ -138,6 +138,41 @@ CB_AUTH_TIMEOUT_S       = 300       # 5 min
 MAX_TOTAL_EXPOSURE_RATIO = 1.5      # bloqueia nova entrada se exposição > isto
 MAX_TRADES_PER_DAY       = 30       # 0 = sem limite
 
+# ── Anti-topo/fundo REFORÇADO (2026-06-22) — afeta TODOS os modos (signal_engine) ──
+# Corrige a brecha do prox-gate: ele só bloqueava quando a resistência estava ACIMA do
+# preço; um LONG JÁ acima da resistência (breakout pelado = "comprar topo") passava.
+# (#1/#3) Breakout pelado: LONG acima da resistência / SHORT abaixo do suporte só passa
+#         com CONFIRMAÇÃO forte (volume + fechamento na ponta da vela). Senão BLOQUEIA —
+#         espera o reteste (alinhado à estratégia V5.3: reteste + confirmação).
+# 2026-06-23: LIGADOS (paridade com Railway confirmada antes de ativar).
+PROX_BLOCK_NAKED_BREAKOUT = True
+PROX_BREAKOUT_VOL_MULT    = 1.8     # volume da vela ≥ X× a média p/ confirmar o breakout
+PROX_BREAKOUT_CLOSE_PCT   = 0.70    # fechamento ≥70% do range da vela (perto da máx, LONG)
+# (#2) Multi-TF: um sinal de scalp não entra colado na resistência/suporte do TF MAIOR.
+PROX_MULTI_TF_GATE        = True
+PROX_HIGHER_TF            = {"1m": "15m", "3m": "15m", "5m": "1h", "15m": "1h", "1h": "4h"}
+
+# (#4) Topo/fundo FRESCO (2026-06-23) — em teste a pedido do usuário. Bloqueia
+# entrada a menos de PROX_FRESH_EXTREME_PCT% da máxima/mínima das últimas
+# PROX_FRESH_EXTREME_N velas (pega o "acabou de fazer máxima nova" que o gate
+# estrutural por swing confirmado não vê). False desliga.
+PROX_BLOCK_FRESH_EXTREME = True
+PROX_FRESH_EXTREME_N     = 10
+PROX_FRESH_EXTREME_PCT   = 0.3
+
+# Override de reversão genuína (2026-06-23) — em teste a pedido do usuário.
+# Libera entrada bloqueada pelos 4 gates acima quando há CVD-divergência
+# (absorção/exaustão), RSI-divergência ou liquidity sweep (SMC) confirmando
+# reversão real. False desliga (gates voltam a bloquear sempre).
+PROX_REVERSAL_OVERRIDE = True
+
+# Gate STOCH-SATURADO (2026-06-23) — achado real: LONG comprando com StochRSI
+# K>=90 (momentum já no topo) só ganhou 27.8% (5/18) em 164 outcomes reais.
+# Bloqueia LONG/SHORT entrando em momentum saturado, salvo override de reversão.
+STOCH_SATURATION_GATE = True
+STOCH_SATURATION_HIGH = 90.0   # LONG bloqueado se K >= isso
+STOCH_SATURATION_LOW  = 10.0   # SHORT bloqueado se K <= isso
+
 # ── Acurácia do canal SINAIS (2026-06-22) — NÃO ENVIADO AO RAILWAY ────────────
 # Melhorias que afetam SOMENTE o canal SINAIS (evaluate_signal é chamado apenas
 # pelo job_sinais_scan; o modo autônomo/real NÃO é tocado por estes gates).
@@ -150,17 +185,49 @@ SINAIS_MTF_HARD_GATE      = True
 SINAIS_REQUIRE_STRUCT_ALL = True
 # (3) Confluência mínima: nº de tags estruturais DISTINTAS que devem concordar.
 #     Bloqueia o "score alto solitário" (1 fator inflado). Por perfil.
-SINAIS_MIN_CONFLUENCE     = {"CONSERVATIVE": 2, "NORMAL": 2, "AGGRESSIVE": 1}
+# FIX (2026-06-25): NORMAL estava em 2 mas o diagnóstico real de 22/06 (400 sinais
+# reais) mediu que confluência=2 sozinha bloqueava 31,5% do NORMAL — caindo a taxa
+# de aprovação de 19,8% para... só 19,8% MESMO (o "2" nunca foi de fato revertido
+# pra 1 no código, apesar de a correção ter sido validada e registrada). Voltando
+# para 1 (mesmo valor do AGGRESSIVE), que mediu 45,2% de aprovação com dados reais.
+SINAIS_MIN_CONFLUENCE     = {"CONSERVATIVE": 2, "NORMAL": 1, "AGGRESSIVE": 1}
 # (5) Claude Brain avalia o sinal a partir deste score (antes era 65 — sinais de
 #     55-64 do Agressivo escapavam da IA).
 SINAIS_BRAIN_MIN_SCORE    = 55
 # (6/7) Rastreio de resultado dos sinais transmitidos (paper) + auto-tune do corte
 #     do SINAIS conforme a taxa de acerto MEDIDA. Sem isto não há como medir acerto.
 SINAIS_OUTCOME_TRACKING   = True
-SINAIS_OUTCOME_MAX_AGE_H  = 6        # tempo máx. para resolver um sinal (senão TIMEOUT)
+SINAIS_OUTCOME_MAX_AGE_H  = 6        # fallback p/ TF não listado em SINAIS_OUTCOME_MAX_AGE_H_BY_TF
+# Janela máx. para resolver um sinal antes de fechar como TIMEOUT, por timeframe.
+# Calibrado em 2026-06-29: janela única de 6h gerava TIMEOUT desproporcional em TFs
+# maiores (15m: 24% dos sinais expiravam sem tocar TP/SL) — alvo é ~o tempo que o
+# par TP/SL desse TF historicamente leva para resolver, com folga.
+SINAIS_OUTCOME_MAX_AGE_H_BY_TF = {
+    # 15m: 8h→24h (2026-07-02) — janela curta marcava TIMEOUT/LOSS em sinais que
+    # ainda iam bater o TP; era a métrica "invertida" que enganava o auto-tune.
+    "1m": 1, "3m": 2, "5m": 3, "15m": 24, "1h": 24,
+}
+
+# ── Filtro de performance por ativo (Fase 0, calibrado em 2026-06-29 com 740
+# signal_outcomes reais). RELAXADO em 2026-07-01: a WR que calibrou estes
+# throttles é medida sobre a janela de TIMEOUT antiga (15m reconhecidamente
+# invertido), então o pacote estava sufocando o volume de sinais para os dois
+# canais. Sem bloqueio total (só malus leve) até o motor ser revalidado.
+ASSET_PERFORMANCE_BLOCKLIST = set()   # nenhum ativo 100% bloqueado
+ASSET_PERFORMANCE_MALUS = {
+    # Malus leve (metade do calibrado em 29/06) — penaliza sem esvaziar o universo.
+    "SOLUSDT": -4, "AXSUSDT": -3, "XMRUSDT": -3, "ETHUSDT": -3,
+    "DYDXUSDT": -2, "ONDOUSDT": -2,
+}
+# 15m: malus -5 CONFIRMADO por revalidação com janela justa de 24h (2026-07-02,
+# tools/revalidate_15m_outcomes.py): WR real 25.2% (34/135), expectância
+# -0.775%/sinal, -104.6% acumulado. Não era medição invertida — o 15m é
+# genuinamente o pior TF. Auto-tune agora opera sobre métrica confiável.
+TIMEFRAME_PERFORMANCE_MALUS = {"15m": -5}
 SINAIS_AUTOTUNE_ENABLED   = True
 SINAIS_AUTOTUNE_LOOKBACK  = 30       # nº de sinais resolvidos considerados
-SINAIS_AUTOTUNE_MAX_TIGHTEN = 8      # quanto o corte do SINAIS pode SUBIR
+SINAIS_AUTOTUNE_MAX_TIGHTEN = 3      # corte do SINAIS sobe no máx +3 (era 8 —
+                                     # +8 estrangulava o volume via loop de WR)
 SINAIS_AUTOTUNE_MAX_LOOSEN  = 3      # quanto pode BAIXAR
 
 # ── Claude Brain ─────────────────────────────────────────────────────────────
@@ -297,6 +364,7 @@ TELEGRAM_TOKEN   = os.getenv("TELEGRAM_TOKEN", "")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")         # chat pessoal — msgs operacionais
 TELEGRAM_CHANNEL_ID = os.getenv("TELEGRAM_CHANNEL_ID", "")  # canal público @mestressinais_br
 TELEGRAM_VIP_ID     = os.getenv("TELEGRAM_VIP_ID", "")      # grupo VIP privado
+TELEGRAM_VIP_BOT_LINK = os.getenv("TELEGRAM_VIP_BOT_LINK", "@MestresVipAcesso_bot")  # CTA nas msgs públicas (bot oficial VIP)
 
 # CoinMarketCap (opcional — obter em coinmarketcap.com/api, plano gratuito)
 CMC_API_KEY: str = os.getenv("CMC_API_KEY", "")

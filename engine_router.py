@@ -18,6 +18,7 @@ Sinais adicionais aplicados pelo router sobre qualquer engine:
   - Session threshold (SCORE_THRESH dinâmico por sessão)
 """
 import asyncio
+import traceback
 import time
 from typing import Optional
 
@@ -34,6 +35,28 @@ import asset_memory
 # ── Cache de regime por ativo (evita recalcular a cada call) ─────────────────
 _regime_ts: dict = {}   # symbol+tf → timestamp
 _REGIME_TTL = 300       # 5 min
+
+
+def _detect_regime_agnostic(df: pd.DataFrame) -> dict:
+    """Detecta regime sem favorecer LONG antes de existir sinal."""
+    long_data = regime_detector.detect(df, direction="LONG")
+    short_data = regime_detector.detect(df, direction="SHORT")
+    if long_data.get("regime") == "VOLATILE" or short_data.get("regime") == "VOLATILE":
+        data = dict(long_data)
+        data["regime"] = "VOLATILE"
+        data["ema_aligned"] = long_data.get("ema_aligned") or short_data.get("ema_aligned")
+        return data
+    if long_data.get("regime") == "TRENDING" or short_data.get("regime") == "TRENDING":
+        return long_data if long_data.get("regime") == "TRENDING" else short_data
+    if long_data.get("regime") == "RANGING" and short_data.get("regime") == "RANGING":
+        return long_data
+    data = dict(long_data)
+    data["regime"] = "NEUTRAL"
+    data["ema_aligned"] = long_data.get("ema_aligned") or short_data.get("ema_aligned")
+    data["score_adj"] = 0.0
+    data["sl_mult_adj"] = 1.0
+    data["score_cap"] = None
+    return data
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -75,7 +98,7 @@ async def _mean_rev_signal(
         return None
     try:
         # Filtro ADX para evitar entrar contra tendência forte
-        regime_data = regime_detector.detect(df, direction="LONG")
+        regime_data = _detect_regime_agnostic(df)
         adx_val = regime_data.get("adx", 20.0)
         if adx_val >= 25.0:
             return None
@@ -139,18 +162,15 @@ async def _mean_rev_signal(
         from signal_engine import atr as _atr_fn
         atr_val = float(_atr_fn(df).iloc[-1]) or (price * 0.01)
 
+        # TP único (2026-06-23) — captura o movimento completo (alvo mais largo)
         if direction == Direction.LONG:
             entry    = price
             sl       = bb_lo_v - atr_val * 0.5
-            tp1      = bb_mid_v
-            tp2      = bb_hi_v
-            tp3      = bb_hi_v + bb_width * 0.5
+            tp1 = tp2 = tp3 = bb_hi_v + bb_width * 0.5
         else:
             entry    = price
             sl       = bb_hi_v + atr_val * 0.5
-            tp1      = bb_mid_v
-            tp2      = bb_lo_v
-            tp3      = bb_lo_v - bb_width * 0.5
+            tp1 = tp2 = tp3 = bb_lo_v - bb_width * 0.5
 
         rr = abs(tp2 - entry) / abs(sl - entry) if abs(sl - entry) > 0 else 1.0
         if rr < 1.3:
@@ -247,25 +267,27 @@ async def _vdls_signal(
         if direction is None or score < 60:
             return None
 
-        # Níveis de SL/TP estritos da estratégia VDLS (Stop colado no pavio, R:R fixo de 2x)
+        # Stop perto do suporte/resistência rompido (não do pavio extremo) +
+        # RR adaptado pela volatilidade do ativo (2026-06-24): ativos mais
+        # voláteis (ATR% maior) usam RR menor — o alvo fixo de 3x ficava
+        # estatisticamente quase impossível de bater em ativos voláteis.
+        vol_pct = (atr_val / price) if price else 0.005
+        rr_mult = max(1.2, min(2.5, 2.8 - vol_pct * 200))
+
         if direction == Direction.LONG:
-            sl = float(low.iloc[-1]) - (atr_val * 0.15)
+            sl = local_low - (atr_val * 0.15)
             if sl >= price:
                 sl = price - (atr_val * 1.2)
             risk = price - sl
-            tp1 = price + risk * 1.2
-            tp2 = price + risk * 2.0
-            tp3 = price + risk * 3.0
+            tp1 = tp2 = tp3 = price + risk * rr_mult
         else:
-            sl = float(high.iloc[-1]) + (atr_val * 0.15)
+            sl = local_high + (atr_val * 0.15)
             if sl <= price:
                 sl = price + (atr_val * 1.2)
             risk = sl - price
-            tp1 = price - risk * 1.2
-            tp2 = price - risk * 2.0
-            tp3 = price - risk * 3.0
+            tp1 = tp2 = tp3 = price - risk * rr_mult
 
-        rr = abs(tp2 - price) / risk if risk > 0 else 2.0
+        rr = abs(tp2 - price) / risk if risk > 0 else rr_mult
 
         sc = SignalScore(
             total_override=round(score, 1),
@@ -281,7 +303,7 @@ async def _vdls_signal(
             entry=round(price, 8), stop_loss=round(sl, 8),
             tp1=round(tp1, 8), tp2=round(tp2, 8), tp3=round(tp3, 8),
             rr=round(rr, 2),
-            reason=f"VDLS|SWEEP|CVD{cvd_now:.0f}|SL-PAVIO",
+            reason=f"VDLS|SWEEP|CVD{cvd_now:.0f}|SL-SR|RR{rr_mult:.1f}",
             confirmed_signals=["VDLS-SWEEP", "CVD-DIV", "LQ-SWEEP"],
         )
     except Exception as e:
@@ -310,7 +332,7 @@ async def _fade_signal(
         return None
     try:
         # Filtro ADX para evitar entrar antes da exaustão em tendência hiper-forte
-        regime_data = regime_detector.detect(df, direction="LONG")
+        regime_data = _detect_regime_agnostic(df)
         adx_val = regime_data.get("adx", 20.0)
         if adx_val >= 35.0:
             return None
@@ -383,22 +405,16 @@ async def _fade_signal(
         atr_val = atr_cur or price * 0.015
         is_scalp_tf = tf in {"1m", "3m", "5m", "15m"}
         sl_mult = 1.0 if is_scalp_tf else 1.5
-        tp1_mult = 1.2 if is_scalp_tf else 2.0
-        tp2_mult = 2.0 if is_scalp_tf else 3.5
-        tp3_mult = 3.0 if is_scalp_tf else 5.0
+        tp3_mult = 3.0 if is_scalp_tf else 5.0   # TP único (2026-06-23) — alvo mais largo
 
         if direction == Direction.SHORT:
             entry = price
             sl    = price + atr_val * sl_mult
-            tp1   = price - atr_val * tp1_mult
-            tp2   = price - atr_val * tp2_mult
-            tp3   = price - atr_val * tp3_mult
+            tp1 = tp2 = tp3 = price - atr_val * tp3_mult
         else:
             entry = price
             sl    = price - atr_val * sl_mult
-            tp1   = price + atr_val * tp1_mult
-            tp2   = price + atr_val * tp2_mult
-            tp3   = price + atr_val * tp3_mult
+            tp1 = tp2 = tp3 = price + atr_val * tp3_mult
 
         rr = abs(tp2 - entry) / abs(sl - entry) if abs(sl - entry) > 0 else 1.0
 
@@ -522,7 +538,7 @@ async def route(
     rs_scores  = rs_scores or {}
 
     # ── 1. Detecta regime ────────────────────────────────────────────────────
-    regime_data = regime_detector.detect(df, direction="LONG")
+    regime_data = _detect_regime_agnostic(df)
     regime      = regime_data.get("regime", "NEUTRAL")
     adx_val     = regime_data.get("adx", 20.0)
     regime_detector.update_cache(symbol, regime_data)
@@ -567,6 +583,10 @@ async def route(
 
     if signal is None:
         return None
+
+    signal_direction = getattr(signal.direction, "value", signal.direction)
+    regime_data = regime_detector.detect(df, direction=str(signal_direction).upper())
+    regime_detector.update_cache(symbol, regime_data)
 
     # ── 4. Aplica regime score adjustment ────────────────────────────────────
     regime_adj = regime_data.get("score_adj", 0.0)
@@ -675,7 +695,7 @@ async def cascade(
         return _cascade_empty(symbol)
 
     # Detecta regime para contexto (mas NÃO bloqueia nenhuma engine)
-    regime_data = regime_detector.detect(df, direction="LONG")
+    regime_data = _detect_regime_agnostic(df)
     regime      = regime_data.get("regime", "NEUTRAL")
     adx_val     = regime_data.get("adx", 20.0)
     regime_detector.update_cache(symbol, regime_data)
@@ -850,10 +870,17 @@ async def scan_with_router(
         async with semaphore:
             try:
                 df = await get_klines_cached(sym, tf, limit=200)
-                return await route(sym, tf, df, news_data=news_data,
-                                   mode=mode, rs_scores=rs_scores)
+                result = await route(sym, tf, df, news_data=news_data,
+                                      mode=mode, rs_scores=rs_scores)
+                # Checkpoint explícito: quando df vem do cache (sem I/O real),
+                # route() é puro CPU-bound e nunca cede o event loop. Sem este
+                # yield, centenas de chamadas em sequência travam o servidor
+                # HTTP (dashboard) até o scan terminar (visto: até 30s de freeze).
+                await asyncio.sleep(0)
+                return result
             except Exception as e:
-                print(f"[ROUTER] {sym}/{tf} erro: {e}")
+                print(f"[ROUTER] {sym}/{tf} erro: {type(e).__name__}: {repr(e)}")
+                print(traceback.format_exc(limit=3))
                 return None
 
     tasks   = [_single(sym, tf) for sym in symbols for tf in timeframes]

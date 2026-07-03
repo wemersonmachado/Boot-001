@@ -328,21 +328,28 @@ async def process_trade_update(trade: ActiveTrade, current_price: float) -> dict
     if new_stop:
         actions.append({"action": "UPDATE_STOP", "new_stop": new_stop})
 
-    # Scale-Out por TP (35% em TP1, 35% em TP2, 30% em TP3)
+    scale_map = {int(level): float(pct) for level, pct in SCALE_OUT_MILESTONES}
+    tp1_abs = scale_map.get(1, 0.35)
+    tp2_abs = scale_map.get(2, 0.35)
+
+    # Scale-Out por TP alinhado ao executor real da Binance.
     tp_hit = check_tp_hit(trade)
     if tp_hit == "TP1":
+        pct = tp1_abs
         trade.tp1_hit = True
-        actions.append({"action": "PARTIAL_CLOSE", "reason": "TP1", "pct": 0.35, "original_size": trade.size_usdt})
-        trade.size_usdt = round(trade.size_usdt * 0.65, 2)
+        actions.append({"action": "PARTIAL_CLOSE", "reason": "TP1", "pct": pct, "original_size": trade.size_usdt})
+        trade.size_usdt = round(trade.size_usdt * max(1.0 - pct, 0.0), 2)
         # Move SL para breakeven
         if trade.direction == Direction.LONG:
             trade.stop_loss = max(trade.stop_loss, trade.entry_price)
         else:
             trade.stop_loss = min(trade.stop_loss, trade.entry_price)
     elif tp_hit == "TP2":
+        remaining_after_tp1 = max(1.0 - tp1_abs, 0.0001)
+        pct = min(tp2_abs / remaining_after_tp1, 1.0)
         trade.tp2_hit = True
-        actions.append({"action": "PARTIAL_CLOSE", "reason": "TP2", "pct": 0.35, "original_size": trade.size_usdt})
-        trade.size_usdt = round(trade.size_usdt * 0.65, 2)
+        actions.append({"action": "PARTIAL_CLOSE", "reason": "TP2", "pct": pct, "original_size": trade.size_usdt})
+        trade.size_usdt = round(trade.size_usdt * max(1.0 - pct, 0.0), 2)
         # Move SL para TP1 (garante lucro)
         if trade.direction == Direction.LONG:
             trade.stop_loss = max(trade.stop_loss, trade.tp1)

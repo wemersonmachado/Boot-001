@@ -247,15 +247,15 @@ def _evaluate(
     if atr_v <= 0:
         return None
 
-    # Levels V2: stop 1x ATR | TP1 = parcial 50% em 1.5x ATR (depois BE + trailing)
+    # Levels V2: stop 1x ATR | TP único (2026-06-23) — captura o movimento completo
     if direction == Direction.LONG:
         stop = price - atr_v
-        tp1  = price + atr_v * 1.5
-        tp2  = price + atr_v * 2.5   # referência p/ trailing
+        tp1  = price + atr_v * 2.5
+        tp2  = tp1
     else:
         stop = price + atr_v
-        tp1  = price - atr_v * 1.5
-        tp2  = price - atr_v * 2.5
+        tp1  = price - atr_v * 2.5
+        tp2  = tp1
 
     risk   = abs(price - stop)
     reward = abs(tp1 - price)
@@ -282,11 +282,11 @@ def _evaluate(
         entry=round(price, 6),
         stop_loss=round(stop, 6),
         tp1=round(tp1, 6),
-        tp2=round(tp2, 6),   # TP1 = parcial 50% | TP2 = ref. trailing
+        tp2=round(tp2, 6),
         tp3=round(tp2, 6),
         rr=rr,
         confidence=round(total, 1),
-        reason=f"VOLATILE V2 | Vol {vr:.1f}x | RSI {rsi_v:.0f} | Breakout {timeframe} | Parcial 1.5ATR+Trail",
+        reason=f"VOLATILE V2 | Vol {vr:.1f}x | RSI {rsi_v:.0f} | Breakout {timeframe} | TP único 2.5ATR",
         score=score_obj,
         timeframe=timeframe,
         trade_type=trade_type,

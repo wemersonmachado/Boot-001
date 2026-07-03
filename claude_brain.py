@@ -10,6 +10,10 @@ import time
 
 _client = None
 _MODEL = os.getenv("ANTHROPIC_MODEL", "claude-haiku-4-5-20251001")  # haiku: 10x mais rápido, $0.80/$4.00/M tokens
+
+# Alerta de fallback (2026-06-23) — avisa no Telegram quando o Brain cai em "aprova tudo"
+_FALLBACK_ALERT_COOLDOWN = 1800  # 30 min — evita espamar se a API ficar instável
+_last_fallback_alert_ts: float = 0.0
 # Preços por milhão de tokens (USD) — claude-haiku-4-5
 _PRICE_INPUT_PER_M  = 0.80
 _PRICE_OUTPUT_PER_M = 4.00
@@ -238,6 +242,18 @@ Responda APENAS com JSON valido neste formato exato (nao inclua formatacao markd
         print(f"[CLAUDE BRAIN] Erro na API: {e}")
         # Fallback liberal: aprova o trade quando brain indisponível
         # (antes era False — bloqueava todos os trades silenciosamente em falha de API)
+        global _last_fallback_alert_ts
+        now = time.time()
+        if now - _last_fallback_alert_ts >= _FALLBACK_ALERT_COOLDOWN:
+            _last_fallback_alert_ts = now
+            try:
+                import notifier
+                asyncio.create_task(notifier.send_alert(
+                    f"Claude Brain indisponível — sinais sendo aprovados SEM filtro de IA até a API normalizar.\n"
+                    f"Erro: {str(e)[:120]}"
+                ))
+            except Exception:
+                pass
         return {
             "approve": True,
             "reason": f"Brain indisponivel: {str(e)[:80]}",

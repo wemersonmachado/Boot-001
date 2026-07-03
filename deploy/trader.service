@@ -1,0 +1,17 @@
+[Unit]
+Description=Trader Bot 001 (FastAPI + Binance + APScheduler)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=ubuntu
+WorkingDirectory=/home/ubuntu/trader_001
+EnvironmentFile=/home/ubuntu/trader_001/.env
+ExecStart=/home/ubuntu/trader_001/venv/bin/python main.py
+Restart=always
+RestartSec=10
+# Reinicia se travar; mantém o bot 24/7
+StartLimitIntervalSec=0
+
+[Install]
+WantedBy=multi-user.target

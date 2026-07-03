@@ -10,7 +10,7 @@ from typing import Optional
 from binance.client import Client
 from binance.exceptions import BinanceAPIException
 
-from config import BINANCE_API_KEY, BINANCE_SECRET_KEY, BINANCE_TESTNET
+from config import BINANCE_API_KEY, BINANCE_SECRET_KEY, BINANCE_TESTNET, SCALE_OUT_MILESTONES
 from models import ActiveTrade, Direction
 
 
@@ -58,7 +58,9 @@ def get_client() -> Client:
     offset = _sync_time_offset()
     client = Client(BINANCE_API_KEY, BINANCE_SECRET_KEY, testnet=BINANCE_TESTNET)
     client.timestamp_offset = offset
-    client.requests_params = {"recvWindow": 60000}
+    # timeout evita que uma chamada sem resposta da Binance trave a thread
+    # do executor para sempre (já visto travar o bot por horas).
+    client.requests_params = {"recvWindow": 60000, "timeout": 15}
     _client_cache = {"client": client, "ts": now, "offset": offset}
     print(f"[EXECUTOR] Novo cliente Binance criado | offset={offset}ms")
     return client
@@ -238,27 +240,25 @@ def open_trade(trade: ActiveTrade) -> dict:
             sl_order["quantity"] = qty
         client.futures_create_order(**sl_order)
 
-        # TP1 (45% of position)
-        tp1_qty = round_step(qty * 0.45, prec["step_size"])
-        client.futures_create_order(
-            symbol=trade.asset,
-            side=close_side,
-            type="TAKE_PROFIT_MARKET",
-            stopPrice=round_step(trade.tp1, prec["tick_size"]),
-            quantity=tp1_qty,
-            **close_kwargs(),
-        )
-
-        # TP2 (55% restante — fecha posição completa)
-        tp2_qty = round_step(qty * 0.55, prec["step_size"])
-        client.futures_create_order(
-            symbol=trade.asset,
-            side=close_side,
-            type="TAKE_PROFIT_MARKET",
-            stopPrice=round_step(trade.tp2, prec["tick_size"]),
-            quantity=tp2_qty,
-            **close_kwargs(),
-        )
+        tp_prices = {1: trade.tp1, 2: trade.tp2, 3: trade.tp3}
+        allocated = 0.0
+        for tp_level, fraction in SCALE_OUT_MILESTONES:
+            tp_price = tp_prices.get(int(tp_level))
+            if not tp_price:
+                continue
+            raw_qty = max(qty - allocated, 0.0) if int(tp_level) == 3 else qty * float(fraction)
+            tp_qty = round_step(raw_qty, prec["step_size"])
+            if tp_qty <= 0:
+                continue
+            allocated += tp_qty
+            client.futures_create_order(
+                symbol=trade.asset,
+                side=close_side,
+                type="TAKE_PROFIT_MARKET",
+                stopPrice=round_step(tp_price, prec["tick_size"]),
+                quantity=tp_qty,
+                **close_kwargs(),
+            )
 
         print(f"[EXECUTOR] Opened {trade.direction} {trade.asset} qty={qty} @ market")
         return {"status": "OK", "order_id": order["orderId"], "qty": qty}
@@ -349,8 +349,11 @@ def close_position(symbol: str, direction: Direction, client: Client = None, qty
         client = get_client()
 
     hedge      = _is_hedge_mode(client)
-    close_side = "SELL" if direction == Direction.LONG else "BUY"
-    pos_side   = "LONG" if direction == Direction.LONG else "SHORT"
+    dir_value  = getattr(direction, "value", direction)
+    dir_value  = str(dir_value).upper().replace("DIRECTION.", "")
+    is_long    = dir_value == "LONG"
+    close_side = "SELL" if is_long else "BUY"
+    pos_side   = "LONG" if is_long else "SHORT"
 
     try:
         # Cancel TPs and SL before closing ONLY if doing a full close

@@ -25,8 +25,15 @@ if sys.stderr.encoding and sys.stderr.encoding.lower() != "utf-8":
     except Exception:
         pass
 
+# Rotação de log (2026-07-02): stdout/stderr → logs/bot.log (10MB x 5).
+# Precisa vir ANTES dos outros imports pra capturar tudo, inclusive uvicorn.
+import log_rotation
+log_rotation.install()
+
 import asyncio
+import atexit
 import json
+import os
 import time
 import requests as _requests
 from contextlib import asynccontextmanager
@@ -39,6 +46,20 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
+# ── FIX: serialização JSON de tipos numpy ─────────────────────────────────────
+# Endpoints que devolvem dados derivados de pandas/numpy (sinais, análises) podem
+# conter numpy.bool_/int64/float32/ndarray. O jsonable_encoder do FastAPI quebra
+# nesses tipos (HTTP 500: "'numpy.bool' object is not iterable"). Registramos os
+# encoders e reconstruímos o cache interno p/ corrigir TODOS os endpoints de uma vez.
+import numpy as _np
+import fastapi.encoders as _fe
+_fe.ENCODERS_BY_TYPE[_np.bool_]    = bool
+_fe.ENCODERS_BY_TYPE[_np.integer]  = int
+_fe.ENCODERS_BY_TYPE[_np.floating] = float
+_fe.ENCODERS_BY_TYPE[_np.ndarray]  = lambda a: a.tolist()
+if hasattr(_fe, "generate_encoders_by_class_tuples"):
+    _fe.encoders_by_class_tuples = _fe.generate_encoders_by_class_tuples(_fe.ENCODERS_BY_TYPE)
+
 from config import (WEBHOOK_SECRET, HOST, PORT, WATCHLIST, MAX_DAILY_LOSS_PCT,
                     CORRELATION_GROUPS, MODE_SETTINGS, TRADING_MODE as _DEFAULT_MODE,
                     GRID_SETTINGS, CLAUDE_BRAIN_ALL_MODES, AUTO_KILLSWITCH_PCT,
@@ -49,6 +70,7 @@ from config import (WEBHOOK_SECRET, HOST, PORT, WATCHLIST, MAX_DAILY_LOSS_PCT,
                     AUTOTUNE_SCORE_ENABLED, AUTOTUNE_LOOKBACK, AUTOTUNE_MAX_TIGHTEN,
                     AUTOTUNE_MAX_LOOSEN, LEVERAGE_BY_VOLATILITY, ATR_PCT_REF, LEVERAGE_VOL_FLOOR,
                     SINAIS_BRAIN_MIN_SCORE, SINAIS_OUTCOME_TRACKING, SINAIS_OUTCOME_MAX_AGE_H,
+                    SINAIS_OUTCOME_MAX_AGE_H_BY_TF,
                     SINAIS_AUTOTUNE_ENABLED, SINAIS_AUTOTUNE_LOOKBACK,
                     SINAIS_AUTOTUNE_MAX_TIGHTEN, SINAIS_AUTOTUNE_MAX_LOOSEN)
 import market_engine
@@ -68,7 +90,7 @@ from database import (
     update_trade_close, mark_signal_executed,
     upsert_asset_profile, upsert_confluence_pattern,
     record_signal_outcome, upsert_daily_stats, get_score_adjustment,
-    get_recent_trade_stats, get_recent_signal_stats,
+    get_recent_trade_stats, get_recent_signal_stats, get_signal_kpi_summary,
 )
 from notifier import (
     send_signal_alert, send_trade_opened, send_trade_closed,
@@ -82,7 +104,6 @@ from notifier import (
     send_macro_decision, get_pending_assets,
     create_vip_invite_link, remove_vip_member,
     get_vip_member_count, get_channel_subscriber_count,
-    _channel_counter, _CHANNEL_DAILY_LIMIT,
     send_social_proof,
     set_alerts_paused, is_alerts_paused,
 )
@@ -99,9 +120,74 @@ _last_scan_at: str = ""
 _last_scan_ts: float = 0.0          # epoch do último scan de mercado concluído
 _last_scan_count: int = 0           # nº de sinais do último scan
 _sinais_last_empty_alert_ts: float = 0.0   # throttle do alerta de cache vazio
+_sinais_last_blocked_alert_ts: float = 0.0 # throttle do alerta de "achou mas filtros bloquearam tudo"
 _mode_started_at: str = ""
+
+# ── Health Monitor — heartbeat do event loop + estado de saúde ──────────────
+_loop_lag_max_recent: float = 0.0     # maior atraso (s) detectado desde a última checagem
+_loop_lag_last_reset: float = 0.0
+_health_state: dict = {              # flags de alerta já enviado (evita spam)
+    "scan_stuck": False, "loop_lag": False, "binance_down": False,
+}
+_health_last_ok_ts: float = 0.0       # epoch da última checagem 100% saudável
 CURRENT_MODE: str = "AGGRESSIVE"   # inicia sempre em AGGRESSIVE
 scheduler = AsyncIOScheduler()
+_INSTANCE_LOCK_FD = None
+_INSTANCE_LOCK_PATH = os.path.join(os.getcwd(), "trader_001.pid")
+
+
+def _pid_is_alive(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+
+
+def _acquire_instance_lock() -> None:
+    global _INSTANCE_LOCK_FD
+    if os.path.exists(_INSTANCE_LOCK_PATH):
+        try:
+            with open(_INSTANCE_LOCK_PATH, "r", encoding="utf-8") as fh:
+                existing_pid = int((fh.read() or "0").strip() or "0")
+        except Exception:
+            existing_pid = 0
+        if _pid_is_alive(existing_pid):
+            raise RuntimeError(
+                f"Outra instancia do Trader 001 ja esta ativa (pid={existing_pid}). "
+                f"Lock: {_INSTANCE_LOCK_PATH}"
+            )
+        try:
+            os.remove(_INSTANCE_LOCK_PATH)
+        except FileNotFoundError:
+            pass
+
+    _INSTANCE_LOCK_FD = os.open(_INSTANCE_LOCK_PATH, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+    os.write(_INSTANCE_LOCK_FD, str(os.getpid()).encode("utf-8"))
+    atexit.register(_release_instance_lock)
+
+
+def _release_instance_lock() -> None:
+    global _INSTANCE_LOCK_FD
+    if _INSTANCE_LOCK_FD is not None:
+        try:
+            os.close(_INSTANCE_LOCK_FD)
+        finally:
+            _INSTANCE_LOCK_FD = None
+    try:
+        if os.path.exists(_INSTANCE_LOCK_PATH):
+            with open(_INSTANCE_LOCK_PATH, "r", encoding="utf-8") as fh:
+                lock_pid = int((fh.read() or "0").strip() or "0")
+            if lock_pid == os.getpid():
+                os.remove(_INSTANCE_LOCK_PATH)
+    except Exception as e:
+        print(f"[LOCK] Falha ao liberar lock: {e}")
 
 # ── Modo de Operação ──────────────────────────────────────────────────────────
 # AUTONOMOUS  → bot executa trades sozinho, notifica Telegram após abertura
@@ -147,6 +233,10 @@ def sync_state_to_globals():
     DAILY_TARGET_USDT = bot_state.daily_target_usdt
     PAPER_TRADING = bot_state.paper_trading
     _mode_started_at = bot_state.mode_started_at
+    import notifier
+    notifier.RATE_LIMIT_PUBLIC_PER_HOUR = bot_state.sinais_max_hour_public
+    notifier.RATE_LIMIT_VIP_PER_HOUR = bot_state.sinais_max_hour_vip
+    notifier.set_public_tier_pct(bot_state.public_tier_pct)
 
 async def save_global_state_to_db():
     """Salva o estado atual das globais de volta para o SQLite através de BotState."""
@@ -186,6 +276,9 @@ SINAIS_WATCHLIST: list     = []    # ex: ["BTCUSDT", "ETHUSDT"] ou [] = watchlis
 _sinais_toggle: bool        = False  # alterna NORMAL/AGGRESSIVE a cada execucao
 _sinais_cooldown: dict      = {}     # "BTCUSDT_LONG_15m" → timestamp (cooldown por TF)
 _signal_fingerprints: dict  = {}     # fingerprint → timestamp (dedup A+B: price zone)
+_sinais_last_direction: dict = {}    # asset → (direction, timestamp) — evita LONG/SHORT
+                                      # opostos no mesmo ativo em TFs diferentes minutos depois
+_SINAIS_DIRECTION_LOCK_MIN = 20      # janela mínima entre sinais opostos no mesmo ativo
 _sinais_session_count: int  = 0      # sinais enviados nesta sessao (reset via /settings/reset_session)
 _sinais_empty_cycles: int   = 0      # ciclos consecutivos sem sinais (alerta em ≥2)
 
@@ -270,9 +363,9 @@ _cb_loss_ack_streak: int        = 0      # baseline de perdas já reconhecido (e
 _score_offset: int              = 0
 # Auto-tune e rastreio de acerto ESPECÍFICOS do canal SINAIS (não tocam o autônomo).
 _sinais_score_offset: int       = 0          # deslocamento no min_score do SINAIS
-_sinais_pending_outcomes: list  = []         # sinais transmitidos aguardando resolução
-                                             # cada item: dict(asset,direction,timeframe,
-                                             # entry,sl,tp,score,tags,rsi,ts,db_id)
+# Rastreio de resolução dos sinais SINAIS (TP1/SL) é lido direto do banco em
+# job_sinais_outcome_watch (signals + telegram_sent), não fica mais em memória —
+# assim sobrevive a reinícios do bot local.
 
 # ── Sharpe / Sortino ao vivo ───────────────────────────────────────────────
 _session_returns: list  = []      # pnl_pct de cada trade fechado nesta sessao
@@ -559,6 +652,76 @@ async def job_scan_market():
         await log_event("ERROR", f"Scan error: {e}")
 
 
+# ── Health Monitor ────────────────────────────────────────────────────────────
+# Heartbeat: task contínua que mede o atraso real do event loop. Se algo travar
+# o loop (ex.: scan CPU-bound sem yield, como o caso já visto neste bot), o
+# atraso entre "deveria ter despertado em 1s" e "despertou de fato" aumenta.
+async def _loop_heartbeat():
+    global _loop_lag_max_recent
+    while True:
+        t0 = time.time()
+        await asyncio.sleep(1.0)
+        drift = (time.time() - t0) - 1.0
+        if drift > _loop_lag_max_recent:
+            _loop_lag_max_recent = drift
+
+
+async def job_health_watch():
+    """
+    Roda a cada 5 min e checa 3 sinais de vida do bot:
+      1. Scan de mercado não travou (último scan recente)
+      2. Event loop não travou (heartbeat sem atraso grande)
+      3. API da Binance está respondendo
+    Manda alerta no Telegram só na TRANSIÇÃO saudável→problema (evita spam),
+    e manda um alerta de "recuperado" quando volta ao normal.
+    """
+    global _loop_lag_max_recent, _health_last_ok_ts
+    problems = []
+
+    # 1) Scan travado — limiar generoso (3x o intervalo normal de 60s)
+    scan_age = time.time() - _last_scan_ts if _last_scan_ts else 1e9
+    scan_stuck = scan_age > 180
+    if scan_stuck:
+        problems.append(f"Scan de mercado parado há {int(scan_age)}s (esperado: a cada ~60s)")
+
+    # 2) Event loop com atraso grande (acumulado desde a última checagem)
+    loop_lag = _loop_lag_max_recent
+    lag_bad = loop_lag > 5.0
+    if lag_bad:
+        problems.append(f"Event loop travando — atraso máximo de {loop_lag:.1f}s detectado")
+    _loop_lag_max_recent = 0.0  # reset para a próxima janela
+
+    # 3) Binance API respondendo
+    binance_down = False
+    try:
+        t0 = time.time()
+        await asyncio.wait_for(get_ticker("BTCUSDT"), timeout=10)
+        if time.time() - t0 > 8:
+            binance_down = True
+            problems.append("API da Binance respondendo, mas muito lenta (>8s)")
+    except Exception as e:
+        binance_down = True
+        problems.append(f"API da Binance não respondeu: {type(e).__name__}")
+
+    # Debounce: só alerta na transição de estado, não a cada checagem
+    was_unhealthy = any(_health_state.values())
+    _health_state["scan_stuck"]   = scan_stuck
+    _health_state["loop_lag"]     = lag_bad
+    _health_state["binance_down"] = binance_down
+    is_unhealthy = bool(problems)
+
+    if is_unhealthy and not was_unhealthy:
+        msg = "🚨 *Alerta de Saúde — Trader 001*\n\n" + "\n".join(f"⚠️ {p}" for p in problems)
+        msg += "\n\nVerifique o dashboard ou o servidor."
+        print(f"[HEALTH] PROBLEMA: {problems}")
+        await send_alert(msg)
+    elif was_unhealthy and not is_unhealthy:
+        print("[HEALTH] Recuperado")
+        await send_alert("✅ *Trader 001* — saúde normalizada, tudo operando normalmente novamente.")
+    elif is_unhealthy:
+        print(f"[HEALTH] Problema contínuo: {problems}")
+    else:
+        _health_last_ok_ts = time.time()
 
 
 
@@ -842,25 +1005,33 @@ async def job_sinais_outcome_watch():
     """Resolve os sinais SINAIS transmitidos comparando os candles após a entrada
     com TP1/SL: WIN se o preço tocou o alvo primeiro, LOSS se tocou o stop. Após
     SINAIS_OUTCOME_MAX_AGE_H sem resolver, fecha como TIMEOUT pelo preço atual.
-    Alimenta signal_outcomes → base do win-rate medível e do auto-tune do SINAIS.
-    Conservador: na dúvida (TP e SL no mesmo candle) conta como LOSS."""
-    global _sinais_pending_outcomes
-    if not SINAIS_OUTCOME_TRACKING or not _sinais_pending_outcomes:
+    Alimenta signal_outcomes → base do win-rate medível, do auto-tune do SINAIS e
+    dos KPIs do dashboard. Conservador: na dúvida (TP e SL no mesmo candle) conta
+    como LOSS.
+    Lê os sinais pendentes direto do banco (tabela signals + telegram_sent) em vez
+    de uma lista em memória — assim o rastreio sobrevive a reinícios do bot local
+    (antes, reiniciar o processo zerava a lista e signal_outcomes nunca enchia)."""
+    if not SINAIS_OUTCOME_TRACKING:
         return
     import pandas as pd
     from klines_cache import get_klines_cached as _gkl
-    _still: list = []
+    from database import get_unresolved_sinais_signals
+    _max_age_fetch = max([*SINAIS_OUTCOME_MAX_AGE_H_BY_TF.values(), SINAIS_OUTCOME_MAX_AGE_H])
+    pending = await get_unresolved_sinais_signals(_max_age_fetch)
+    if not pending:
+        return
     _now = time.time()
-    for it in _sinais_pending_outcomes:
+    for it in pending:
         try:
             asset, dirx = it["asset"], it["direction"]
             entry, sl, tp = it["entry"], it["sl"], it["tp"]
             is_long = "LONG" in dirx
+            _ts = datetime.fromisoformat(it["timestamp"]).timestamp()
             kl = await _gkl(asset, it["timeframe"], limit=120)
             hit_tp = hit_sl = False
             if kl is not None and len(kl) > 0:
                 # só candles a partir da entrada (índice = timestamp datetime UTC)
-                _entry_dt = pd.Timestamp(it["ts"], unit="s")
+                _entry_dt = pd.Timestamp(_ts, unit="s")
                 _sub = kl[kl.index >= (_entry_dt - pd.Timedelta(seconds=60))]
                 for hi, lo in zip(_sub["high"].values, _sub["low"].values):
                     hi, lo = float(hi), float(lo)
@@ -878,7 +1049,7 @@ async def job_sinais_outcome_watch():
                 outcome, exit_px = "LOSS", sl
             elif hit_tp:
                 outcome, exit_px = "WIN", tp
-            elif _now - it["ts"] > SINAIS_OUTCOME_MAX_AGE_H * 3600:
+            elif _now - _ts > SINAIS_OUTCOME_MAX_AGE_H_BY_TF.get(it["timeframe"], SINAIS_OUTCOME_MAX_AGE_H) * 3600:
                 # timeout: resolve pelo último preço conhecido
                 try:
                     exit_px = float(kl["close"].iloc[-1]) if kl is not None and len(kl) else entry
@@ -886,20 +1057,17 @@ async def job_sinais_outcome_watch():
                     exit_px = entry
                 outcome = "TIMEOUT"
             if outcome is None:
-                _still.append(it)            # ainda em aberto
-                continue
+                continue                      # ainda em aberto — tentativa seguinte
             pnl_pct = ((exit_px - entry) / entry * 100.0) if is_long else ((entry - exit_px) / entry * 100.0)
             asyncio.create_task(record_signal_outcome(
                 int(it.get("db_id", 0) or 0), asset, dirx, it["timeframe"],
                 entry, exit_px, round(pnl_pct, 3), outcome,
-                tags=it.get("tags", ""), rsi_val=it.get("rsi", 0.0),
+                tags=it.get("tags", ""), rsi_val=0.0,
             ))
             print(f"[SINAIS-OUTCOME] {asset} {dirx} {it['timeframe']} → {outcome} ({pnl_pct:+.2f}%)")
         except Exception as e:
-            # erro pontual: mantém o sinal em aberto para nova tentativa
+            # erro pontual: sinal permanece pendente no banco, nova tentativa no próximo ciclo
             print(f"[SINAIS-OUTCOME] erro {it.get('asset')}: {e}")
-            _still.append(it)
-    _sinais_pending_outcomes = _still
 
 
 async def job_sinais_autotune():
@@ -923,6 +1091,21 @@ async def job_sinais_autotune():
             print(f"[SINAIS-AUTOTUNE] win-rate {wr:.0f}% ({stats['n']} sinais) → offset {old:+d} -> {_sinais_score_offset:+d}")
     except Exception as e:
         print(f"[SINAIS-AUTOTUNE] Erro: {e}")
+
+
+async def job_db_prune():
+    """Retenção do banco (diário 04:10 BRT): apaga linhas >30 dias das tabelas de
+    alto volume (signals/market_snapshots/logs/telegram_sent). signal_outcomes é
+    preservada para sempre (base do auto-tune). Evita o DB crescer sem limite
+    (estava em 42MB com 116k signals em 02/07)."""
+    try:
+        from database import prune_old_rows
+        deleted = await prune_old_rows(days=30)
+        total = sum(deleted.values())
+        if total:
+            print(f"[DB-PRUNE] {total} linhas removidas (>30d): {deleted}")
+    except Exception as e:
+        print(f"[DB-PRUNE] Erro: {e}")
 
 
 def _build_signal_from_dict(signal_dict: dict):
@@ -1147,12 +1330,16 @@ async def _execute_trade_inner(signal_dict: dict):
         trade_dict["score_json"] = json.dumps(signal.score.model_dump())
         trade_dict["timeframe"]  = signal.timeframe
         trade_dict["trade_type"] = signal_dict.get("trade_type", "DAY_TRADE")
-        trade_dict["paper"] = PAPER_TRADING
+        exec_status = str(result.get("status", "")).upper()
+        is_simulated = exec_status == "SIMULATED"
+        trade_dict["paper"] = PAPER_TRADING or is_simulated
+        trade_dict["execution_status"] = exec_status
+        trade_dict["order_id"] = result.get("order_id")
         trade_dict["mode"]  = OPERATION_MODE   # tag de modo (#11): separa AUTÔNOMO/SINAIS/etc.
         await save_trade(trade_dict)
         _active_trades_cache[trade.id] = trade_dict
         _session_trades += 1  # conta trades abertos (funciona em todos os modos)
-        paper_tag = " [PAPER]" if PAPER_TRADING else ""
+        paper_tag = " [PAPER]" if trade_dict["paper"] else ""
         await send_trade_opened(trade_dict, OPERATION_MODE)
         print(f"[TRADE]{paper_tag} Aberto {signal.direction.value} {signal.asset} | {origin} | sessao={_session_trades}/{TRADES_PER_SESSION}")
         await log_event("TRADE_OPEN", f"{signal.direction.value} {signal.asset}", trade_dict)
@@ -1662,8 +1849,19 @@ async def job_auto_trade(signals: list):
             # SINAIS usa job_sinais_scan dedicado — sem execucao de trades
             pass
         else:
-            # Supervised: envia com botões de aprovação
+            # Supervised: envia com botões de aprovação.
+            # FIX (2026-06-25): faltava o anti-overtrading aqui — só o AUTÔNOMO
+            # chamava _same_asset_blocked. O cooldown genérico (60s, linha acima)
+            # é quase igual ao intervalo de scan (60s), então assim que o usuário
+            # aprova/rejeita um sinal, o ativo volta a ficar livre e o próximo scan
+            # manda outro "parecido" quase em seguida — exatamente o bug reportado
+            # (2 sinais de BNBUSDT numa janela curta). Agora usa o mesmo cooldown
+            # de SAME_ASSET_COOLDOWN_MIN do autônomo, vale pra qualquer ativo.
+            if _same_asset_blocked(signal.asset, signal.confidence):
+                _blk("anti-overtrading(mesmo-ativo)")
+                continue
             await send_signal_alert(signal_dict, _execute_trade, _reject_trade)
+            _asset_last_entry_ts[signal.asset] = now_ts
             print(f"[SUPERVISIONADO] 📲 {signal.asset} {signal.direction.value} score={signal.confidence:.0f}")
 
         open_assets.add(signal.asset)
@@ -2163,9 +2361,13 @@ async def _execute_grid_trade(signal_dict: dict):
             result = await asyncio.to_thread(open_trade, trade)
 
         if result.get("status") in ("OK", "SIMULATED"):
+            exec_status = str(result.get("status", "")).upper()
+            trade_dict["paper"] = PAPER_TRADING or exec_status == "SIMULATED"
+            trade_dict["execution_status"] = exec_status
+            trade_dict["order_id"] = result.get("order_id")
             await save_trade(trade_dict)
             _active_trades_cache[trade.id] = trade_dict
-            paper_tag = " [PAPER]" if PAPER_TRADING else ""
+            paper_tag = " [PAPER]" if trade_dict["paper"] else ""
             await send_trade_opened(trade_dict, OPERATION_MODE)
             print(f"[GRID] ABERTO{paper_tag} {signal.direction.value} {signal.asset} | margem=${margin:.2f} nocional=${notional:.2f} alvo=+${GRID_PROFIT_TARGET_USDT}")
         else:
@@ -2266,7 +2468,7 @@ async def job_sinais_scan():
     Usa o perfil de risco ativo (CURRENT_MODE) para os thresholds.
     Prioridade: 60% pump/dump, 40% outros movimentos.
     """
-    global _sinais_toggle, _sinais_cooldown, _signal_fingerprints, _sinais_session_count, _sinais_weekly, _latest_signals, SINAIS_PROFILE, DUAL_MODE_ENABLED, _sinais_empty_cycles, _sinais_last_empty_alert_ts
+    global _sinais_toggle, _sinais_cooldown, _signal_fingerprints, _sinais_session_count, _sinais_weekly, _latest_signals, SINAIS_PROFILE, DUAL_MODE_ENABLED, _sinais_empty_cycles, _sinais_last_empty_alert_ts, _sinais_last_blocked_alert_ts
     
     from state import state
     # Se sinais_enabled está OFF, o motor de sinais deve parar completamente.
@@ -2301,6 +2503,7 @@ async def job_sinais_scan():
         _scan_age = time.time() - _last_scan_ts if _last_scan_ts else 1e9
         _scan_down = _scan_age > 180
         if _scan_down:
+            _motivo = f"scan de mercado parado há {_scan_age/60:.0f}min (sem sinais no cache)"
             print(f"[SINAIS] Cache vazio + scan parado há {_scan_age:.0f}s (ciclo #{_sinais_empty_cycles}).")
             # Alerta no máx. 1x a cada 30min para não floodar o canal.
             if time.time() - _sinais_last_empty_alert_ts > 1800:
@@ -2311,8 +2514,10 @@ async def job_sinais_scan():
                 ))
         else:
             # scan saudável; só não há sinais NOVOS a enviar agora
+            _motivo = f"sem sinais novos (scan ok há {_scan_age:.0f}s, últimos {_last_scan_count} já deduplicados/em cooldown)"
             print(f"[SINAIS] Sem sinais novos a enviar (scan ok há {_scan_age:.0f}s, "
                   f"últimos {_last_scan_count} já deduplicados). Ciclo #{_sinais_empty_cycles}.")
+        asyncio.create_task(log_event("SINAIS_CYCLE", f"{scan_mode} | 0 enviados | {_motivo}", {"mode": scan_mode}))
         return
     _sinais_empty_cycles = 0  # reset quando há sinais
 
@@ -2329,8 +2534,13 @@ async def job_sinais_scan():
     pd_map     = {a["symbol"]: a for a in pd_alerts}
     pd_symbols = set(pd_map.keys())
 
-    # Watchlist filter (BUG-008 Fix)
-    if scan_mode == "AGGRESSIVE" and _dynamic_universe and not SINAIS_WATCHLIST:
+    # Watchlist filter (BUG-008 Fix + 2026-07-01: NORMAL/CONSERVATIVE ficavam presos
+    # aos 8 símbolos estáticos de WATCHLIST enquanto só o AGGRESSIVE usava o universo
+    # dinâmico completo — isso reduzia drasticamente o volume de sinais nos perfis
+    # mais conservadores, mesmo eles tendo thresholds de score/RR mais seletivos
+    # (que já filtram qualidade). Universo agora é o mesmo pra todos os perfis;
+    # quem diferencia por perfil é o min_score/min_rr/timeframes do MODE_SETTINGS.
+    if _dynamic_universe and not SINAIS_WATCHLIST:
         wl = {s.upper() for s in _dynamic_universe}
     else:
         wl = {s.upper() for s in SINAIS_WATCHLIST} if SINAIS_WATCHLIST else {s.upper() for s in WATCHLIST}
@@ -2373,23 +2583,53 @@ async def job_sinais_scan():
         if now_ts - _signal_fingerprints.get(fp, 0) < FP_TTL:
             return False
         direction = str(s.get("direction", "")).split(".")[-1].strip().upper()
-        key = f"{s.get('asset','')}_{direction}_{s.get('timeframe','')}"
+        asset = s.get("asset", "")
+        key = f"{asset}_{direction}_{s.get('timeframe','')}"
         if now_ts - _sinais_cooldown.get(key, 0) < cooldown_s:
             return False
-        _signal_fingerprints[fp] = now_ts
-        _sinais_cooldown[key]    = now_ts
+        # Evita mandar LONG e SHORT do mesmo ativo em TFs/engines diferentes
+        # minutos um do outro — confunde o assinante (viu no print: DYDXUSDT
+        # LONG 3m e SHORT 5m quase juntos).
+        _last_dir, _last_ts = _sinais_last_direction.get(asset, (None, 0))
+        if _last_dir and _last_dir != direction and (now_ts - _last_ts) < _SINAIS_DIRECTION_LOCK_MIN * 60:
+            print(f"[SINAIS] Bloqueado {asset} {direction} — conflita com {_last_dir} enviado há "
+                  f"{(now_ts - _last_ts)/60:.0f}min")
+            return False
+        _signal_fingerprints[fp]       = now_ts
+        _sinais_cooldown[key]          = now_ts
+        _sinais_last_direction[asset]  = (direction, now_ts)
         return True
 
     blocked_log = []
 
+    # Penalidade de score por timeframe (2026-06-25): 1m gera muito mais ruído
+    # que sinal (volume alto, WR mediano) — eleva a barra só pra ele, sem
+    # afetar 3m/5m/15m que já são mais seletivos por natureza.
+    # Reforço (2026-06-25, pedido do usuário: "só passa sinal altamente
+    # qualificado" no 1m após o canal VIP ter recebido 226/544 sinais em 1m
+    # em 3 dias): bump de score 10→15 + exigência extra de R:R só pro 1m.
+    _tf_score_bump  = {"1m": 15, "3m": 3}
+    _tf_min_rr_bump = {"1m": 0.5}
+
+    # Cooldown mínimo por timeframe (2026-06-26): 1h/4h/1d entram em todos os
+    # perfis agora — o candle de 1h fica "vivo" por 60min, então o cooldown
+    # genérico de 30min reenviaria o MESMO sinal a cada scan enquanto o candle
+    # não fecha. Piso por TF evita reenvio repetido do swing ainda sem fechar.
+    _tf_cooldown_floor = {"1h": 3600, "4h": 14400, "1d": 86400}
+
     for s in pd_signals:
         if len(to_send) >= pd_budget:
             break
-        if not _passes_dedup(s, SINAIS_COOLDOWN_PD):
+        _cd_pd = max(SINAIS_COOLDOWN_PD, _tf_cooldown_floor.get(s.get("timeframe", ""), 0))
+        if not _passes_dedup(s, _cd_pd):
+            continue
+        if float(s.get("rr", 0)) < mode_cfg["min_rr"] + _tf_min_rr_bump.get(s.get("timeframe", ""), 0):
+            blocked_log.append(f"{s.get('asset')} [rr<min_tf]")
             continue
         # Pipeline de 9 filtros
         result = evaluate_signal(s, ctx, pre_filtered, scan_mode,
-                                 mode_cfg["min_score"] + _sinais_score_offset)
+                                 mode_cfg["min_score"] + _sinais_score_offset
+                                 + _tf_score_bump.get(s.get("timeframe", ""), 0))
         if not result["passes"]:
             blocked_log.append(f"{s.get('asset')} [{result['block_reason']}]")
             continue
@@ -2403,10 +2643,15 @@ async def job_sinais_scan():
     for s in reg_signals:
         if sum(1 for _, pd in to_send if pd is None) >= reg_budget:
             break
-        if not _passes_dedup(s, SINAIS_COOLDOWN_REG):
+        _cd_reg = max(SINAIS_COOLDOWN_REG, _tf_cooldown_floor.get(s.get("timeframe", ""), 0))
+        if not _passes_dedup(s, _cd_reg):
+            continue
+        if float(s.get("rr", 0)) < mode_cfg["min_rr"] + _tf_min_rr_bump.get(s.get("timeframe", ""), 0):
+            blocked_log.append(f"{s.get('asset')} [rr<min_tf]")
             continue
         result = evaluate_signal(s, ctx, pre_filtered, scan_mode,
-                                 mode_cfg["min_score"] + _sinais_score_offset)
+                                 mode_cfg["min_score"] + _sinais_score_offset
+                                 + _tf_score_bump.get(s.get("timeframe", ""), 0))
         if not result["passes"]:
             blocked_log.append(f"{s.get('asset')} [{result['block_reason']}]")
             continue
@@ -2419,6 +2664,19 @@ async def job_sinais_scan():
 
     if blocked_log:
         print(f"[SINAIS] Bloqueados pelos filtros: {' | '.join(blocked_log[:5])}")
+        asyncio.create_task(log_event(
+            "SINAIS_CYCLE",
+            f"{scan_mode} | 0 enviados | {len(blocked_log)} bloqueado(s) pelos filtros",
+            {"mode": scan_mode, "blocked": blocked_log[:20]}
+        ))
+        # Avisa no chat pessoal o motivo (throttle 1x/30min p/ não floodar).
+        if not to_send and time.time() - _sinais_last_blocked_alert_ts > 1800:
+            _sinais_last_blocked_alert_ts = time.time()
+            _reasons = ' | '.join(blocked_log[:5])
+            asyncio.create_task(send_alert(
+                f"ℹ️ SINAIS {scan_mode}: {len(blocked_log)} candidato(s) encontrado(s) neste ciclo, "
+                f"mas nenhum passou nos filtros. Motivos: {_reasons}"
+            ))
 
     from risk_manager import get_leverage as _get_lev
     for signal_dict, pd_info in to_send:
@@ -2522,34 +2780,21 @@ async def job_sinais_scan():
                 asyncio.create_task(mark_signal_executed(
                     _db_sig_id, signal_dict.get("asset", ""), "vip"
                 ))
-            asyncio.create_task(upsert_daily_stats(0, False, signals_delta=1))
-            # ── Rastreio de resultado do sinal (paper) — base do win-rate medível ──
-            if SINAIS_OUTCOME_TRACKING:
-                try:
-                    _entry = float(signal_dict.get("entry", 0) or 0)
-                    _sl    = float(signal_dict.get("stop_loss", 0) or 0)
-                    _tp    = float(signal_dict.get("tp1", 0) or 0)
-                    if _entry > 0 and _sl > 0 and _tp > 0:
-                        _sinais_pending_outcomes.append({
-                            "asset":     signal_dict.get("asset", ""),
-                            "direction": str(signal_dict.get("direction", "")).split(".")[-1].upper(),
-                            "timeframe": signal_dict.get("timeframe", "15m"),
-                            "entry":     _entry, "sl": _sl, "tp": _tp,
-                            "score":     float(signal_dict.get("effective_score",
-                                              signal_dict.get("confidence", 0)) or 0),
-                            "tags":      signal_dict.get("reason", "")[:120],
-                            "rsi":       float(signal_dict.get("rsi_val", 0) or 0),
-                            "ts":        time.time(),
-                            "db_id":     _db_sig_id or 0,
-                        })
-                except Exception as _to_ex:
-                    print(f"[SINAIS-OUTCOME] registro falhou: {_to_ex}")
+            asyncio.create_task(upsert_daily_stats(0, None, signals_delta=1))
+            # Rastreio de resultado (TP1/SL) é lido direto do banco em
+            # job_sinais_outcome_watch via signals + telegram_sent(destination='vip'),
+            # já gravado pelo mark_signal_executed acima — nada a fazer aqui.
         _sinais_session_count += 1
         await asyncio.sleep(1)
 
     pd_n  = sum(1 for _, p in to_send if p is not None)
     reg_n = sum(1 for _, p in to_send if p is None)
     print(f"[SINAIS] {scan_mode} | {len(to_send)} enviados (pd={pd_n} reg={reg_n})")
+    if to_send:
+        asyncio.create_task(log_event(
+            "SINAIS_CYCLE", f"{scan_mode} | {len(to_send)} enviados (pd={pd_n} reg={reg_n})",
+            {"mode": scan_mode}
+        ))
 
 
 async def job_pd_monitor():
@@ -2761,6 +3006,15 @@ async def _job_sync_binance():
                         t.get("timeframe", "15m") or "15m",
                         float(t.get("entry_price", 0) or 0), _exit_px, _pnl_pct,
                         "WIN" if _is_win else "LOSS", str(t.get("reason", ""))[:80], 0.0,
+                    ))
+                    _sync_tf = t.get("timeframe", "15m") or "15m"
+                    _sync_now = datetime.utcnow()
+                    _sync_tags = str(t.get("reason", ""))[:80]
+                    asyncio.create_task(upsert_asset_profile(
+                        symbol, _sync_tf, _sync_now.hour, _sync_now.weekday(), _is_win, _pnl_pct
+                    ))
+                    asyncio.create_task(upsert_confluence_pattern(
+                        symbol, _sync_tags, _is_win, _pnl_pct
                     ))
                 except Exception as _ro_ex:
                     print(f"[SYNC] record_signal_outcome falhou: {_ro_ex}")
@@ -2977,9 +3231,14 @@ async def job_update_trades():
                     _orig_size = action.get("original_size", trade.size_usdt)
                     _qty_to_close = (_orig_size / trade.entry_price) * _pct
                     
-                    await asyncio.to_thread(
-                        lambda: close_position(_asset, trade.direction, _get_binance_client_synced(), qty=_qty_to_close)
-                    )
+                    if trade_data.get("paper") or PAPER_TRADING:
+                        print(f"[TRADE UPDATE] PAPER partial close {_asset} {_pct*100:.0f}%")
+                    else:
+                        # TPs parciais reais ja ficam em ordens reduce-only na Binance.
+                        # Evita mandar uma segunda ordem MARKET e fechar mais que o previsto.
+                        await asyncio.to_thread(
+                            lambda: update_stop_loss(_asset, _dir, trade.stop_loss, _get_binance_client_synced())
+                        )
                     
                     # Notify Telegram
                     await send_alert(
@@ -2998,7 +3257,7 @@ async def job_update_trades():
                     _entry     = float(trade.entry_price)
                     _qty       = float(trade.size_usdt) / _entry if _entry > 0 else 0.0
                     
-                    if trade.direction == "LONG":
+                    if getattr(trade.direction, "value", trade.direction) == "LONG":
                         _pnl_close = (_exit_px - _entry) * _qty * trade.leverage
                         _pnl_pct   = ((_exit_px - _entry) / _entry) * 100.0 * trade.leverage
                     else:
@@ -3069,28 +3328,6 @@ async def job_update_trades():
                         asyncio.create_task(send_alert(_rm["pause_alert"]))
                     # ML: verifica se precisa retreinar
                     asyncio.create_task(ml_engine.train_all_models())
-                elif action["action"] == "PARTIAL_CLOSE":
-                    _tp_level = action.get("reason", "TP1")
-                    _pct      = action.get("pct", 0.35)
-                    _asset_p  = trade.asset
-                    _dir_p    = trade.direction.value
-                    _new_sl   = trade.stop_loss
-                    # Fecha fracao da posicao na Binance
-                    _partial_qty = trade.size_usdt * _pct / (trade.current_price or trade.entry_price)
-                    await asyncio.to_thread(
-                        lambda: close_position(_asset_p, trade.direction,
-                                               _get_binance_client_synced(), qty=round(_partial_qty, 4))
-                    )
-                    # Atualiza stop loss (breakeven em TP1, TP1 em TP2)
-                    await asyncio.to_thread(
-                        lambda: update_stop_loss(_asset_p, _dir_p, _new_sl, _get_binance_client_synced())
-                    )
-                    _pct_str = f"{int(_pct*100)}%"
-                    asyncio.create_task(send_trade_closed(
-                        trade.model_dump(),
-                        f"Scale-Out {_tp_level} ({_pct_str}) — SL movido para ${_new_sl:.6f}"
-                    ))
-
             _active_trades_cache[trade.id] = trade.model_dump()
         except Exception as e:
             print(f"[TRADE UPDATE] {trade_data.get('id')} error: {e}")
@@ -3116,12 +3353,23 @@ async def _telegram_command_handler(text: str) -> str:
     if cmd in ("/continuar", "/continue", "/retomar"):
         BOT_PAUSED = False
         return _cb_resume()
-    if cmd in ("/pausar", "/pause", "/parar"):
+    global _cb_pending
+    if cmd in ("/pausar", "/pause"):
         BOT_PAUSED = True
-        global _cb_pending
         _cb_pending = False
-        print("[CIRCUIT-BREAKER] Pausado pelo usuário via /pausar.")
-        return "🛑 *Bot pausado* — não abre novas entradas. Use `/continuar` para retomar."
+        print("[CONTROL] Pausado pelo usuário via /pausar.")
+        return ("⏸️ *Bot pausado* — não abre novas entradas. Posições abertas e "
+                "monitoramento continuam. Use `/continuar` para retomar.")
+    # /parar — STOP forte: pausa entradas E corta operação com dinheiro REAL (vira paper)
+    if cmd in ("/parar", "/pararbot"):
+        BOT_PAUSED = True
+        PAPER_TRADING = True
+        _cb_pending = False
+        print("[CONTROL] PARADO pelo usuário via /parar (BOT_PAUSED + PAPER ON).")
+        return ("🛑 *Bot PARADO* — sem novas entradas e *sem operar dinheiro real* "
+                "(modo simulação ON).\n"
+                "• `/continuar` retoma as entradas\n"
+                "• `/paper off` reativa execução REAL")
 
     # /menu ou /painel — cabeçalho do Painel de Controle (os botões são
     # anexados pelo notifier; aqui só retornamos o texto com o estado atual)
@@ -3516,6 +3764,79 @@ async def _telegram_command_handler(text: str) -> str:
                 return "Uso: /ntrades 3  (numero inteiro)"
         return f"Trades por sessao atual: {TRADES_PER_SESSION}"
 
+    # /capital — capital alocado vs disponível
+    if cmd in ("/capital", "/capitalalocado"):
+        banca  = BANCA_USDT
+        avail  = _balance_cache.get("available_balance", 0) if _balance_cache else 0
+        wallet = _balance_cache.get("wallet_balance", 0)    if _balance_cache else 0
+        upnl   = _balance_cache.get("unrealized_pnl", 0)    if _balance_cache else 0
+        notional_tot = margin_tot = 0.0
+        n_open = 0
+        for _t in _active_trades_cache.values():
+            td = _t if isinstance(_t, dict) else _t.model_dump()
+            _notional = float(td.get("size_usdt", 0) or 0)
+            _lev      = float(td.get("leverage", 1) or 1)
+            notional_tot += _notional
+            margin_tot   += _notional / max(_lev, 1)
+            n_open       += 1
+        exp_ratio = (notional_tot / banca) if banca > 0 else 0
+        return (
+            f"*💰 Capital — TRADER 001*\n\n"
+            f"Banca configurada: `${banca:.2f}`\n"
+            f"Saldo carteira (real): `${wallet:.2f}`\n"
+            f"Disponível: `${avail:.2f}`\n"
+            f"PnL não realizado: `{'+' if upnl >= 0 else ''}${upnl:.2f}`\n\n"
+            f"*Capital alocado ({n_open} posições):*\n"
+            f"Nocional total: `${notional_tot:.2f}`\n"
+            f"Margem usada: `${margin_tot:.2f}`\n"
+            f"Exposição: `{exp_ratio:.2f}x` da banca (teto `{MAX_TOTAL_EXPOSURE_RATIO:.1f}x`)"
+        )
+
+    # /alavancagem [N] — mostra ou define alavancagem (GRID)
+    if cmd in ("/alavancagem", "/lev", "/leverage"):
+        if args:
+            try:
+                _v = int(args[0])
+                if not (1 <= _v <= 25):
+                    return "Alavancagem deve ser entre 1 e 25x."
+                GRID_LEVERAGE = _v
+                return (f"⚡ Alavancagem GRID definida: `{GRID_LEVERAGE}x`\n"
+                        "_(Sinais/Autônomo usam alavancagem adaptativa por ativo/volatilidade.)_")
+            except ValueError:
+                return "Uso: /alavancagem 10  (1–25)"
+        from config import MODE_SETTINGS as _MS
+        cap     = _MS.get(CURRENT_MODE, {}).get("leverage_cap")
+        cap_str = f"{cap}x" if cap else "sem teto fixo"
+        return (
+            f"*🎚️ Alavancagem — TRADER 001*\n\n"
+            f"GRID: `{GRID_LEVERAGE}x`\n"
+            f"Perfil `{CURRENT_MODE}` — teto: `{cap_str}`\n"
+            f"BTC/ETH/SOL: `15x` | Altcoins: `5x` (base)\n"
+            f"Ajuste por volatilidade: `{'ON' if LEVERAGE_BY_VOLATILITY else 'OFF'}` "
+            f"(piso `{LEVERAGE_VOL_FLOOR}x`)\n\n"
+            f"Definir GRID: `/alavancagem 10`"
+        )
+
+    # /limites [N] — limites de trade
+    if cmd in ("/limites", "/limite", "/limits"):
+        if args:
+            try:
+                TRADES_PER_SESSION = int(args[0])
+                _lbl = "ilimitado" if TRADES_PER_SESSION == 0 else str(TRADES_PER_SESSION)
+                return f"🔢 Limite de trades/sessão: `{_lbl}`"
+            except ValueError:
+                return "Uso: /limites 5  (0 = ilimitado)"
+        max_open = _active_max_open()
+        sess_lbl = "Ilimitado" if TRADES_PER_SESSION == 0 else str(TRADES_PER_SESSION)
+        return (
+            f"*🔢 Limites de Trade — TRADER 001*\n\n"
+            f"Trades por sessão: `{sess_lbl}`\n"
+            f"Máx. posições simultâneas (`{CURRENT_MODE}`): `{max_open}`\n"
+            f"Máx. trades por dia: `{MAX_TRADES_PER_DAY or 'sem limite'}`\n"
+            f"Teto de exposição: `{MAX_TOTAL_EXPOSURE_RATIO:.1f}x` da banca\n\n"
+            f"Definir sessão: `/limites 5` | Banca: `/banca 500`"
+        )
+
     # /fechar BTCUSDT | /fechar tudo
     if cmd == "/fechar":
         symbol = args[0].upper() if args else ""
@@ -3798,6 +4119,7 @@ async def _job_universe_builder():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global OPERATION_MODE, EXEC_MODE, DUAL_MODE_ENABLED, SINAIS_ENABLED, PAPER_TRADING, BOT_PAUSED
+    _acquire_instance_lock()
     await init_db()
     print("[TRADER 001] Database initialized")
 
@@ -3837,14 +4159,14 @@ async def lifespan(app: FastAPI):
     # mantido — sem risco de pile-up; sem misfire_grace_time para não dropar execuções.
     scheduler.add_job(job_scan_market,              "interval", seconds=60,  id="scan",              max_instances=1, coalesce=True, jitter=8)
     scheduler.add_job(job_update_trades,             "interval", seconds=30,  id="update_trades",     max_instances=1, coalesce=True, jitter=5)
-    scheduler.add_job(poll_telegram_responses,       "interval", seconds=3,   id="telegram_poll",     max_instances=2, coalesce=False)
+    scheduler.add_job(poll_telegram_responses,       "interval", seconds=10,  id="telegram_poll",     max_instances=1, coalesce=True, jitter=3)
     scheduler.add_job(job_scan_anomalies,            "interval", seconds=120, id="anomalies",         max_instances=1, coalesce=True, jitter=20)
     scheduler.add_job(_refresh_balance_cache_async,  "interval", seconds=60,  id="balance_refresh",   max_instances=1, coalesce=True, jitter=10)
     scheduler.add_job(_job_sync_binance,             "interval", seconds=120, id="sync_binance",      max_instances=1, coalesce=True, jitter=20)
     scheduler.add_job(_job_daily_summary,            "cron",     hour=23, minute=55, id="daily_summary")
     scheduler.add_job(_job_weekly_sinais_stats,      "cron",     day_of_week="sun", hour=20, minute=0, id="weekly_sinais")
-    scheduler.add_job(job_grid_monitor,              "interval", seconds=15,  id="grid_monitor",      max_instances=1, coalesce=True, jitter=3)
-    scheduler.add_job(job_grid_scan,                 "interval", seconds=60,  id="grid_scan",         max_instances=1, coalesce=True, jitter=10)
+    scheduler.add_job(job_grid_monitor,              "interval", seconds=45,  id="grid_monitor",      max_instances=1, coalesce=True, jitter=8)
+    scheduler.add_job(job_grid_scan,                 "interval", seconds=180, id="grid_scan",         max_instances=1, coalesce=True, jitter=20)
     scheduler.add_job(job_pump_dump_scan,                "interval", seconds=120, id="pump_dump",           max_instances=1, coalesce=True, jitter=20)
     scheduler.add_job(job_sinais_scan,                   "interval", seconds=60,  id="sinais_scan",          max_instances=1, coalesce=True, jitter=10)
     scheduler.add_job(job_pd_monitor,                    "interval", seconds=60,  id="pd_monitor",           max_instances=1, coalesce=True, jitter=10)
@@ -3860,7 +4182,10 @@ async def lifespan(app: FastAPI):
     scheduler.add_job(job_sinais_autotune,           "interval", minutes=20, id="sinais_autotune",    max_instances=1, coalesce=True)
     scheduler.add_job(_job_correlation_refresh,      "interval", minutes=30, id="correlation",        max_instances=1, coalesce=True, jitter=60)
     scheduler.add_job(job_pairs_arbitrage,           "interval", minutes=15, id="pairs_arbitrage",      max_instances=1, coalesce=True, jitter=30)
+    scheduler.add_job(job_health_watch,              "interval", minutes=5,  id="health_watch",       max_instances=1, coalesce=True, jitter=15)
+    scheduler.add_job(job_db_prune,                  "cron", hour=4, minute=10, id="db_prune",        max_instances=1, coalesce=True)
     scheduler.start()
+    asyncio.create_task(_loop_heartbeat())
     print("[TRADER 001] Scheduler — scan:60s | trades:30s | telegram:3s | grid:15s | balance:60s | sync:120s | universe:1h | pairs:15m")
 
     # ML Engine: carrega modelos salvos e treina em background
@@ -3943,9 +4268,11 @@ async def lifespan(app: FastAPI):
 
     await log_event("STARTUP", "Trader 001 iniciado", {"mode": CURRENT_MODE})
 
-    yield
-
-    scheduler.shutdown()
+    try:
+        yield
+    finally:
+        scheduler.shutdown()
+        _release_instance_lock()
 
 
 app = FastAPI(
@@ -4193,7 +4520,11 @@ async def news_broadcast():
                 pass
             return items
 
-        connector = _ah.TCPConnector(resolver=_ah.ThreadedResolver(), ssl=False)
+        try:
+            _resolver = _ah.AsyncResolver(nameservers=["8.8.8.8", "1.1.1.1"])
+        except Exception:
+            _resolver = None
+        connector = _ah.TCPConnector(resolver=_resolver, ssl=True)
         hdrs = {"User-Agent": "Mozilla/5.0 TraderBot/1.0"}
 
         async with _ah.ClientSession(connector=connector, headers=hdrs) as sess:
@@ -4792,10 +5123,17 @@ async def performance():
         "week_pnl":       round(week_pnl, 2),
         "month_pnl":      round(month_pnl, 2),
         "equity_curve":   raw.get("equity_curve", []),
+        "data_quality":   raw.get("data_quality", "ok"),
     }
 
 
 # ── Dashboard ─────────────────────────────────────────────────────────────────
+
+@app.get("/dashboard/logo.png")
+async def dashboard_logo():
+    from pathlib import Path as _Path
+    return FileResponse(_Path(__file__).parent / "dashboard" / "logo.png", media_type="image/png")
+
 
 @app.get("/", response_class=HTMLResponse)
 async def dashboard():
@@ -4875,6 +5213,95 @@ async def set_trades_per_session(count: int):
     print(f"[SETTINGS] Trades/sessão: {count or 'ilimitado'}")
     await save_global_state_to_db()
     return {"trades_per_session": TRADES_PER_SESSION, "session_trades": _session_trades}
+
+
+@app.post("/settings/sinais_rate_limit")
+async def set_sinais_rate_limit(public_per_hour: int = None, vip_per_hour: int = None):
+    """Define quantos sinais/hora cada canal pode receber. 0 = sem limite."""
+    import notifier
+    if public_per_hour is not None:
+        if public_per_hour < 0:
+            raise HTTPException(400, "Use 0 para ilimitado ou valor > 0")
+        notifier.RATE_LIMIT_PUBLIC_PER_HOUR = public_per_hour
+        await bot_state.save_key("sinais_max_hour_public", public_per_hour)
+    if vip_per_hour is not None:
+        if vip_per_hour < 0:
+            raise HTTPException(400, "Use 0 para ilimitado ou valor > 0")
+        notifier.RATE_LIMIT_VIP_PER_HOUR = vip_per_hour
+        await bot_state.save_key("sinais_max_hour_vip", vip_per_hour)
+    print(f"[SETTINGS] Limite sinais/hora — público: {notifier.RATE_LIMIT_PUBLIC_PER_HOUR or 'ilimitado'} "
+          f"| VIP: {notifier.RATE_LIMIT_VIP_PER_HOUR or 'ilimitado'}")
+    _pub_str = f"{notifier.RATE_LIMIT_PUBLIC_PER_HOUR}/h" if notifier.RATE_LIMIT_PUBLIC_PER_HOUR else "ilimitado"
+    _vip_str = f"{notifier.RATE_LIMIT_VIP_PER_HOUR}/h" if notifier.RATE_LIMIT_VIP_PER_HOUR else "ilimitado"
+    asyncio.create_task(send_alert(
+        f"Limite de sinais/hora atualizado pelo dashboard:\n"
+        f"📢 Canal público: {_pub_str}\n"
+        f"💎 Canal VIP: {_vip_str}"
+    ))
+    return {
+        "public_per_hour": notifier.RATE_LIMIT_PUBLIC_PER_HOUR,
+        "vip_per_hour": notifier.RATE_LIMIT_VIP_PER_HOUR,
+    }
+
+
+@app.get("/settings/sinais_rate_limit")
+async def get_sinais_rate_limit():
+    import notifier
+    return {
+        "public_per_hour": notifier.RATE_LIMIT_PUBLIC_PER_HOUR,
+        "vip_per_hour": notifier.RATE_LIMIT_VIP_PER_HOUR,
+    }
+
+
+@app.post("/settings/public_tier_pct")
+async def set_public_tier_pct(p1: int = None, p2: int = None, p3: int = None, p4: int = None):
+    """Define a % de cada nível de detalhe (1-4) do canal PÚBLICO. Não afeta o
+    canal VIP em nada. Se a soma não der 100, normaliza proporcionalmente."""
+    import notifier
+    raw = {1: p1, 2: p2, 3: p3, 4: p4}
+    if any(v is None for v in raw.values()):
+        raise HTTPException(400, "Informe p1, p2, p3 e p4")
+    if any(v < 0 for v in raw.values()):
+        raise HTTPException(400, "Percentuais não podem ser negativos")
+    total = sum(raw.values())
+    if total <= 0:
+        raise HTTPException(400, "A soma dos percentuais não pode ser 0")
+    if total != 100:
+        # Normaliza por maior resto, mesmo método de _pick_public_tier — garante soma exata 100
+        scaled  = {k: v * 100.0 / total for k, v in raw.items()}
+        floored = {k: int(v) for k, v in scaled.items()}
+        falta   = 100 - sum(floored.values())
+        restos  = sorted(raw.keys(), key=lambda k: scaled[k] - floored[k], reverse=True)
+        for k in restos[:falta]:
+            floored[k] += 1
+        pct = floored
+    else:
+        pct = raw
+    notifier.set_public_tier_pct(pct)
+    await bot_state.save_key("public_tier_pct", json.dumps(pct))
+    print(f"[SETTINGS] % por nível do canal público atualizado: {pct} (recebido: {raw})")
+    return {"pct": pct, "normalized": total != 100}
+
+
+@app.get("/settings/public_tier_pct")
+async def get_public_tier_pct():
+    import notifier
+    return {
+        "pct": notifier.get_public_tier_pct(),
+        "today": notifier.get_public_tier_state(),
+    }
+
+
+@app.post("/signals/test_public_tiers")
+async def test_public_tiers():
+    """Dispara os 4 níveis de exemplo no canal público para revisão visual —
+    NÃO usa o sorteio de produção, manda os 4 de uma vez, marcados como TESTE."""
+    import notifier
+    from config import TELEGRAM_CHANNEL_ID as _CH_ID
+    if not _CH_ID:
+        raise HTTPException(400, "TELEGRAM_CHANNEL_ID não configurado")
+    result = await notifier.send_public_tier_test_batch()
+    return result
 
 
 @app.post("/settings/daily_target")
@@ -5333,7 +5760,11 @@ async def get_volume_zones():
     pairs = list(set(GRID_PAIRS + list(WATCHLIST)[:20]))
     zones = {}
     try:
-        connector = aiohttp.TCPConnector(resolver=aiohttp.ThreadedResolver(), ssl=False)
+        try:
+            _resolver = aiohttp.AsyncResolver(nameservers=["8.8.8.8", "1.1.1.1"])
+        except Exception:
+            _resolver = None
+        connector = aiohttp.TCPConnector(resolver=_resolver, ssl=True)
         async with aiohttp.ClientSession(connector=connector) as sess:
             async with sess.get(
                 "https://fapi.binance.com/fapi/v1/ticker/24hr",
@@ -5466,6 +5897,12 @@ async def daily_signal_report(date: str = None):
     return report
 
 
+@app.get("/signals/kpi")
+async def signals_kpi():
+    """KPIs do canal SINAIS para os cards do topo do dashboard."""
+    return await get_signal_kpi_summary()
+
+
 @app.get("/balance")
 async def balance():
     """Retorna saldo — campos compatíveis com o dashboard."""
@@ -5515,7 +5952,11 @@ async def get_sparkline(symbol: str, interval: str = "1h", limit: int = 48):
     if not sym.endswith("USDT"):
         sym += "USDT"
     try:
-        connector = aiohttp.TCPConnector(resolver=aiohttp.ThreadedResolver(), ssl=False)
+        try:
+            _resolver = aiohttp.AsyncResolver(nameservers=["8.8.8.8", "1.1.1.1"])
+        except Exception:
+            _resolver = None
+        connector = aiohttp.TCPConnector(resolver=_resolver, ssl=True)
         async with aiohttp.ClientSession(connector=connector) as sess:
             async with sess.get(
                 "https://fapi.binance.com/fapi/v1/klines",
@@ -5932,8 +6373,6 @@ async def vip_status():
         "canal_publico": {
             "id": TELEGRAM_CHANNEL_ID or "não configurado",
             "subscribers": await get_channel_subscriber_count(),
-            "sinais_hoje": _channel_counter.get("count", 0),
-            "limite_diario": _CHANNEL_DAILY_LIMIT,
         },
         "grupo_vip": {
             "id": TELEGRAM_VIP_ID or "não configurado",

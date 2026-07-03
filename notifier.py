@@ -6,16 +6,94 @@ import asyncio
 import aiohttp
 import json
 import time
+from collections import deque
 from datetime import datetime
 from typing import Callable, Optional
 
-from config import TELEGRAM_TOKEN, TELEGRAM_CHAT_ID, TELEGRAM_CHANNEL_ID, TELEGRAM_VIP_ID
+from config import (
+    TELEGRAM_TOKEN, TELEGRAM_CHAT_ID, TELEGRAM_CHANNEL_ID, TELEGRAM_VIP_ID,
+    TELEGRAM_VIP_BOT_LINK,
+)
 
 TELEGRAM_API = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
+
+# Limite de sinais/hora por canal — ajustável em tempo real pelo dashboard
+# (POST /settings/sinais_rate_limit). 0 = sem limite. Defaults carregados do
+# bot_state no startup (main.py); aqui ficam só os fallbacks iniciais.
+RATE_LIMIT_PUBLIC_PER_HOUR = 10
+RATE_LIMIT_VIP_PER_HOUR    = 30
+_sent_hour_public: deque = deque()
+_sent_hour_vip:    deque = deque()
+
+# ── Níveis de detalhe do canal PÚBLICO (não afeta o VIP em nada) ─────────────
+# 4 níveis de mensagem (1=básica .. 4=qualidade VIP+gráfico, usada como isca).
+# % configurável no dashboard — carregada do bot_state no startup (main.py).
+_PUBLIC_TIER_DEFAULT_PCT = {1: 65, 2: 20, 3: 10, 4: 5}
+_public_tier_pct: dict   = dict(_PUBLIC_TIER_DEFAULT_PCT)
+_public_tier_state: dict = {"date": "", "counts": {1: 0, 2: 0, 3: 0, 4: 0}, "sent": 0}
+
+
+def set_public_tier_pct(pct: dict) -> None:
+    """Atualiza as % de cada nível do canal público (chamado pelo dashboard via
+    main.py, que já garante que a soma seja 100 antes de chamar isto)."""
+    global _public_tier_pct
+    _public_tier_pct = {int(k): int(v) for k, v in pct.items()}
+
+
+def get_public_tier_pct() -> dict:
+    return dict(_public_tier_pct)
+
+
+def get_public_tier_state() -> dict:
+    """Contagem de quantos sinais de cada nível já saíram hoje — para o dashboard
+    comparar a % configurada com a % real entregue até agora."""
+    return {
+        "date": _public_tier_state["date"],
+        "counts": dict(_public_tier_state["counts"]),
+        "sent": _public_tier_state["sent"],
+    }
+
+
+def _pick_public_tier() -> int:
+    """Escolhe o nível (1-4) do próximo sinal público por rateio proporcional de
+    maior resto (método de apportionment) — ao longo do dia a proporção REAL
+    converge para a % configurada mesmo em dias com poucos sinais, diferente de
+    um sorteio aleatório puro que pode desviar bastante em amostras pequenas.
+    Reinicia a contagem a cada novo dia UTC."""
+    today = datetime.utcnow().strftime("%Y-%m-%d")
+    if _public_tier_state["date"] != today:
+        _public_tier_state["date"]   = today
+        _public_tier_state["counts"] = {1: 0, 2: 0, 3: 0, 4: 0}
+        _public_tier_state["sent"]   = 0
+    total_next = _public_tier_state["sent"] + 1
+    best_tier, best_deficit = 1, float("-inf")
+    for tier, pct in _public_tier_pct.items():
+        target  = pct / 100.0 * total_next
+        deficit = target - _public_tier_state["counts"].get(tier, 0)
+        if deficit > best_deficit:
+            best_deficit, best_tier = deficit, tier
+    _public_tier_state["counts"][best_tier] += 1
+    _public_tier_state["sent"] = total_next
+    return best_tier
+
+
+def _hourly_ok(dq: deque, limit: int) -> bool:
+    """True se ainda há cota na janela de 1h; já registra o envio (rolling window)."""
+    if limit <= 0:
+        return True
+    now = time.time()
+    while dq and now - dq[0] > 3600:
+        dq.popleft()
+    if len(dq) >= limit:
+        return False
+    dq.append(now)
+    return True
 
 _pending_approvals: dict = {}
 _approval_callbacks: dict = {}
 _last_update_id = 0
+_poll_409_last_warn = 0.0   # throttle do aviso de conflito 409 (outra instância)
+_poll_409_backoff_until = 0.0
 _alerts_paused = False
 
 def set_alerts_paused(paused: bool):
@@ -45,8 +123,15 @@ async def _get_tg_session() -> aiohttp.ClientSession:
     global _tg_session
     async with _get_tg_lock():
         if _tg_session is None or _tg_session.closed:
+            try:
+                # DNS via aiodns com servidores públicos — o resolver padrão do
+                # Windows falha intermitentemente ("Could not contact DNS servers")
+                # sob carga, derrubando envios pro Telegram (free e VIP).
+                resolver = aiohttp.AsyncResolver(nameservers=["8.8.8.8", "1.1.1.1"])
+            except Exception:
+                resolver = None
             connector = aiohttp.TCPConnector(
-                resolver=aiohttp.ThreadedResolver(),
+                resolver=resolver,
                 ssl=True,            # SSL habilitado (Telegram usa certificado válido)
                 limit=20,            # máx 20 conexões simultâneas ao Telegram
                 keepalive_timeout=30,
@@ -67,10 +152,8 @@ async def close_tg_session():
         _tg_session = None
 
 # ── Roteamento canal público — limites diários ────────────────────────────────
-_channel_counter: dict    = {"date": "", "count": 0}   # sinais normais
 _channel_pd_counter: dict = {"date": "", "count": 0}   # pump/dump
 
-_CHANNEL_DAILY_LIMIT    = 10   # sinais long/short por dia (máx 10 por dia)
 _CHANNEL_PD_DAILY_LIMIT = 4   # pump/dump por dia
 
 _last_channel_send_time = 0.0
@@ -83,8 +166,10 @@ def _reset_daily(counter: dict) -> None:
         counter["count"] = 0
 
 
-def _channel_ok(conf_label: str) -> bool:
-    """True se o sinal deve ir para o canal público (Alta + cooldown + abaixo do limite)."""
+def _channel_ok(conf_label: str, asset: str = "") -> bool:
+    """True se o sinal deve ir para o canal público (Alta + cooldown).
+    Limite diário removido (2026-06-23) — controle agora é só via limite/hora
+    configurável no dashboard (RATE_LIMIT_PUBLIC_PER_HOUR)."""
     global _last_channel_send_time
     if not TELEGRAM_CHANNEL_ID:
         return False
@@ -95,10 +180,6 @@ def _channel_ok(conf_label: str) -> bool:
     now = time.time()
     if now - _last_channel_send_time < 600:
         return False
-    _reset_daily(_channel_counter)
-    if _channel_counter["count"] >= _CHANNEL_DAILY_LIMIT:
-        return False
-    _channel_counter["count"] += 1
     _last_channel_send_time = now
     return True
 
@@ -136,19 +217,21 @@ async def _post(endpoint: str, data: dict) -> dict:
         ) as r:
             return await r.json()
     except aiohttp.ClientConnectorError:
-        # Reconecta e tenta uma vez mais se a conexão foi perdida
+        # Reconecta e tenta mais duas vezes (com pequeno delay) se a conexão/DNS falhou
         global _tg_session
-        _tg_session = None
-        try:
-            session = await _get_tg_session()
-            async with session.post(
-                f"{TELEGRAM_API}/{endpoint}", json=data,
-                timeout=aiohttp.ClientTimeout(total=10),
-            ) as r:
-                return await r.json()
-        except Exception as e:
-            print(f"[TELEGRAM] Erro após reconect: {e}")
-            return {}
+        for attempt in (1, 2):
+            _tg_session = None
+            await asyncio.sleep(0.8 * attempt)
+            try:
+                session = await _get_tg_session()
+                async with session.post(
+                    f"{TELEGRAM_API}/{endpoint}", json=data,
+                    timeout=aiohttp.ClientTimeout(total=10),
+                ) as r:
+                    return await r.json()
+            except Exception as e:
+                print(f"[TELEGRAM] Erro após reconect (tentativa {attempt}): {e}")
+        return {}
     except Exception as e:
         print(f"[TELEGRAM] Erro: {e}")
         return {}
@@ -527,6 +610,15 @@ def _build_control_keyboard() -> dict:
         [{"text": "🟢 Conservador", "callback_data": "setprofile_conservador"},
          {"text": "🟡 Normal",      "callback_data": "setprofile_normal"},
          {"text": "🔴 Agressivo",   "callback_data": "setprofile_agressivo"}],
+        [{"text": "── AÇÕES ──", "callback_data": "noop"}],
+        [{"text": "⏸️ Pausar",     "callback_data": "panel_pause"},
+         {"text": "▶️ Retomar",    "callback_data": "panel_resume"}],
+        [{"text": "🔍 Forçar Scan", "callback_data": "panel_scan"},
+         {"text": "🛑 Parar Bot",   "callback_data": "panel_stop"}],
+        [{"text": "── INFO / CONFIG ──", "callback_data": "noop"}],
+        [{"text": "💰 Capital",     "callback_data": "panel_capital"},
+         {"text": "🎚️ Alavancagem", "callback_data": "panel_leverage"},
+         {"text": "🔢 Limites",     "callback_data": "panel_limits"}],
         [{"text": "📊 Status", "callback_data": "panel_status"},
          {"text": "🔄 Atualizar", "callback_data": "panel_refresh"}],
     ]}
@@ -575,7 +667,11 @@ _poll_session: aiohttp.ClientSession = None
 async def _get_poll_session() -> aiohttp.ClientSession:
     global _poll_session
     if _poll_session is None or _poll_session.closed:
-        connector = aiohttp.TCPConnector(resolver=aiohttp.ThreadedResolver(), ssl=False)
+        try:
+            resolver = aiohttp.AsyncResolver(nameservers=["8.8.8.8", "1.1.1.1"])
+        except Exception:
+            resolver = None
+        connector = aiohttp.TCPConnector(resolver=resolver, ssl=True)
         _poll_session = aiohttp.ClientSession(connector=connector)
     return _poll_session
 
@@ -620,8 +716,10 @@ async def prune_expired_approvals(timeout_seconds: int = 300):
 
 
 async def poll_telegram_responses():
-    global _last_update_id
+    global _last_update_id, _poll_409_last_warn, _poll_409_backoff_until
     if not _is_configured():
+        return
+    if time.time() < _poll_409_backoff_until:
         return
     await prune_expired_approvals()
     try:
@@ -632,6 +730,29 @@ async def poll_telegram_responses():
             timeout=aiohttp.ClientTimeout(total=5)
         ) as r:
             result = await r.json()
+
+        # getUpdates retornou erro? (ex.: 409 = outra instância usando o mesmo
+        # token). Sem este check a falha era 100% silenciosa: os comandos
+        # simplesmente nunca chegavam e nenhum log aparecia.
+        if not result.get("ok", False):
+            code = result.get("error_code")
+            desc = result.get("description", "")
+            if code == 409:
+                now = time.time()
+                _poll_409_backoff_until = now + 60
+                if now - _poll_409_last_warn > 60:   # loga no máx. 1x/min
+                    _poll_409_last_warn = now
+                    print(
+                        "[TELEGRAM] ⚠️ CONFLITO 409: outra instância do bot está "
+                        "consumindo getUpdates com o MESMO token (provavelmente o "
+                        "deploy no Railway). Os comandos NÃO chegam neste processo "
+                        "local enquanto a outra instância estiver no ar. "
+                        "Solução: desligue o serviço no Railway OU use um token "
+                        "separado para o bot local."
+                    )
+            else:
+                print(f"[TELEGRAM] getUpdates falhou: ok=false code={code} desc={desc}")
+            return
 
         for update in result.get("result", []):
             _last_update_id = update["update_id"]
@@ -779,6 +900,24 @@ async def poll_telegram_responses():
                         await _post("sendMessage", {"chat_id": chat_id, "text": resp,
                                                     "parse_mode": "Markdown"})
 
+            # ── PAINEL: ações e infos rápidas (pausar/parar/scan/capital/etc) ──
+            elif data_str in ("panel_pause", "panel_resume", "panel_scan", "panel_stop",
+                              "panel_capital", "panel_leverage", "panel_limits"):
+                _cmd_map = {
+                    "panel_pause":    "/pausar",
+                    "panel_resume":   "/continuar",
+                    "panel_scan":     "/scan",
+                    "panel_stop":     "/parar",
+                    "panel_capital":  "/capital",
+                    "panel_leverage": "/alavancagem",
+                    "panel_limits":   "/limites",
+                }
+                if _command_handler:
+                    resp = await _command_handler(_cmd_map[data_str])
+                    if resp:
+                        await _post("sendMessage", {"chat_id": chat_id, "text": resp,
+                                                    "parse_mode": "Markdown"})
+
             # ── PAINEL: botão Atualizar (reabre o painel) ─────────────────────
             elif data_str == "panel_refresh":
                 await send_control_panel(str(chat_id))
@@ -815,8 +954,10 @@ async def poll_telegram_responses():
                         })
                         print(f"[TELEGRAM] Alavancagem {_pending_approvals[sig_id].get('asset')} → {new_lev}x")
 
-    except Exception:
-        pass
+    except Exception as e:
+        # Não engolir em silêncio: erros de rede/parse aqui faziam o polling
+        # falhar sem deixar rastro. Loga curto (1 linha) para diagnóstico.
+        print(f"[TELEGRAM] poll_telegram_responses erro: {type(e).__name__}: {e}")
 
 
 async def _post_photo(photo_bytes: bytes, caption: str, reply_markup: dict = None,
@@ -834,7 +975,11 @@ async def _post_photo(photo_bytes: bytes, caption: str, reply_markup: dict = Non
             data.add_field("parse_mode", parse_mode)
         if reply_markup:
             data.add_field("reply_markup", json.dumps(reply_markup))
-        connector = aiohttp.TCPConnector(resolver=aiohttp.ThreadedResolver(), ssl=False)
+        try:
+            resolver = aiohttp.AsyncResolver(nameservers=["8.8.8.8", "1.1.1.1"])
+        except Exception:
+            resolver = None
+        connector = aiohttp.TCPConnector(resolver=resolver, ssl=True)
         async with aiohttp.ClientSession(connector=connector) as sess:
             async with sess.post(
                 f"{TELEGRAM_API}/sendPhoto", data=data,
@@ -867,7 +1012,16 @@ async def _send_photo_with_caption_or_split(chat_id: str, msg: str, keyboard: di
 
     # Se tem foto, tentamos enviar como caption
     if len(msg) <= 1024:
-        return await _post_photo(photo_bytes, msg, reply_markup=keyboard, chat_id=chat_id)
+        res = await _post_photo(photo_bytes, msg, reply_markup=keyboard, chat_id=chat_id)
+        if not res.get("ok"):
+            # Falha ao enviar a foto (ex: erro de rede/semáforo do Windows) — não
+            # perde o sinal, manda o texto puro em vez de descartar tudo.
+            print(f"[TELEGRAM] Foto falhou para {chat_id}, enviando sinal em texto puro (fallback).")
+            payload = {"chat_id": chat_id, "text": msg, "parse_mode": "Markdown"}
+            if keyboard:
+                payload["reply_markup"] = keyboard
+            return await _post("sendMessage", payload)
+        return res
     else:
         # Divide a mensagem. Procuramos o segundo separador '━━━━━━━━━━━━━━━━━━'
         sep = "━━━━━━━━━━━━━━━━━━"
@@ -896,6 +1050,22 @@ async def _send_signal_message(chat_id: str, msg: str, keyboard: dict,
     """Envia sinal: foto com legenda (caption) ou dividida se for muito longa."""
     res = await _send_photo_with_caption_or_split(chat_id, msg, keyboard, chart_bytes)
     return bool(res.get("ok"))
+
+
+async def _send_signal_chart_then_text(chat_id: str, msg: str, keyboard: dict,
+                                       chart_bytes: bytes | None) -> bool:
+    """Envia o chart separado e depois uma unica mensagem de texto completa."""
+    if chart_bytes:
+        photo_res = await _post_photo(chart_bytes, "", reply_markup=None, chat_id=chat_id)
+        if not photo_res.get("ok"):
+            # Foto falhou — não descarta o sinal, segue e manda o texto mesmo assim.
+            print(f"[TELEGRAM] Chart falhou para {chat_id}, enviando sinal em texto puro (fallback).")
+
+    payload = {"chat_id": chat_id, "text": msg, "parse_mode": "Markdown"}
+    if keyboard:
+        payload["reply_markup"] = keyboard
+    text_res = await _post("sendMessage", payload)
+    return bool(text_res.get("ok"))
 
 
 def _ema_series(closes: list, period: int) -> list:
@@ -1491,8 +1661,6 @@ async def _generate_signal_chart(asset: str, timeframe: str, signal: dict) -> by
         return None
 
 
-
-
 # Explicações curtas para cada tag estrutural detectada no V6
 _TAG_EXPLAIN: dict = {
     "BEAR-TREND":   "EMA50 abaixo da EMA200 — tendência de baixa confirmada",
@@ -1514,6 +1682,73 @@ _TAG_EXPLAIN: dict = {
     "RGM-RNG":      "Regime lateral — alvos menores, cautela no tamanho",
     "RGM-BRK":      "Regime de breakout — alta volatilidade, risco elevado",
 }
+
+
+def _public_cta() -> str:
+    """Chamada para o bot VIP, presente em TODOS os níveis do canal público.
+
+    Usa um link t.me/<bot> dentro de um link Markdown: ao tocar, o Telegram abre
+    o bot e o primeiro toque em INICIAR dispara /start, mostrando os planos sem o
+    usuário digitar nada. Link simples (sem ?start=payload) porque o worker no ar
+    só reconhece /start exato — quando o worker for redeployado com o match por
+    prefixo, dá pra voltar a usar ?start=vip pra rastrear origem. Dentro de
+    [texto](url) o underscore do @handle não quebra o parse do Markdown."""
+    handle = TELEGRAM_VIP_BOT_LINK.lstrip("@").strip()
+    deep_link = f"https://t.me/{handle}"
+    return (
+        "\nNossos VIPS sabem os movimentos antes de todos!\n"
+        f"👉 [Entrar no VIP agora]({deep_link})"
+    )
+
+
+def build_public_tier_text(tier: int, ctx: dict) -> str:
+    """Constrói o texto do nível 1-4 do canal PÚBLICO a partir de um contexto já
+    calculado (ver `ctx` montado em send_sinais_alert). Não tem relação alguma
+    com a mensagem do canal VIP — essa continua sendo montada separadamente e
+    não é alterada por nada aqui."""
+    SEP    = ctx["SEP"]
+    header = f"MESTRE DO SINAIS | PERFIL {ctx['perfil_label']}\n\n"
+    linha1 = f"{ctx['asset']} | {ctx['dir_icon']} {ctx['dir_label']} | {ctx['tf']} | {ctx['tipo_label']}\n"
+    bloco_base = (
+        f"{SEP}\n"
+        f"📊 Score: {ctx['score']:.0f}/100   ⚖️ R:R: {ctx['rr']:.1f}:1\n"
+        f"🎯 Confiança: {ctx['conf_label']}   💹 Vol 24h: {ctx['vol_24h_str']}\n"
+        f"💰 Entrada: ${ctx['entry']:,.4f}\n"
+        f"🛑 Stop: ${ctx['sl']:,.4f} (-{ctx['sl_pct']:.2f}%)\n"
+        f"🎯 TP: ${ctx['tp1']:,.4f} (+{ctx['tp1_pct']:.2f}%)\n"
+    )
+    leverage_line = f"⚡️ Alavancagem: {ctx['leverage']}x\n"
+    tend_label    = "ALTA" if ctx["is_long"] else "BAIXA"
+    leitura = (
+        f"{SEP}\n"
+        f"📈 LEITURA DO MERCADO\n"
+        f"{ctx['trend_arrow']} Tendência: {tend_label} | Estrutura: {ctx['estrutura']}\n"
+        f"📊 RSI: {ctx['rsi_val']:.1f} - {ctx['rsi_label']}\n"
+        f"🕯️ Vela: {ctx['body_bar']} {ctx['body_pct']*100:.0f}%   📦 Vol: {ctx['vol_ratio']:.1f}x média\n"
+    )
+    projecao = (
+        f"{SEP}\n"
+        f"📈 PROJEÇÃO ({ctx['leverage']}x)\n"
+        f"{ctx['proj_lines']}\n"
+    )
+    cta = _public_cta()
+
+    if tier == 1:
+        return header + linha1 + bloco_base + cta
+    if tier == 2:
+        return header + linha1 + bloco_base + leverage_line + leitura + cta
+    if tier == 3:
+        return header + linha1 + bloco_base + leverage_line + leitura + projecao + cta
+    # tier 4 — qualidade VIP (confirmações + recomendação + projeção), usada
+    # como isca ocasional no canal público; SEMPRE com a chamada para o VIP.
+    return (
+        header + linha1 + bloco_base + leverage_line + leitura
+        + f"{SEP}\n✅ CONFIRMAÇÕES\n{ctx['conf_lines']}\n"
+        + f"{SEP}\n💡 RECOMENDAÇÃO\n{ctx['recommendation']}\n"
+        + projecao
+        + f"{SEP}\n⏰ {ctx['brt_str']}\nOPERE SEMPRE COM MUITA ATENÇÃO!\n"
+        + cta
+    )
 
 
 async def send_sinais_alert(signal: dict, pump_info: dict = None) -> bool:
@@ -1548,10 +1783,16 @@ async def send_sinais_alert(signal: dict, pump_info: dict = None) -> bool:
     vol_ratio  = float(signal.get("vol_ratio", 1.0))
     rsi_val    = float(signal.get("rsi_val", 50.0))
     confirmed_sigs = signal.get("confirmed_signals", [])
-    recommendation = signal.get("recommendation", "")
+    # NUNCA usar recommendation/conf_label pré-calculados aqui: eles são gerados
+    # em signal_engine.py com o score BRUTO, antes dos ajustes finais (regime,
+    # Volume Profile, RS Score, Asset Memory, Claude Brain/ML) que acontecem
+    # depois — causava mensagens contraditórias (score alto + texto de sinal
+    # fraco). `score` acima já é o valor FINAL pós-ajustes; sempre recalcular
+    # a partir dele garante coerência entre número e texto.
+    recommendation = ""
     sug_lev    = int(signal.get("suggested_leverage", 0))
     leverage   = sug_lev if sug_lev else int(signal.get("leverage", 5))
-    conf_label = signal.get("conf_label") or ("Alta" if score >= 80 else "Média" if score >= 65 else "Baixa")
+    conf_label = "Alta" if score >= 80 else "Média" if score >= 65 else "Baixa"
 
     perfil_raw   = signal.get("perfil", "NORMAL")
     perfil_label = "AGRESSIVO" if perfil_raw == "AGGRESSIVE" else "CONSERVADOR" if perfil_raw == "CONSERVATIVE" else "NORMAL"
@@ -1571,7 +1812,6 @@ async def send_sinais_alert(signal: dict, pump_info: dict = None) -> bool:
     dir_icon    = "🟢" if is_long else "🔴"
     dir_label   = "LONG" if is_long else "SHORT"
     trend_arrow = "🔺" if is_long else "🔻"
-    trend_label = "ALTA" if is_long else "BAIXA"
 
     # ── Estrutura / EMAs ──────────────────────────────────────────────────────
     if "UPTREND" in reason or "uptrend" in reason.lower():
@@ -1582,6 +1822,18 @@ async def send_sinais_alert(signal: dict, pump_info: dict = None) -> bool:
         estrutura = "RANGING"
     else:
         estrutura = "UPTREND" if is_long else "DOWNTREND"
+
+    # "Tendência" antiga era só a direção do trade travestida de leitura de
+    # mercado (sempre coincidia com LONG/SHORT) — quando a Estrutura real
+    # (vinda do reason) discordava, a mensagem parecia se contradizer
+    # ("Tendência: BAIXA | Estrutura: UPTREND"). Agora é uma linha só, honesta
+    # sobre se o trade é a favor ou contra a estrutura detectada.
+    if estrutura == "RANGING":
+        bias_line = f"📐 Estrutura: RANGING (lateral)"
+    elif (estrutura == "UPTREND" and is_long) or (estrutura == "DOWNTREND" and not is_long):
+        bias_line = f"{trend_arrow} Estrutura: {estrutura} (a favor da tendência)"
+    else:
+        bias_line = f"⚠️ Estrutura: {estrutura} (CONTRA a tendência — reversão)"
 
     ema_pos     = "ACIMA" if is_long else "ABAIXO"
     ema21_line  = f"{trend_arrow} EMA21 {ema_pos}"
@@ -1730,39 +1982,48 @@ async def send_sinais_alert(signal: dict, pump_info: dict = None) -> bool:
         )
 
     # ── Monta mensagem final ──────────────────────────────────────────────────
+    conf_compact = " | ".join(
+        line.replace("•", "").strip()
+        for line in conf_lines.splitlines()
+        if line.strip()
+    )
+    if len(conf_compact) > 150:
+        conf_compact = conf_compact[:147].rstrip() + "..."
     msg = (
-        f"MESTRE DO SINAIS -MODO: {mode_label} | PERFIL {perfil_label}\n\n"
-        f"{asset} | {dir_icon} {dir_label} | {tf} | {tipo_label}\n"
+        f"👑 MESTRE DOS SINAIS\n"
+        f"⚙️ MODO: {mode_label} | 🔥 PERFIL: {perfil_label}\n\n"
+        f"🪙 {asset} | {dir_icon} {dir_label} | {tf} | ⚡️ {trade_type.replace('_', ' ')}\n"
         f"{SEP}\n"
-        f"📊 Score: {score:.0f}/100   ⚖️ R:R: {rr:.1f}:1\n"
-        f"🎯 Confiança: {conf_label}   💹 Vol 24h: {vol_24h_str}\n"
+        f"📊 Score: {score:.0f}/100 | 🎯 {conf_label}\n"
+        f"⚖️ R:R: {rr:.1f}:1 | 💹 Vol: {vol_24h_str} | ⚡️ {leverage}x\n\n"
         f"💰 Entrada: ${entry:,.4f}\n"
         f"🛑 Stop: ${sl:,.4f} (-{sl_pct:.2f}%)\n"
-        f"🎯 TP1: ${tp1:,.4f} (+{tp1_pct:.2f}%)   🎯 TP2: ${tp2:,.4f} (+{tp2_pct:.2f}%)\n"
-        f"⚡️ Alavancagem: {leverage}x\n"
+        f"🎯 Alvo: ${tp1:,.4f} (+{tp1_pct:.2f}%)\n"
         + (f"{pd_note}" if pd_note else "")
         + f"{SEP}\n"
-        f"📈 LEITURA DO MERCADO\n"
-        f"{trend_arrow} Tendência: {trend_label} | Estrutura: {estrutura}\n"
-        f"{trend_arrow} EMA21 {ema_pos} | EMA200 {ema200_pos}\n"
-        f"📊 RSI: {rsi_val:.1f} - {rsi_label}\n"
-        f"🕯️ Vela: {body_bar} {body_pct*100:.0f}%   📦 Vol: {vol_ratio:.1f}x média\n"
+        f"📈 MERCADO\n"
+        f"{bias_line}\n"
+        f"📍 EMA21 {ema_pos.lower()} | EMA200 {ema200_pos.lower()}\n"
+        f"📊 RSI {rsi_val:.1f} ({rsi_label.lower()})\n"
+        f"🕯️ Vela {body_pct*100:.0f}% | 📦 Volume {vol_ratio:.1f}x\n"
         f"{SEP}\n"
-        f"✅ CONFIRMAÇÕES\n"
-        f"{conf_lines}\n"
+        f"✅ CONFIRMAÇÃO\n"
+        f"{conf_compact}\n"
         f"{SEP}\n"
-        f"💡 RECOMENDAÇÃO\n"
-        f"{recommendation}\n"
+        f"🧠 PLANO\n"
+        f"• Entrada valida acima do stop\n"
+        f"• Realizar parcial no alvo e proteger no BE\n"
+        f"• RSI esticado: nao perseguir preco\n"
+        f"• Invalida se {'perder' if is_long else 'recuperar'} ${sl:,.4f}\n"
         f"{SEP}\n"
-        f"📈 PROJEÇÃO ({leverage}x)\n"
-        f"{proj_lines}\n"
+        f"📊 PROJEÇÃO DE LUCRO {leverage}x\n\n"
+        f"📈 +{tp1_pct:.0f}% no ativo = +{tp1_pct * leverage:.0f}% 💰\n"
         f"{SEP}\n"
         f"⏰ {brt_str}\n"
-        f"OPERE SEMPRE COM MUITA ATENÇÃO!"
+        f"⚠️ Gestão de risco. Sinal não é garantia de lucro."
     )
 
     msg += event_line
-    # Salvaguarda CAIXA ÚNICA: legenda de foto do Telegram tem limite de 1024 chars.
     if len(msg) > 1024:
         msg = msg[:1021].rstrip() + "..."
 
@@ -1772,29 +2033,29 @@ async def send_sinais_alert(signal: dict, pump_info: dict = None) -> bool:
     else:
         print(f"[CHART] ⚠ Gráfico NÃO gerado para {asset} {tf} — sinal enviado sem imagem")
 
-    # ── Mensagem pública limpa (sem seções internas do VIP) ──────────────────
-    msg_public = (
-        f"MESTRE DO SINAIS -MODO: {mode_label} | PERFIL {perfil_label}\n\n"
-        f"{asset} | {dir_icon} {dir_label} | {tf} | {tipo_label}\n"
-        f"{SEP}\n"
-        f"📊 Score: {score:.0f}/100   ⚖️ R:R: {rr:.1f}:1\n"
-        f"🎯 Confiança: {conf_label}   💹 Vol 24h: {vol_24h_str}\n"
-        f"💰 Entrada: ${entry:,.4f}\n"
-        f"🛑 Stop: ${sl:,.4f} (-{sl_pct:.2f}%)\n"
-        f"🎯 TP1: ${tp1:,.4f} (+{tp1_pct:.2f}%)   🎯 TP2: ${tp2:,.4f} (+{tp2_pct:.2f}%)\n"
-        f"⚡️ Alavancagem: {leverage}x\n"
-        f"{SEP}\n"
-        f"📈 LEITURA DO MERCADO\n"
-        f"{trend_arrow} Tendência: {trend_label} | Estrutura: {estrutura}\n"
-        f"📊 RSI: {rsi_val:.1f} - {rsi_label}\n"
-        f"🕯️ Vela: {body_bar} {body_pct*100:.0f}%   📦 Vol: {vol_ratio:.1f}x média\n"
-        f"{SEP}\n"
-        f"⚠️ Não é conselho financeiro. Gerencie seu risco."
-    )
+    # ── Mensagem pública (nível 1-4, sorteado por rateio proporcional) ────────
+    # NÃO afeta a mensagem do VIP acima (msg/chart_bytes) — só decide o que vai
+    # para o canal público.
+    public_ctx = {
+        "SEP": SEP, "perfil_label": perfil_label, "asset": asset,
+        "dir_icon": dir_icon, "dir_label": dir_label, "tf": tf, "tipo_label": tipo_label,
+        "score": score, "rr": rr, "conf_label": conf_label, "vol_24h_str": vol_24h_str,
+        "entry": entry, "sl": sl, "sl_pct": sl_pct, "tp1": tp1, "tp1_pct": tp1_pct,
+        "leverage": leverage, "is_long": is_long, "trend_arrow": trend_arrow,
+        "estrutura": estrutura, "rsi_val": rsi_val, "rsi_label": rsi_label,
+        "body_bar": body_bar, "body_pct": body_pct, "vol_ratio": vol_ratio,
+        "proj_lines": proj_lines, "conf_lines": conf_lines,
+        "recommendation": recommendation, "brt_str": brt_str,
+    }
+    public_tier = _pick_public_tier()
+    msg_public  = build_public_tier_text(public_tier, public_ctx)
+    if len(msg_public) > 1024:
+        msg_public = msg_public[:1021].rstrip() + "..."
+    chart_for_public = chart_bytes if public_tier == 4 else None
 
     # ── Roteamento ────────────────────────────────────────────────────────────
-    # VIP sempre — mensagem completa
-    # Canal público — mensagem limpa se Alta/Média e abaixo do limite diário
+    # VIP sempre — mensagem completa (não tem relação com os níveis do público)
+    # Canal público — nível sorteado acima, se Alta/Média e abaixo do limite diário
     vip_targets:     list[str] = []
     channel_targets: list[str] = []
 
@@ -1803,14 +2064,86 @@ async def send_sinais_alert(signal: dict, pump_info: dict = None) -> bool:
     else:
         vip_targets.append(str(TELEGRAM_CHAT_ID))  # fallback: chat pessoal
 
-    if _channel_ok(conf_label):
+    if _channel_ok(conf_label, asset):
         channel_targets.append(str(TELEGRAM_CHANNEL_ID))
 
-    send_coros = [_send_signal_message(t, msg, {}, chart_bytes) for t in vip_targets]
-    send_coros += [_send_signal_message(t, msg_public, {}, chart_bytes) for t in channel_targets]
+    # Limite de sinais/hora configurável no dashboard — independente por canal
+    if vip_targets and not _hourly_ok(_sent_hour_vip, RATE_LIMIT_VIP_PER_HOUR):
+        print(f"[SINAIS] Limite/hora do canal VIP atingido ({RATE_LIMIT_VIP_PER_HOUR}/h) — {asset} não enviado ao VIP")
+        vip_targets = []
+    if channel_targets and not _hourly_ok(_sent_hour_public, RATE_LIMIT_PUBLIC_PER_HOUR):
+        print(f"[SINAIS] Limite/hora do canal público atingido ({RATE_LIMIT_PUBLIC_PER_HOUR}/h) — {asset} não enviado ao público")
+        channel_targets = []
+    elif channel_targets:
+        print(f"[SINAIS] Canal público — {asset} enviado no nível {public_tier} (config: {_public_tier_pct})")
 
+    send_coros = [_send_signal_message(t, msg, {}, chart_bytes) for t in vip_targets]
+    send_coros += [_send_signal_message(t, msg_public, {}, chart_for_public) for t in channel_targets]
+
+    if not send_coros:
+        return False
     results = await asyncio.gather(*send_coros, return_exceptions=True)
     return any(r is True for r in results)
+
+
+async def send_public_tier_test_batch() -> dict:
+    """Dispara os 4 níveis de exemplo no canal PÚBLICO para o admin revisar a
+    formatação antes de aprovar o recurso. Usa um sinal fictício (dados do
+    exemplo DYDXUSDT já validado) e marca cada mensagem como TESTE para não
+    confundir assinantes reais — não tem relação com o sorteio de produção
+    (_pick_public_tier) nem com o canal VIP."""
+    if not TELEGRAM_CHANNEL_ID:
+        return {"ok": False, "error": "TELEGRAM_CHANNEL_ID não configurado"}
+
+    from datetime import timedelta
+
+    asset, tf_disp, tf_chart = "DYDXUSDT", "3M", "3m"
+    entry, sl, tp1, leverage = 0.1502, 0.1484, 0.1547, 10
+    sl_pct  = abs(entry - sl)  / entry * 100
+    tp1_pct = abs(tp1 - entry) / entry * 100
+    brt_str = (datetime.utcnow() - timedelta(hours=3)).strftime("%d/%m/%Y • %H:%M BRT")
+    proj_lines = "  ".join(f"+{p}%→+{p * leverage}%" for p in [1, 2, 3, 4, 5])
+
+    ctx = {
+        "SEP": "━━━━━━━━━━", "perfil_label": "AGRESSIVO", "asset": asset,
+        "dir_icon": "🟢", "dir_label": "LONG", "tf": tf_disp, "tipo_label": "📅 SCALP",
+        "score": 88.0, "rr": 2.5, "conf_label": "Média", "vol_24h_str": "26M",
+        "entry": entry, "sl": sl, "sl_pct": sl_pct, "tp1": tp1, "tp1_pct": tp1_pct,
+        "leverage": leverage, "is_long": True, "trend_arrow": "🔺",
+        "estrutura": "UPTREND", "rsi_val": 75.0, "rsi_label": "Sobrecomprado",
+        "body_bar": "████░░░░░░", "body_pct": 0.44, "vol_ratio": 3.9,
+        "proj_lines": proj_lines,
+        "conf_lines": (
+            "• Regime de tendência — operar a favor do fluxo direcional\n"
+            "• Volume forte 3.9x acima da média\n"
+            "• Volume acelerou 4.9x vs vela anterior"
+        ),
+        "recommendation": (
+            "Volume 3.9x acima da média confirma força. Entrada na zona atual válida. "
+            "TP1 conservador como primeiro alvo. Mover SL para BE após TP1."
+        ),
+        "brt_str": brt_str,
+    }
+
+    TEST_TAG = "🧪 TESTE — sinal fictício, só para revisão de formatação 🧪\n\n"
+    chart_signal = {"entry": entry, "stop_loss": sl, "tp1": tp1, "tp2": tp1, "direction": "LONG"}
+    chart_bytes = None
+    try:
+        chart_bytes = await _generate_signal_chart(asset, tf_chart, chart_signal)
+    except Exception as e:
+        print(f"[TEST-PUBLIC-TIER] Falha ao gerar gráfico de teste: {e}")
+
+    results = {}
+    for tier in (1, 2, 3, 4):
+        text = TEST_TAG + build_public_tier_text(tier, ctx)
+        if len(text) > 1024:
+            text = text[:1021].rstrip() + "..."
+        chart = chart_bytes if tier == 4 else None
+        ok = await _send_signal_message(str(TELEGRAM_CHANNEL_ID), text, {}, chart)
+        results[f"tier_{tier}"] = ok
+        await asyncio.sleep(1.2)   # evita rajada/flood do Telegram entre as 4 mensagens
+
+    return {"ok": any(results.values()), "results": results}
 
 
 async def send_social_proof(trade: dict, mode: Optional[str] = None) -> bool:
@@ -2325,36 +2658,55 @@ async def send_pd_monitor_alert(alert: dict) -> bool:
         _consec = ""
     _signals = "\n".join(f"• {s}" for s in signals[:5]) if signals else "• Volume anormal"
 
-    msg = (
+    header_pd = (
         f"{'🔴' if pd_type == 'DUMP' else '🚀'}{pd_type}{'🔴' if pd_type == 'DUMP' else '🚀'}"
         f" {sym} •  Conf {confidence} • {tf_display}| 📅 DAY TRADE\n\n"
         f"Intensidade: {intensity_icon} {intensity}\n"
         f"Score: {conf_bar} {confidence}/100\n\n"
+    )
+    bloco_movimento = (
         f"{SEP}\n"
         f"📊 Movimento:{big_candle_line}\n"
         f" Ultima vela:    {price_sign}{price_1c:.2f}%\n"
         f" Ultimas 3 vel:  {price_sign}{price_acc:.2f}%\n"
         f" Preco atual:    ${price:,.6g}\n"
+    )
+    bloco_volume = (
         f"📈 Volume:\n"
         f" Volume:   {rel_vol:.1f}x acima da media\n"
         f" Aceleracao vol:  {vol_accel:.1f}x vs vela anterior\n"
         f" RSI atual: {rsi_val:.0f}{rsi_delta_str}\n"
         f"{_vol_sust}\n"
+    )
+    bloco_vela = (
         f"{SEP}\n"
         f"🕯 Qualidade da vela:\n"
         f" Corpo/Range: {body_bar} {body_pct*100:.0f}%\n"
         f"{sust_icon} {sust_label}\n"
         f"{_pre_line}"
         f"{_consec}\n"
-        f"{SEP}\n"
-        f"⚡️ Sinais confirmados:\n{_signals}\n\n"
-        f"{SEP}\n"
-        f"💡 Recomendacao:\n{rec}"
     )
+    bloco_sinais = f"{SEP}\n⚡️ Sinais confirmados:\n{_signals}\n\n"
+    bloco_rec    = f"{SEP}\n💡 Recomendacao:\n{rec}"
 
-    # Garantia de CAIXA ÚNICA: a legenda de foto do Telegram tem limite de 1024 chars.
+    # ── Mensagem VIP/pessoal — completa, igual a hoje (não afetada pelos níveis) ──
+    msg = header_pd + bloco_movimento + bloco_volume + bloco_vela + bloco_sinais + bloco_rec
     if len(msg) > 1024:
         msg = msg[:1021].rstrip() + "..."
+
+    # ── Mensagens do canal PÚBLICO — mesmos 4 níveis usados nos sinais normais,
+    # com a chamada para o VIP. Antes este alerta ia sempre 100% completo (com
+    # gráfico) pro público, ignorando a % configurada no dashboard — corrigido. ──
+    cta = _public_cta()
+    public_pd_texts = {
+        1: header_pd + bloco_movimento + cta,
+        2: header_pd + bloco_movimento + bloco_volume + cta,
+        3: header_pd + bloco_movimento + bloco_volume + bloco_vela + bloco_sinais + cta,
+        4: msg + "\n" + cta,
+    }
+    for _k, _v in public_pd_texts.items():
+        if len(_v) > 1024:
+            public_pd_texts[_k] = _v[:1021].rstrip() + "..."
 
     # Gera gráfico com dados reais + níveis estimados para pump/dump
     _pd_is_long = pd_type == "PUMP"
@@ -2371,26 +2723,30 @@ async def send_pd_monitor_alert(alert: dict) -> bool:
     _pd_tf = alert.get("tf", "5m").lower()
     _pd_chart_bytes = await _generate_signal_chart(sym, _pd_tf, _pd_chart_sig)
 
-    # Roteamento: VIP sempre, canal público máx 4/dia (intensidade FORTE ou EXTREMO)
-    targets: list[str] = []
+    async def _send_pd_to(chat_id: str, text: str, chart: bytes | None):
+        # CAIXA ÚNICA: chart + mensagem inteira como legenda (1 só bolha) quando houver gráfico.
+        if chart:
+            return await _post_photo(chart, text, chat_id=chat_id)
+        return await _post("sendMessage", {"chat_id": chat_id, "text": text, "parse_mode": "Markdown"})
+
+    # Roteamento: VIP/pessoal sempre — mensagem completa (sem mudança)
+    vip_targets: list[str] = []
     if TELEGRAM_VIP_ID:
-        targets.append(str(TELEGRAM_VIP_ID))
-    if not targets:
-        targets.append(str(TELEGRAM_CHAT_ID))
-    if intensity in ("FORTE", "EXTREMO") and _channel_pd_ok():
-        targets.append(str(TELEGRAM_CHANNEL_ID))
+        vip_targets.append(str(TELEGRAM_VIP_ID))
+    if not vip_targets:
+        vip_targets.append(str(TELEGRAM_CHAT_ID))
+    send_coros = [_send_pd_to(t, msg, _pd_chart_bytes) for t in vip_targets]
 
-    async def _send_pd_to(chat_id: str):
-        # CAIXA ÚNICA: chart + mensagem inteira como legenda (1 só bolha).
-        if _pd_chart_bytes:
-            return await _post_photo(_pd_chart_bytes, msg, chat_id=chat_id)
-        # Sem chart: cai para texto puro.
-        return await _post("sendMessage", {"chat_id": chat_id, "text": msg, "parse_mode": "Markdown"})
+    # Canal público — máx 4/dia (intensidade FORTE/EXTREMO) e sorteado pelo MESMO
+    # contador diário dos sinais normais (_pick_public_tier), respeitando a % de
+    # cada nível configurada no dashboard. Só o nível 4 leva gráfico.
+    if intensity in ("FORTE", "EXTREMO") and TELEGRAM_CHANNEL_ID and _channel_pd_ok():
+        pd_tier  = _pick_public_tier()
+        pd_chart = _pd_chart_bytes if pd_tier == 4 else None
+        send_coros.append(_send_pd_to(str(TELEGRAM_CHANNEL_ID), public_pd_texts[pd_tier], pd_chart))
+        print(f"[PD-MONITOR] Canal público — {sym} enviado no nível {pd_tier} (config: {get_public_tier_pct()})")
 
-    results = await asyncio.gather(
-        *[_send_pd_to(t) for t in targets],
-        return_exceptions=True,
-    )
+    results = await asyncio.gather(*send_coros, return_exceptions=True)
     return any(isinstance(r, dict) and r.get("ok") for r in results)
 
 
@@ -2615,6 +2971,12 @@ async def register_bot_commands():
         {"command": "modo",        "description": "Perfil: /modo normal|agressivo|conservador"},
         {"command": "banca",       "description": "Definir banca: /banca 500"},
         {"command": "ntrades",     "description": "Limite de trades por sessao: /ntrades 3"},
+        {"command": "pausar",      "description": "⏸️ Pausar: nao abre novas entradas"},
+        {"command": "continuar",   "description": "▶️ Retomar apos pausa"},
+        {"command": "parar",       "description": "🛑 Parar bot: pausa + simulacao (sem dinheiro real)"},
+        {"command": "capital",     "description": "💰 Capital alocado vs disponivel"},
+        {"command": "alavancagem", "description": "🎚️ Ver/definir alavancagem: /alavancagem 10"},
+        {"command": "limites",     "description": "🔢 Limites de trade: /limites 5"},
         {"command": "fechar",      "description": "Fechar posicao: /fechar BTCUSDT ou /fechar tudo"},
         {"command": "paper",       "description": "Paper trading: /paper on|off"},
         {"command": "macro",       "description": "Eventos macro: /macro pausar|continuar|status"},

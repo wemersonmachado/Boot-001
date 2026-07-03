@@ -43,6 +43,7 @@ MIN_SCORE_TO_ENTER   = 4            # pontos mínimos para entrar
 MIN_SCORE_TO_STAY    = 2            # pontos mínimos para permanecer
 MAX_UNIVERSE_SIZE    = 60           # reduzido de 80 → mais qualidade, menos ruído
 MAX_PER_SECTOR       = 5            # diversificação: máx 5 por setor
+MAX_OTHER            = 12           # cap duro p/ "Other" (não-categorizado/junk)
 REMOVE_AFTER_HOURS   = 48           # remove se score baixo por 48h
 REMOVE_AFTER_DAYS    = 5            # remove se sem atividade por 5 dias
 MIN_MARKET_CAP       = 50_000_000   # $50M market cap mínimo (Micro tier ou melhor)
@@ -53,6 +54,22 @@ _EXCLUDE = {
     "USDC", "BUSD", "TUSD", "FDUSD", "DAI", "USDP", "FRAX",
     "USDT", "USDCUSDT", "USDTUSDT", "1000PEPE", "1000SHIB",
     "BTCDOM", "DEFI",  # índices sintéticos
+}
+
+# Ações tokenizadas, ETFs e metais — NÃO são cripto 24/7:
+# têm horário de bolsa, gaps de fim de semana e liquidez/regras diferentes.
+# A estratégia (TA cripto, funding, OI) não foi feita p/ esses ativos, então
+# bloqueamos a entrada deles no universo independente do CMC estar disponível.
+_BLOCK_TOKENIZED = {
+    # Ações tokenizadas
+    "AAPL", "TSLA", "NVDA", "MSTR", "COIN", "MSFT", "GOOGL", "GOOG",
+    "AMZN", "META", "NFLX", "HOOD", "PLTR", "SMCI", "AMD", "INTC",
+    "MRVL", "AAOI", "SNDK", "SKHYNIX", "CRCL", "BABA", "NIO", "MARA",
+    "RIOT", "GME", "AMC", "SPY", "QQQ",
+    # ETFs alavancados
+    "SOXL", "SOXS", "TQQQ", "SQQQ", "TSLL",
+    # Metais / commodities
+    "XAU", "XAG", "XPT", "XPD", "GOLD", "SILVER",
 }
 
 
@@ -91,7 +108,9 @@ async def _get_all_tickers() -> tuple[list[dict], float]:
         if not sym.endswith("USDT"):
             continue
         base = sym.replace("USDT", "")
-        if base in _EXCLUDE or any(x in base for x in ["_", "UP", "DOWN", "BULL", "BEAR"]):
+        if base in _EXCLUDE or base in _BLOCK_TOKENIZED:
+            continue
+        if any(x in base for x in ["_", "UP", "DOWN", "BULL", "BEAR"]):
             continue
         vol_24h = float(d.get("quoteVolume", 0))
         if vol_24h < MIN_VOLUME_24H_USDT:
@@ -278,6 +297,8 @@ async def _score_symbol(
         reasons.append("cmc_new_listing")
 
     # ── Filtros CMC (não pontuam, mas bloqueiam entrada) ─────────────────────
+    # Só aplica quando há dados CMC para a moeda (cmc_map vazio = CMC off,
+    # aí a blocklist de tokenizados em _get_all_tickers é a proteção).
     cmc_info = cmc_map.get(base, {})
     if cmc_info:
         mc = cmc_info.get("market_cap", 0)
@@ -286,8 +307,8 @@ async def _score_symbol(
             score = 0  # market cap muito pequeno — zera o score
             reasons = ["blocked_small_cap"]
         elif rk > MAX_CMC_RANK:
-            score = max(0, score - 2)  # penaliza tokens fora do top-500
-            reasons.append("low_rank")
+            score = 0  # fora do top-500 — bloqueio duro (era penalidade -2)
+            reasons = ["blocked_low_rank"]
 
     from cmc_client import get_sector
     sector = get_sector(sym)
@@ -318,6 +339,15 @@ async def build_universe() -> list[str]:
     now_ts  = time.time()
     now_iso = datetime.now(timezone.utc).isoformat()
     state   = _load_state()
+
+    # Purga símbolos que caíram na blocklist (ex: ações tokenizadas adicionadas
+    # depois que o ativo já estava no state) — senão o carry-forward do passo 4
+    # (pensado p/ timeout de API) os mantém ativos para sempre, já que eles nunca
+    # mais aparecem em `scored` por serem filtrados antes em _get_all_tickers.
+    for sym in [s for s in state if s.replace("USDT", "") in _BLOCK_TOKENIZED]:
+        if state[sym].get("active"):
+            print(f"[UNIVERSE] - SAÍDA (blocklist tokenizado): {sym}")
+        del state[sym]
 
     print(f"[UNIVERSE] Iniciando scan v2 — {datetime.now(timezone.utc).strftime('%H:%M UTC')}")
 
@@ -436,38 +466,48 @@ async def build_universe() -> list[str]:
             else:
                 print(f"[UNIVERSE] - SAÍDA (inativo {days_inactive:.1f}d): {sym}")
 
-    # ── 5. Limite MAX_UNIVERSE_SIZE com diversificação por setor ─────────────
+    # ── 5. Diversificação por setor (SEMPRE) + limite MAX_UNIVERSE_SIZE ───────
+    # Aplica o cap por setor mesmo quando há ≤60 candidatos, senão "Other"
+    # (não-categorizado / junk) domina o universo. "Other" tem cap próprio.
     active = [(sym, e) for sym, e in new_state.items() if e.get("active")]
     active.sort(key=lambda x: x[1].get("score", 0), reverse=True)
 
-    if len(active) > MAX_UNIVERSE_SIZE:
-        # Aplica diversificação por setor antes de cortar pelo limite global
-        sector_counts: dict = {}
-        diversified = []
-        overflow    = []
+    sector_counts: dict = {}
+    diversified = []
+    overflow    = []
 
-        for sym, entry in active:
+    def _sector_cap(sector: str) -> int:
+        return MAX_OTHER if sector == "Other" else MAX_PER_SECTOR
+
+    # Passo 1 — respeita o cap por setor, do maior score p/ o menor
+    for sym, entry in active:
+        sector = entry.get("sector", "Other")
+        count  = sector_counts.get(sector, 0)
+        if count < _sector_cap(sector) and len(diversified) < MAX_UNIVERSE_SIZE:
+            diversified.append((sym, entry))
+            sector_counts[sector] = count + 1
+        else:
+            overflow.append((sym, entry))
+
+    # Passo 2 — refill p/ chegar a 60, mas NUNCA estoura o cap de "Other"
+    if len(diversified) < MAX_UNIVERSE_SIZE:
+        for sym, entry in overflow:
+            if len(diversified) >= MAX_UNIVERSE_SIZE:
+                break
             sector = entry.get("sector", "Other")
-            count  = sector_counts.get(sector, 0)
-            if count < MAX_PER_SECTOR:
-                diversified.append((sym, entry))
-                sector_counts[sector] = count + 1
-            else:
-                overflow.append((sym, entry))
+            if sector == "Other" and sector_counts.get("Other", 0) >= MAX_OTHER:
+                continue  # "Other" continua barrado mesmo no refill
+            diversified.append((sym, entry))
+            sector_counts[sector] = sector_counts.get(sector, 0) + 1
 
-        # Se ainda sobrou espaço depois da diversificação, preenche com overflow
-        remaining = MAX_UNIVERSE_SIZE - len(diversified)
-        if remaining > 0:
-            diversified.extend(overflow[:remaining])
+    # Desativa os que ficaram de fora
+    selected_syms = {s for s, _ in diversified}
+    for sym, _ in active:
+        if sym not in selected_syms:
+            new_state[sym]["active"] = False
+            print(f"[UNIVERSE] - SAÍDA (limite/setor): {sym}")
 
-        # Remove os que ficaram de fora
-        selected_syms = {s for s, _ in diversified}
-        for sym, _ in active:
-            if sym not in selected_syms:
-                new_state[sym]["active"] = False
-                print(f"[UNIVERSE] - SAÍDA (limite/setor): {sym}")
-
-        active = diversified[:MAX_UNIVERSE_SIZE]
+    active = diversified[:MAX_UNIVERSE_SIZE]
 
     # ── 6. Resumo por setor ───────────────────────────────────────────────────
     sector_summary: dict = {}

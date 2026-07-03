@@ -3,7 +3,8 @@
 <head>
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1.0"/>
-<title>TRADER 001 — Dashboard</title>
+<title>Mestre dos Sinais — Dashboard</title>
+<link rel="icon" type="image/png" href="/dashboard/logo.png"/>
 <style>
 /* ═══════════════════════════════════════════
    TRADER 001 — Dark Gold v4  (wizard à esquerda, tema suave)
@@ -265,7 +266,27 @@ body{
 .pd-lbl{font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:.5px;margin-bottom:3px;font-weight:700}
 .pd-val{font-size:14px;font-weight:800}
 .pd-val.up{color:var(--up)}.pd-val.down{color:var(--down)}.pd-val.nt{color:var(--muted)}
-.hdr-right{display:flex;align-items:center;gap:10px}
+/* Linhas padronizadas do hdr-left — status, ações e configurações */
+.hdr-box{display:flex;align-items:center;gap:12px;flex-wrap:wrap;background:rgba(20,20,32,.6);border:1px solid var(--border);border-radius:10px;padding:8px 14px}
+.hdr-box-lbl{font-size:11px;font-weight:800;color:var(--muted);text-transform:uppercase;letter-spacing:.3px;white-space:nowrap}
+.hdr-divider{height:18px;width:1px;background:var(--border2);flex-shrink:0}
+.hdr-action-btn{padding:9px 14px;border-radius:10px;border:1.5px solid var(--border2);background:var(--card);font-size:12px;font-weight:800;cursor:pointer;white-space:nowrap;flex-shrink:0;transition:all .15s;letter-spacing:.2px}
+.hdr-cfg{background:rgba(20,20,32,.6);border:1px solid var(--border);border-radius:10px}
+.hdr-cfg>summary{list-style:none;cursor:pointer;padding:8px 14px;display:flex;align-items:center;gap:8px}
+.hdr-cfg>summary::-webkit-details-marker{display:none}
+.hdr-cfg>summary::before{content:'▸';display:inline-block;color:var(--gold);transition:transform .15s;font-size:10px}
+.hdr-cfg[open]>summary::before{transform:rotate(90deg)}
+.hdr-cfg-body{display:flex;flex-direction:column;gap:8px;padding:0 14px 12px}
+.hdr-right{display:flex;flex-direction:column;align-items:flex-end;gap:10px}
+.hdr-right-icons{display:flex;align-items:center;gap:10px}
+.sig-kpi-row{display:flex;gap:8px}
+.sig-kpi{
+  background:var(--card);border:1px solid var(--border);border-radius:10px;
+  padding:7px 12px;min-width:78px;text-align:center;
+}
+.sig-kpi-lbl{font-size:9px;color:var(--muted);text-transform:uppercase;letter-spacing:.4px;font-weight:700;white-space:nowrap}
+.sig-kpi-val{font-size:16px;font-weight:900;margin-top:2px;line-height:1}
+.sig-kpi-sub{font-size:10px;font-weight:700;margin-top:2px;white-space:nowrap}
 .scan-chip{font-size:11px;color:var(--muted);padding:7px 14px;background:var(--card);border:1px solid var(--border);border-radius:20px}
 .scan-chip span{color:var(--gold);font-weight:800}
 .hdr-btn{
@@ -504,7 +525,10 @@ input:checked + .slider:before {
 <aside class="wizard">
 
   <div class="wz-hdr">
-    <div class="wz-logo">TRADER 001</div>
+    <div class="wz-logo" style="display:flex;align-items:center;gap:8px">
+      <img src="/dashboard/logo.png" alt="Mestre dos Sinais" style="width:28px;height:28px;object-fit:contain">
+      MESTRE DOS SINAIS
+    </div>
     <div class="wz-title">&#9881; Configuração do Bot</div>
     <div class="wz-sub">Cada opção é aplicada na hora.<br>Clique e o bot obedece — sem etapas.</div>
   </div>
@@ -715,42 +739,104 @@ input:checked + .slider:before {
   <div class="hdr">
     <div class="hdr-left" style="display:flex;flex-direction:column;gap:13px">
 
-      <!-- Linha Superior Esquerda: Status do Robô e dos Modos Atuais -->
-      <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;background:rgba(20,20,32,0.6);border:1px solid var(--border);padding:8px 14px;border-radius:10px;margin-bottom:4px;">
+      <!-- Linha 1: Status do Robô e dos Modos Atuais -->
+      <div class="hdr-box">
         <div style="display:flex;align-items:center;gap:6px;">
           <span class="pulse run" id="statusPulse" style="width:10px;height:10px;"></span>
           <span style="font-size:12px;font-weight:900;letter-spacing:0.5px;color:var(--text);" id="statusText">CARREGANDO...</span>
         </div>
-        <div style="height:14px;width:1px;background:var(--border2);"></div>
+        <div class="hdr-divider"></div>
         <div style="font-size:11px;font-weight:700;color:var(--muted);" id="modesStatusText">--</div>
-        <div style="display:flex;align-items:center;gap:12px;margin-left:auto">
+      </div>
+
+      <!-- Linha 2: Ações rápidas (transmissão + IA) -->
+      <div class="hdr-box">
         <button id="newsBtn" onclick="broadcastNews()" title="Enviar notícias ao Telegram"
-          style="padding:9px 14px;border-radius:10px;border:1.5px solid rgba(91,156,246,.4);background:rgba(91,156,246,.08);color:#5B9CF6;font-size:12px;font-weight:800;cursor:pointer;white-space:nowrap;flex-shrink:0;transition:all .15s;letter-spacing:.2px"
+          class="hdr-action-btn" style="border-color:rgba(91,156,246,.4);background:rgba(91,156,246,.08);color:#5B9CF6"
           onmouseover="this.style.background='rgba(91,156,246,.18)'" onmouseout="this.style.background='rgba(91,156,246,.08)'">
           &#128240; Notícias
         </button>
         <button id="macroBtn" onclick="broadcastMacroToday()" title="Enviar eventos macro do dia ao Telegram"
-          style="padding:9px 14px;border-radius:10px;border:1.5px solid rgba(240,192,0,.4);background:rgba(240,192,0,.08);color:var(--gold);font-size:12px;font-weight:800;cursor:pointer;white-space:nowrap;flex-shrink:0;transition:all .15s;letter-spacing:.2px"
+          class="hdr-action-btn" style="border-color:rgba(240,192,0,.4);background:rgba(240,192,0,.08);color:var(--gold)"
           onmouseover="this.style.background='rgba(240,192,0,.18)'" onmouseout="this.style.background='rgba(240,192,0,.08)'">
           📅 Macro Hoje
         </button>
-      </div>
-      </div>
-
-      <!-- Linha 1: botões de ação -->
-      <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
+        <div class="hdr-divider"></div>
         <button id="brainBtn" onclick="toggleBrain()" title="Ativar filtro Claude AI nos sinais"
-          style="padding:9px 14px;border-radius:10px;border:1.5px solid rgba(184,126,251,.35);background:rgba(184,126,251,.07);color:#B87EFB;font-size:12px;font-weight:800;cursor:pointer;white-space:nowrap;flex-shrink:0;transition:all .2s;letter-spacing:.2px">
+          class="hdr-action-btn" style="border-color:rgba(184,126,251,.35);background:rgba(184,126,251,.07);color:#B87EFB">
           🧠 Modo Claude
         </button>
         <button id="normalBtn" onclick="deactivateBrain()" title="Desativar Claude AI — voltar ao modo tradicional"
-          style="display:none;padding:9px 14px;border-radius:10px;border:1.5px solid rgba(63,185,80,.5);background:rgba(63,185,80,.1);color:#3fb950;font-size:12px;font-weight:800;cursor:pointer;white-space:nowrap;flex-shrink:0;transition:all .2s;letter-spacing:.2px">
+          class="hdr-action-btn" style="display:none;border-color:rgba(63,185,80,.5);background:rgba(63,185,80,.1);color:#3fb950">
           🔧 Modo Normal
         </button>
         <span id="brainCostBadge" style="display:none;font-size:10px;color:rgba(184,126,251,.75);font-weight:600;letter-spacing:.2px;white-space:nowrap;"></span>
       </div>
 
-      <!-- Linha 2: info da conta Binance -->
+      <!-- Linha 3: Configurações de envio (recolhível) -->
+      <details class="hdr-cfg">
+        <summary class="hdr-box-lbl">&#9881; Configurações de Envio — Sinais/Hora &amp; Qualidade Pública</summary>
+        <div class="hdr-cfg-body">
+          <div class="hdr-box" style="background:transparent;border:none;padding:0">
+            <span class="hdr-box-lbl">&#128225; Sinais/Hora</span>
+            <div style="display:flex;align-items:center;gap:6px;">
+              <span style="font-size:11px;color:var(--text);white-space:nowrap;">Canal Público</span>
+              <input id="rlPublic" type="number" min="0" step="1" placeholder="10"
+                style="width:56px;background:var(--card2);border:1px solid var(--border2);border-radius:7px;padding:5px 8px;color:var(--text);font-size:12px;outline:none;text-align:center"
+                onkeydown="if(event.key==='Enter')saveRateLimit()">
+              <span style="font-size:10px;color:var(--muted)">/h (0=livre)</span>
+            </div>
+            <div style="display:flex;align-items:center;gap:6px;">
+              <span style="font-size:11px;color:var(--gold);white-space:nowrap;">Canal VIP</span>
+              <input id="rlVip" type="number" min="0" step="1" placeholder="30"
+                style="width:56px;background:var(--card2);border:1px solid rgba(240,192,0,.3);border-radius:7px;padding:5px 8px;color:var(--text);font-size:12px;outline:none;text-align:center"
+                onkeydown="if(event.key==='Enter')saveRateLimit()">
+              <span style="font-size:10px;color:var(--muted)">/h (0=livre)</span>
+            </div>
+            <button onclick="saveRateLimit()"
+              style="padding:6px 14px;background:var(--card);border:1px solid var(--border2);border-radius:7px;color:var(--gold);font-size:11px;font-weight:700;cursor:pointer">Salvar</button>
+          </div>
+
+          <div class="hdr-box" style="background:transparent;border:none;padding:0">
+            <span class="hdr-box-lbl">&#127919; Qualidade Msg — Canal Público</span>
+            <div style="display:flex;align-items:center;gap:6px;">
+              <span style="font-size:11px;color:var(--text);white-space:nowrap;">1· Básica</span>
+              <input id="ptPct1" type="number" min="0" max="100" step="1" placeholder="65"
+                style="width:50px;background:var(--card2);border:1px solid var(--border2);border-radius:7px;padding:5px 8px;color:var(--text);font-size:12px;outline:none;text-align:center"
+                onkeydown="if(event.key==='Enter')savePublicTierPct()">
+              <span style="font-size:10px;color:var(--muted)">%</span>
+            </div>
+            <div style="display:flex;align-items:center;gap:6px;">
+              <span style="font-size:11px;color:var(--text);white-space:nowrap;">2· Intermediária</span>
+              <input id="ptPct2" type="number" min="0" max="100" step="1" placeholder="20"
+                style="width:50px;background:var(--card2);border:1px solid var(--border2);border-radius:7px;padding:5px 8px;color:var(--text);font-size:12px;outline:none;text-align:center"
+                onkeydown="if(event.key==='Enter')savePublicTierPct()">
+              <span style="font-size:10px;color:var(--muted)">%</span>
+            </div>
+            <div style="display:flex;align-items:center;gap:6px;">
+              <span style="font-size:11px;color:var(--text);white-space:nowrap;">3· Avançada</span>
+              <input id="ptPct3" type="number" min="0" max="100" step="1" placeholder="10"
+                style="width:50px;background:var(--card2);border:1px solid var(--border2);border-radius:7px;padding:5px 8px;color:var(--text);font-size:12px;outline:none;text-align:center"
+                onkeydown="if(event.key==='Enter')savePublicTierPct()">
+              <span style="font-size:10px;color:var(--muted)">%</span>
+            </div>
+            <div style="display:flex;align-items:center;gap:6px;">
+              <span style="font-size:11px;color:var(--gold);white-space:nowrap;">4· VIP (c/ gráfico)</span>
+              <input id="ptPct4" type="number" min="0" max="100" step="1" placeholder="5"
+                style="width:50px;background:var(--card2);border:1px solid rgba(240,192,0,.3);border-radius:7px;padding:5px 8px;color:var(--text);font-size:12px;outline:none;text-align:center"
+                onkeydown="if(event.key==='Enter')savePublicTierPct()">
+              <span style="font-size:10px;color:var(--muted)">%</span>
+            </div>
+            <button onclick="savePublicTierPct()"
+              style="padding:6px 14px;background:var(--card);border:1px solid var(--border2);border-radius:7px;color:var(--gold);font-size:11px;font-weight:700;cursor:pointer">Salvar</button>
+            <button onclick="testPublicTiers()"
+              style="padding:6px 14px;background:rgba(91,156,246,.08);border:1px solid rgba(91,156,246,.4);border-radius:7px;color:#5B9CF6;font-size:11px;font-weight:700;cursor:pointer">&#129514; Testar 4 níveis no público</button>
+            <span id="ptTodayInfo" style="font-size:10px;color:var(--muted);white-space:nowrap"></span>
+          </div>
+        </div>
+      </details>
+
+      <!-- Linha 4: info da conta Binance -->
       <div style="display:flex;align-items:flex-end;gap:32px;flex-wrap:wrap;">
         <div>
           <div class="bal-lbl">SALDO TOTAL — BINANCE FUTURES</div>
@@ -778,14 +864,30 @@ input:checked + .slider:before {
 
     </div>
     <div class="hdr-right">
-      <div class="scan-chip">Scan: <span id="scanDisp">--</span></div>
-      <div class="hdr-btn" onclick="toggleTheme()" title="Alternar Tema" id="themeBtn" style="font-size:14px;">☀️</div>
-      <div class="hdr-btn" onclick="loadAll()" title="Atualizar tudo">&#8635;</div>
-      <div class="hdr-btn" style="position:relative" title="Notificações">
-        &#128276;
-        <span class="notif-dot" id="notifDot" style="display:none"></span>
+      <div class="sig-kpi-row" title="Atualiza ao resolver TP1/TP2/SL dos sinais">
+        <div class="sig-kpi">
+          <div class="sig-kpi-lbl">Sinais Enviados (24h)</div>
+          <div class="sig-kpi-val" id="kpiSigSent">--</div>
+        </div>
+        <div class="sig-kpi">
+          <div class="sig-kpi-lbl">Positivos / Negativos</div>
+          <div class="sig-kpi-val"><span style="color:var(--up)" id="kpiSigPos">--</span> / <span style="color:var(--down)" id="kpiSigNeg">--</span></div>
+        </div>
+        <div class="sig-kpi">
+          <div class="sig-kpi-lbl">% Acerto</div>
+          <div class="sig-kpi-val" id="kpiSigRate">--%</div>
+        </div>
       </div>
-      <div class="avatar">T</div>
+      <div class="hdr-right-icons">
+        <div class="scan-chip">Scan: <span id="scanDisp">--</span></div>
+        <div class="hdr-btn" onclick="toggleTheme()" title="Alternar Tema" id="themeBtn" style="font-size:14px;">☀️</div>
+        <div class="hdr-btn" onclick="loadAll()" title="Atualizar tudo">&#8635;</div>
+        <div class="hdr-btn" style="position:relative" title="Notificações">
+          &#128276;
+          <span class="notif-dot" id="notifDot" style="display:none"></span>
+        </div>
+        <div class="avatar"><img src="/dashboard/logo.png" alt="Mestre dos Sinais" style="width:100%;height:100%;border-radius:50%;object-fit:cover"></div>
+      </div>
     </div>
   </div>
 
@@ -1085,8 +1187,7 @@ input:checked + .slider:before {
 'use strict';
 
 // API: relativo quando servido pelo FastAPI (porta 8000), absoluto caso contrário
-const API = (window.location.port === '8000' || window.location.port === '')
-  ? '' : 'http://127.0.0.1:8000';
+const API = 'http://127.0.0.1:8000';
 
 // ════ PERFIS DE RISCO (3 perfis) ════
 const PROFILE_BTN = { CONSERVATIVE: 'ob-cons', NORMAL: 'ob-norm', AGGRESSIVE: 'ob-aggr' };
@@ -1151,7 +1252,7 @@ async function apiFetch(path, method = 'GET') {
   const t0 = Date.now();
   try {
     const ctrl = new AbortController();
-    const tid  = setTimeout(() => ctrl.abort(), 10000);
+    const tid  = setTimeout(() => ctrl.abort(), 45000); // aumentado para 45s para suportar scans pesados do bot
     const r    = await fetch(API + path, { method, signal: ctrl.signal });
     clearTimeout(tid);
     const lat = Date.now() - t0;
@@ -1349,6 +1450,20 @@ async function loadPerformance() {
   });
 }
 
+async function loadSignalKPI() {
+  const d = await apiFetch('/signals/kpi');
+  if (!d) return;
+  txt('kpiSigSent', d.total_sent ?? '--');
+  txt('kpiSigPos', d.positive ?? '--');
+  txt('kpiSigNeg', d.negative ?? '--');
+  const rate = $id('kpiSigRate');
+  if (rate) {
+    const wr = parseFloat(d.win_rate_pct || 0);
+    rate.textContent = fmt(wr, 1) + '%';
+    rate.style.color = wr >= 50 ? 'var(--up)' : 'var(--down)';
+  }
+}
+
 async function loadPumpDump(force = false) {
   const url = '/alerts/pump_dump' + (force ? '?force=true' : '');
   const d = await apiFetch(url);
@@ -1472,9 +1587,79 @@ async function loadMIE() {
 }
 
 
+async function loadRateLimit() {
+  const r = await apiFetch('/settings/sinais_rate_limit');
+  if (!r) return;
+  const pubInp = $id('rlPublic');
+  const vipInp = $id('rlVip');
+  if (pubInp && document.activeElement !== pubInp) pubInp.value = r.public_per_hour;
+  if (vipInp && document.activeElement !== vipInp) vipInp.value = r.vip_per_hour;
+}
+
+async function saveRateLimit() {
+  const pub = parseInt($id('rlPublic').value, 10);
+  const vip = parseInt($id('rlVip').value, 10);
+  const params = new URLSearchParams();
+  if (!isNaN(pub)) params.set('public_per_hour', pub);
+  if (!isNaN(vip)) params.set('vip_per_hour', vip);
+  const r = await apiFetch(`/settings/sinais_rate_limit?${params.toString()}`, 'POST');
+  if (r) toast(`Limite: Público ${r.public_per_hour || '∞'}/h · VIP ${r.vip_per_hour || '∞'}/h`, 'success');
+  else    toast('Erro ao salvar limite de sinais/hora.', 'error');
+}
+
+async function loadPublicTierPct() {
+  const r = await apiFetch('/settings/public_tier_pct');
+  if (!r) return;
+  const pct = r.pct || {};
+  [1, 2, 3, 4].forEach(t => {
+    const inp = $id('ptPct' + t);
+    if (inp && document.activeElement !== inp && pct[t] != null) inp.value = pct[t];
+  });
+  const today = r.today || {};
+  const counts = today.counts || {};
+  const sent = today.sent || 0;
+  if (sent > 0) {
+    txt('ptTodayInfo', `Hoje: ${sent} enviados — N1:${counts[1] || 0} N2:${counts[2] || 0} N3:${counts[3] || 0} N4:${counts[4] || 0}`);
+  } else {
+    txt('ptTodayInfo', 'Nenhum sinal público enviado hoje ainda.');
+  }
+}
+
+async function savePublicTierPct() {
+  const vals = [1, 2, 3, 4].map(t => parseInt($id('ptPct' + t).value, 10));
+  if (vals.some(v => isNaN(v) || v < 0)) {
+    toast('Preencha os 4 percentuais (0-100).', 'error');
+    return;
+  }
+  const params = new URLSearchParams({ p1: vals[0], p2: vals[1], p3: vals[2], p4: vals[3] });
+  const r = await apiFetch(`/settings/public_tier_pct?${params.toString()}`, 'POST');
+  if (r) {
+    const p = r.pct;
+    [1, 2, 3, 4].forEach(t => { const inp = $id('ptPct' + t); if (inp) inp.value = p[t]; });
+    toast(r.normalized
+      ? `Ajustado para somar 100%: N1 ${p[1]}% · N2 ${p[2]}% · N3 ${p[3]}% · N4 ${p[4]}%`
+      : `Salvo: N1 ${p[1]}% · N2 ${p[2]}% · N3 ${p[3]}% · N4 ${p[4]}%`, 'success');
+  } else {
+    toast('Erro ao salvar % do canal público.', 'error');
+  }
+}
+
+async function testPublicTiers() {
+  if (!confirm('Isso vai enviar 4 mensagens de TESTE (marcadas como teste) no canal público AGORA. Confirmar?')) return;
+  toast('Disparando os 4 níveis de teste no canal público...', 'info');
+  const r = await apiFetch('/signals/test_public_tiers', 'POST');
+  if (r && r.ok) {
+    toast('Testes enviados! Confira o canal público no Telegram.', 'success');
+  } else {
+    toast('Falha ao enviar os testes — veja o console do bot.', 'error');
+  }
+}
+
 async function loadSettings() {
   const d = await apiFetch('/settings');
   if (!d) return;
+  loadRateLimit();
+  loadPublicTierPct();
   _paperMode = d.paper_trading || false;
   refreshPaperBtn();
 
@@ -2017,20 +2202,28 @@ async function closeTrade(id) {
 
 // ════ LOAD ALL ════
 async function loadAll() {
+  // 1. Prioridade Máxima (Saldos, Mercado, Status)
   await Promise.all([
     loadBalance(),
     loadMarket(),
+    loadGridStatus(),
+    _refreshLastScan()
+  ]);
+  
+  // 2. Secundários (Sinais, Trades, KPIs) - executados em background sem travar a UI inicial
+  Promise.all([
     loadActiveTrades(),
     loadSignals(),
-    loadMIE(),
     loadPerformance(),
-    loadGridStatus(),
-    loadSettings(),
-    loadPumpDump(),
-    loadSRZones(),
-    _refreshLastScan(),
-  ]);
-  loadHistory();
+    loadSignalKPI(),
+    loadSettings()
+  ]).then(() => {
+    // 3. Terciários / Dados Pesados
+    loadMIE();
+    loadPumpDump();
+    loadSRZones();
+    loadHistory();
+  });
 }
 
 async function _refreshLastScan() {
@@ -2227,6 +2420,7 @@ document.addEventListener('DOMContentLoaded', () => {
   setInterval(loadActiveTrades,  5000);
   setInterval(loadSignals,      15000);
   setInterval(loadPerformance,  30000);
+  setInterval(loadSignalKPI,    15000);
   setInterval(loadGridStatus,    8000);
   setInterval(loadMIE,         600000);
   setInterval(loadPumpDump,    120000);

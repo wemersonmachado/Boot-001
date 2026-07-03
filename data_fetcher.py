@@ -19,9 +19,15 @@ _session: Optional[aiohttp.ClientSession] = None
 async def get_session() -> aiohttp.ClientSession:
     global _session
     if _session is None or _session.closed:
-        # Use ThreadedResolver to avoid aiodns DNS issues on Windows/Python 3.14
+        # AsyncResolver (aiodns) com DNS públicos: o ThreadedResolver do Windows
+        # spawnava threads por lookup e sob carga estourava em WinError 121 /
+        # TimeoutError nos scans. Fallback pro resolver padrão se aiodns faltar.
+        try:
+            resolver = aiohttp.AsyncResolver(nameservers=["8.8.8.8", "1.1.1.1"])
+        except Exception:
+            resolver = None
         connector = aiohttp.TCPConnector(
-            resolver=aiohttp.ThreadedResolver(),
+            resolver=resolver,
             ssl=True,
             limit=50,
             keepalive_timeout=30

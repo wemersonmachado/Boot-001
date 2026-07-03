@@ -1,4 +1,5 @@
 import asyncio
+import json
 from datetime import datetime
 from database import save_setting, get_setting
 
@@ -22,7 +23,14 @@ class BotState:
         self.exposure_pct = 10.0
         self.trades_per_session = 0
         self.daily_target_usdt = 0.0
-        
+
+        # Limite de sinais por hora, por canal (0 = sem limite)
+        self.sinais_max_hour_public = 10
+        self.sinais_max_hour_vip    = 30
+
+        # % de cada nível de detalhe (1-4) do canal PÚBLICO — não afeta o VIP.
+        self.public_tier_pct = {1: 65, 2: 20, 3: 10, 4: 5}
+
         # Simulação e fluxo
         self.paper_trading = False
         self.mode_started_at = datetime.utcnow().isoformat()
@@ -48,6 +56,13 @@ class BotState:
             self.exposure_pct = float(await get_setting("exposure_pct", "10.0"))
             self.trades_per_session = int(await get_setting("trades_per_session", "0"))
             self.daily_target_usdt = float(await get_setting("daily_target_usdt", "0.0"))
+            self.sinais_max_hour_public = int(await get_setting("sinais_max_hour_public", "10"))
+            self.sinais_max_hour_vip = int(await get_setting("sinais_max_hour_vip", "30"))
+            try:
+                _raw_pct = await get_setting("public_tier_pct", json.dumps(self.public_tier_pct))
+                self.public_tier_pct = {int(k): int(v) for k, v in json.loads(_raw_pct).items()}
+            except Exception:
+                pass  # mantém o default já definido em __init__ se o JSON salvo estiver corrompido
             self.paper_trading = (await get_setting("paper_trading", "False")) == "True"
             
             self.mode_started_at = await get_setting("mode_started_at", datetime.utcnow().isoformat())
@@ -89,7 +104,7 @@ class BotState:
             self.exec_mode = exec_mode
             self.dual_mode_enabled = True
             self.sinais_enabled = True
-            self.sinais_profile = "AGGRESSIVE" # Sempre fixado agressivo para alta qualidade de sinais
+            self.sinais_profile = profile.upper()
             self.current_mode = profile.upper()
             self.sinais_claude_brain = sinais_brain
             self.exec_claude_brain = exec_brain
@@ -101,7 +116,7 @@ class BotState:
             
             if mode == "SINAIS":
                 self.sinais_enabled = True
-                self.sinais_profile = "AGGRESSIVE"
+                self.sinais_profile = profile.upper()
                 self.sinais_claude_brain = self.claude_brain_enabled
                 self.exec_claude_brain = False
             else:
