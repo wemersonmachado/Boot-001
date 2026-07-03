@@ -679,7 +679,10 @@ def evaluate_signal(
         from config import SINAIS_MTF_HARD_GATE as _MTF_GATE
     except Exception:
         _MTF_GATE = False
-    if _MTF_GATE and not mtf["confirmed"]:
+    # AGGRESSIVE (2026-07-03): MTF divergente volta a ser só penalidade (bonus
+    # negativo já aplicado abaixo), não bloqueio total — restaura a via rápida
+    # que o perfil tinha antes de 22/06. CONSERVATIVE/NORMAL mantêm o bloqueio.
+    if _MTF_GATE and mode != "AGGRESSIVE" and not mtf["confirmed"]:
         notes.append(mtf["note"])
         return _block(f"MTF divergente ({mtf['note']})", notes, score)
     score += mtf["bonus"]
@@ -716,6 +719,12 @@ def evaluate_signal(
     except Exception:
         _REQ_STRUCT, _MIN_CONF = False, {}
     _struct_required = _REQ_STRUCT or mode == "NORMAL"
+    # AGGRESSIVE (2026-07-03): sinal muito forte (score >= 78, já com staleness/
+    # funding/sessão/MTF aplicados) dispensa a tag estrutural — evita sufocar
+    # momentum genuíno só por falta de label reconhecida. CONSERVATIVE/NORMAL
+    # continuam exigindo sempre.
+    if mode == "AGGRESSIVE" and score >= 78:
+        _struct_required = False
     if _struct_required and not has_structural_tag(signal):
         return _block("Sem tag estrutural V6", notes, score)
     _need = int(_MIN_CONF.get(mode, 1)) if isinstance(_MIN_CONF, dict) else 1

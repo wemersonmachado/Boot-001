@@ -78,7 +78,10 @@ MODE_SETTINGS = {
         "entry_cadence_s": 120,          # AUTÔNOMO: 1 entrada a cada 2 min
     },
     "AGGRESSIVE": {
-        "min_score": 65,  # era 60 — floor elevado para reduzir entradas de baixa qualidade
+        "min_score": 62,  # 2026-07-03: 65→62 — meio-termo; volume do canal SINAIS
+                          # caiu demais após os gates globais de 22/06 (ver
+                          # SINAIS_MTF_HARD_GATE/SINAIS_REQUIRE_STRUCT_ALL abaixo,
+                          # agora mode-aware para restaurar a via rápida do Agressivo).
         "min_rr": 1.7,
         "scan_interval_s": 45,    # mínimo seguro após IP ban — nunca < 45s
         "max_open_trades": 8,
@@ -190,7 +193,11 @@ SINAIS_REQUIRE_STRUCT_ALL = True
 # de aprovação de 19,8% para... só 19,8% MESMO (o "2" nunca foi de fato revertido
 # pra 1 no código, apesar de a correção ter sido validada e registrada). Voltando
 # para 1 (mesmo valor do AGGRESSIVE), que mediu 45,2% de aprovação com dados reais.
-SINAIS_MIN_CONFLUENCE     = {"CONSERVATIVE": 2, "NORMAL": 1, "AGGRESSIVE": 1}
+SINAIS_MIN_CONFLUENCE     = {"CONSERVATIVE": 2, "NORMAL": 1, "AGGRESSIVE": 0}
+# 2026-07-03: AGGRESSIVE volta a 0 (não exige confluência) — restaura a "via
+# rápida" que o perfil tinha antes de 22/06 sem mexer em CONSERVATIVE/NORMAL.
+# Ver também evaluate_signal() em signal_filters.py: MTF hard gate e tag
+# estrutural obrigatória agora são condicionais ao modo (AGGRESSIVE mais leve).
 # (5) Claude Brain avalia o sinal a partir deste score (antes era 65 — sinais de
 #     55-64 do Agressivo escapavam da IA).
 SINAIS_BRAIN_MIN_SCORE    = 55
