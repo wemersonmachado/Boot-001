@@ -510,18 +510,69 @@ async def send_trade_opened(trade: dict, operation_mode: str = "SUPERVISED"):
     )
 
 
+_CLOSE_REASON_LABELS = {
+    "STOP_LOSS": "🛑 Stop Loss atingido",
+    "TP3":       "🎯 Alvo final atingido",
+    "TP2":       "🎯 TP2 atingido",
+    "TP1":       "🎯 TP1 atingido",
+}
+
+
 async def send_trade_closed(trade: dict, reason: str):
     if not _is_configured():
         return
-    asset   = trade.get("asset", "?")
-    pnl     = trade.get("pnl_usdt", 0)
-    pnl_pct = trade.get("pnl_pct", 0)
-    emoji   = "+" if float(pnl) >= 0 else "-"
-    sign_   = "+" if float(pnl) >= 0 else ""
-    msg = f"""*TRADE FECHADO* — *{asset}* — _{reason}_
+    asset     = trade.get("asset", "?")
+    dir_clean = _clean_direction(trade.get("direction", ""))
+    is_long   = "LONG" in dir_clean
+    dir_icon  = "🟢" if is_long else "🔴"
+    entry     = float(trade.get("entry_price", 0) or 0)
+    exit_px   = float(trade.get("current_price", 0) or entry)
+    pnl       = float(trade.get("pnl_usdt", 0) or 0)
+    pnl_pct   = float(trade.get("pnl_pct", 0) or 0)
+    lev       = int(trade.get("leverage", 1) or 1)
+    size      = float(trade.get("size_usdt", 0) or 0)
+    margin    = round(size / lev, 2) if lev else 0
+    paper     = trade.get("paper", False)
+    is_win    = pnl >= 0
+    sign_     = "+" if is_win else ""
+    move_pct  = abs(exit_px - entry) / entry * 100 if entry else 0
 
-PnL: `{sign_}${float(pnl):.2f} USDT` ({sign_}{float(pnl_pct):.2f}%)
-`{datetime.utcnow().strftime('%d/%m/%Y %H:%M')} UTC`""".strip()
+    # Motivo legível — cobre STOP_LOSS/TP1-3 (risk_manager), DCA e fechamento manual
+    reason_label = _CLOSE_REASON_LABELS.get(reason)
+    if reason_label is None:
+        if str(reason).upper().startswith("DCA"):
+            reason_label = f"🔁 {reason}"
+        elif "telegram" in str(reason).lower():
+            reason_label = "✋ Fechado manualmente (Telegram)"
+        else:
+            reason_label = f"ℹ️ {reason}" if reason else "Fechado"
+
+    # Duração da operação (opened_at → closed_at)
+    duration_str = "—"
+    try:
+        t0 = datetime.fromisoformat(str(trade.get("opened_at")))
+        t1 = datetime.fromisoformat(str(trade.get("closed_at")))
+        total_min = int((t1 - t0).total_seconds() // 60)
+        h, m = divmod(max(total_min, 0), 60)
+        duration_str = f"{h}h{m:02d}m" if h else f"{m}min"
+    except Exception:
+        pass
+
+    header_icon = "✅" if is_win else "❌"
+    result_word = "GANHOU" if is_win else "PERDEU"
+    paper_tag   = "  🔸 PAPER" if paper else ""
+
+    msg = (
+        f"{header_icon} *{result_word} — {dir_icon} {dir_clean} {asset}*{paper_tag}\n"
+        f"{reason_label}\n\n"
+        f"💰 *Resultado*\n"
+        f"  PnL `{sign_}${pnl:.2f} USDT`  ({sign_}{pnl_pct:.2f}%)\n\n"
+        f"📊 *Preços*\n"
+        f"  Entrada `${entry:,.4f}` → Saída `${exit_px:,.4f}`  _({move_pct:.2f}%)_\n\n"
+        f"⚡ *Execução*\n"
+        f"  `{lev}x` | Margem `${margin:.2f}` | Duração `{duration_str}`\n"
+        f"`{datetime.utcnow().strftime('%d/%m/%Y %H:%M')} UTC`"
+    )
     await _post("sendMessage", {"chat_id": TELEGRAM_CHAT_ID, "text": msg, "parse_mode": "Markdown"})
 
 
