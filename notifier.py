@@ -936,10 +936,142 @@ def _rsi_series(closes: list, period: int = 14) -> list:
     return rsi
 
 
+def _chart_swings(vals, kind, w=3):
+    """Detecta swing highs/lows (extremos locais) para traçar tendência."""
+    out = []
+    for i in range(w, len(vals) - w):
+        seg = vals[i - w:i + w + 1]
+        if kind == "high" and vals[i] == max(seg):
+            out.append(i)
+        elif kind == "low" and vals[i] == min(seg):
+            out.append(i)
+    return out
+
+
+def _chart_linreg(xs, ys):
+    """Regressão linear (mínimos quadrados) — tendência robusta, não 2 pontos."""
+    k = len(xs)
+    if k < 2:
+        return 0.0, (ys[0] if ys else 0.0)
+    sx = sum(xs); sy = sum(ys); sxx = sum(x * x for x in xs); sxy = sum(x * y for x, y in zip(xs, ys))
+    d = k * sxx - sx * sx
+    if d == 0:
+        return 0.0, sy / k
+    m = (k * sxy - sx * sy) / d
+    return m, (sy - m * sx) / k
+
+
+def _chart_fit_boundary(vals, pivots, kind, start, tolerance, max_slope):
+    """Escolhe a linha com mais toques e menos rompimentos na estrutura recente."""
+    points = [i for i in pivots if i >= start][-10:]
+    if len(points) < 2:
+        return None
+
+    # O pivô final ('b') precisa estar nos 40% mais recentes da janela — senão
+    # a linha "morre" no meio do gráfico e parece flutuando, desconectada do
+    # candle atual.
+    _recent_floor = start + (len(vals) - start) * 0.6
+
+    best = None
+    for a_pos in range(len(points) - 1):
+        for b_pos in range(a_pos + 1, len(points)):
+            a, b = points[a_pos], points[b_pos]
+            if b < _recent_floor:
+                continue
+            span = b - a
+            if span < 5:
+                continue
+            slope = (vals[b] - vals[a]) / span
+            if abs(slope) > max_slope:
+                continue
+            intercept = vals[a] - slope * a
+            pivot_dist = [abs(vals[i] - (slope * i + intercept)) for i in points]
+            touches = sum(d <= tolerance for d in pivot_dist)
+
+            violations = 0
+            severe = 0
+            for i in range(a, len(vals)):
+                delta = vals[i] - (slope * i + intercept)
+                crossed = delta < -tolerance if kind == "low" else delta > tolerance
+                badly_crossed = delta < -2.5 * tolerance if kind == "low" else delta > 2.5 * tolerance
+                violations += int(crossed)
+                severe += int(badly_crossed)
+
+            # Prioriza ajuste real à estrutura recente: recência do pivô 'b'
+            # pesa mais que cobertura (uma linha que nasce longe no passado e
+            # some no meio do caminho parece "flutuando" desconectada) e
+            # rompimentos custam mais caro — a linha deve realmente respeitar
+            # os candles pelos quais passa, não só tocar os 2 pivôs extremos.
+            recency_b = b / max(len(vals) - 1, 1)
+            coverage = span / max(len(vals) - start, 1)
+            mean_error = sum(min(d / tolerance, 3.0) for d in pivot_dist) / len(pivot_dist)
+            score = (touches * 4.0 + coverage * 1.2 + recency_b * 4.5
+                     - violations * 3.5 - severe * 7.0 - mean_error * 1.5)
+            candidate = (score, touches, span, slope, intercept, [a, b])
+            if best is None or candidate[:3] > best[:3]:
+                best = candidate
+
+    if best is None or best[1] < 2:
+        return None
+    return best[3], best[4], best[5], best[0]
+
+
+def _chart_horizontal_level(vals, pivots, start, tolerance, cur_price, side):
+    """Agrupa pivôs (highs ou lows) em zonas de preço próximas e devolve a
+    zona mais forte (mais toques) do lado certo do preço atual — isso é
+    suporte/resistência HORIZONTAL 'de verdade' (nível testado várias vezes),
+    diferente da linha diagonal de tendência.
+    side='res' só aceita zonas ACIMA do preço atual; side='sup' só ABAIXO.
+    """
+    pts = [vals[i] for i in pivots if i >= start]
+    if len(pts) < 2:
+        return None
+    clusters = []
+    for p in sorted(pts):
+        for c in clusters:
+            if abs(p - c["avg"]) <= tolerance:
+                c["prices"].append(p)
+                c["avg"] = sum(c["prices"]) / len(c["prices"])
+                break
+        else:
+            clusters.append({"prices": [p], "avg": p})
+    strong = [c for c in clusters if len(c["prices"]) >= 2]
+    if side == "res":
+        strong = [c for c in strong if c["avg"] > cur_price]
+    else:
+        strong = [c for c in strong if c["avg"] < cur_price]
+    if not strong:
+        return None
+    best = max(strong, key=lambda c: (len(c["prices"]), -abs(c["avg"] - cur_price)))
+    return best["avg"], len(best["prices"])
+
+
+def _chart_classify_figure(ms, mr, price):
+    """Classifica a figura pela inclinação por vela (normalizada em % do preço)."""
+    if price <= 0:
+        return "Consolidação / Range"
+    sm = ms / price; sr = mr / price          # inclinação por vela, fração do preço
+    flat = 0.0004                              # < ~0.04%/vela = praticamente lateral
+    up_s, dn_s = sm > flat, sm < -flat         # suporte subindo / descendo
+    up_r, dn_r = sr > flat, sr < -flat         # resistência subindo / descendo
+    if up_s and dn_r:
+        return "Triângulo Simétrico"
+    if up_s and not up_r and not dn_r:
+        return "Triângulo Ascendente"
+    if dn_r and not up_s and not dn_s:
+        return "Triângulo Descendente"
+    if up_s and up_r:
+        return "Canal de Alta"
+    if dn_s and dn_r:
+        return "Canal de Baixa"
+    return "Consolidação / Range"
+
+
 async def _generate_signal_chart(asset: str, timeframe: str, signal: dict) -> bytes | None:
     """
     Gera gráfico de velas REAIS da Binance Futures com overlays do sinal:
     EMA 21/50/200, painel RSI, zona OB, Entry/SL/TP1/TP2, seta direcional,
+    linhas de tendência, figura gráfica, alvos futuros projetados,
     watermark e caixa de estratégia.
     """
     try:
@@ -993,7 +1125,6 @@ async def _generate_signal_chart(asset: str, timeframe: str, signal: dict) -> by
         closes = df["close"].values.tolist()
         vols   = df["volume"].values.tolist() if "volume" in df.columns else [1.0] * len(closes)
         times  = df.index.tolist() if hasattr(df.index, 'strftime') else list(range(len(closes)))
-        n      = len(closes)
 
         # ── Parâmetros do sinal ────────────────────────────────────────────────
         dir_clean  = str(signal.get("direction", "LONG")).split(".")[-1].strip().upper()
@@ -1007,9 +1138,35 @@ async def _generate_signal_chart(asset: str, timeframe: str, signal: dict) -> by
         conf_label = signal.get("conf_label") or ("Alta" if score >= 80 else "Média" if score >= 65 else "Baixa")
         tf_disp    = timeframe.upper()
 
-        ema21 = _ema_series(closes, 21)
-        ema50 = _ema_series(closes, 50)
-        ema200 = _ema_series(closes, 200)
+        # Em testes ou sinais antigos, o mercado pode ja ter batido TP/SL.
+        # Para o chart parecer um sinal real, corta no candle mais proximo
+        # da entrada e projeta o futuro a partir dali.
+        n_raw = len(closes)
+        signal_idx = n_raw - 1
+        if entry > 0 and n_raw >= 40:
+            current = closes[-1]
+            target_hit = (
+                (is_long and ((tp1 and current >= tp1) or (sl and current <= sl))) or
+                ((not is_long) and ((tp1 and current <= tp1) or (sl and current >= sl)))
+            )
+            moved_far = abs(current - entry) / entry >= 0.006
+            if target_hit or moved_far:
+                recent_start = max(0, n_raw - 90)
+                candidates = []
+                for i in range(recent_start, n_raw):
+                    touched_entry = lows[i] <= entry <= highs[i]
+                    dist = 0.0 if touched_entry else abs(closes[i] - entry)
+                    candidates.append((dist, -i, i))
+                signal_idx = max(24, min(candidates)[2])
+
+        opens  = opens[:signal_idx + 1]
+        highs  = highs[:signal_idx + 1]
+        lows   = lows[:signal_idx + 1]
+        closes = closes[:signal_idx + 1]
+        vols   = vols[:signal_idx + 1]
+        times  = times[:signal_idx + 1]
+        n      = len(closes)
+
         rsi_vals = _rsi_series(closes, 14)
 
         # ── Binance-style colors ───────────────────────────────────────────────
@@ -1023,8 +1180,8 @@ async def _generate_signal_chart(asset: str, timeframe: str, signal: dict) -> by
         OB_C  = UP if is_long else DOWN
         ob_label = "OB Bullish" if is_long else "OB Bearish"
 
-        fig = plt.figure(figsize=(14, 10), facecolor=BG)
-        gs  = fig.add_gridspec(3, 1, height_ratios=[5, 1, 1.5], hspace=0.02)
+        fig = plt.figure(figsize=(16, 9), facecolor=BG)
+        gs  = fig.add_gridspec(3, 1, height_ratios=[6.2, 1.0, 1.25], hspace=0.025)
         ax  = fig.add_subplot(gs[0])
         axv = fig.add_subplot(gs[1], sharex=ax)
         axr = fig.add_subplot(gs[2], sharex=ax)
@@ -1041,7 +1198,7 @@ async def _generate_signal_chart(asset: str, timeframe: str, signal: dict) -> by
             a.xaxis.grid(True, color=GRID, linewidth=0.3, alpha=0.3)
 
         # ── Candlesticks ────────────────────────────────────────────────────────
-        W = 0.55
+        W = 0.64
         price_range = max(highs) - min(lows) if highs else 1.0
         for i in range(n):
             col = UP if closes[i] >= opens[i] else DOWN
@@ -1052,13 +1209,9 @@ async def _generate_signal_chart(asset: str, timeframe: str, signal: dict) -> by
                 boxstyle="square,pad=0", facecolor=col, edgecolor=col,
                 linewidth=0, zorder=3)
             ax.add_patch(rect)
-            axv.bar(i, vols[i] / 1e6, color=col, alpha=0.6, width=0.55)
+            axv.bar(i, vols[i] / 1e6, color=col, alpha=0.6, width=0.64)
 
-        # ── EMAs ────────────────────────────────────────────────────────────────
         xs = list(range(n))
-        ax.plot(xs, ema21, color="#c97cff", linewidth=1.4, label="EMA 21", zorder=4)
-        ax.plot(xs, ema50, color="#ff9f43", linewidth=1.2, label="EMA 50", zorder=4)
-        ax.plot(xs, ema200, color="#2196f3", linewidth=1.5, label="EMA 200", zorder=4)
 
         # ── Zona OB ─────────────────────────────────────────────────────────────
         if sl and entry:
@@ -1074,20 +1227,155 @@ async def _generate_signal_chart(asset: str, timeframe: str, signal: dict) -> by
             ax.text(ob_x0 + 0.5, max(ob_bot, ob_top) + price_range * 0.004, ob_label,
                     color=OB_C, fontsize=7, fontweight="bold", va="bottom")
 
+        # ════════ tendência (regressão) + figura + alvos projetados ══════════
+        FUTURE  = 16                       # espaço à direita (menor → menos exagero)
+        EXT     = 9                        # avanço da linha de tendência rumo ao possível final do movimento
+        RES_C   = "#ff5f6d"                # resistência — tom de venda (alinhado ao DOWN)
+        SUP_C   = "#2ecc71"                # suporte — tom de compra (alinhado ao UP)
+        PROJ_C  = "#36c5f0"                # azul claro do caminho projetado
+        import matplotlib.patheffects as _pe
+        _GLOW = [_pe.withStroke(linewidth=3.4, foreground=BG, alpha=0.55)]
+        figura  = ""
+        WIN = min(n, 80)                   # janela ampla — acompanha o início real do movimento
+        _i0 = n - WIN
+        _sh  = [i for i in _chart_swings(highs, "high") if i >= _i0]
+        _slw = [i for i in _chart_swings(lows,  "low")  if i >= _i0]
+        # Linhas estruturais: pares de pivôs com mais toques e menos rompimentos.
+        # A tolerância acompanha a volatilidade recente para não ajustar ruído.
+        _max_slope = (price_range / max(WIN, 1)) * 1.2
+        recent_ranges = [highs[i] - lows[i] for i in range(max(0, n - 20), n)]
+        _tol = max(
+            (sum(recent_ranges) / max(len(recent_ranges), 1)) * 0.32,
+            price_range * 0.006,
+        )
+        resistance = _chart_fit_boundary(highs, _sh, "high", _i0, _tol, _max_slope)
+        support = _chart_fit_boundary(lows, _slw, "low", _i0, _tol, _max_slope)
+
+        # Sanidade: a linha ajustada pode ter "touches" ok nos pivôs esparsos mas
+        # ainda assim se afastar muito do preço atual ao alcançar o candle mais
+        # recente (ex: fit numa perna antiga do movimento, extrapolado por cima da
+        # consolidação toda) — descarta nesse caso em vez de desenhar uma diagonal
+        # desconectada da estrutura visível.
+        _local_avg_range = sum(recent_ranges) / max(len(recent_ranges), 1)
+        _max_dev = max(_local_avg_range * 5.0, price_range * 0.10)
+        _cur_price = closes[-1]
+        if resistance and abs((resistance[0] * (n - 1) + resistance[1]) - _cur_price) > _max_dev:
+            resistance = None
+        if support and abs((support[0] * (n - 1) + support[1]) - _cur_price) > _max_dev:
+            support = None
+
+        # ── Suporte/Resistência HORIZONTAL forte (nível testado ≥2x) ─────────
+        # Diferente da linha diagonal de tendência: aqui é uma faixa de preço
+        # fixa onde o mercado já reagiu mais de uma vez — cor neutra pra não
+        # confundir com as linhas diagonais (vermelho/verde) nem com Entry/SL/TP.
+        LVL_RES_C = "#ffb454"   # âmbar — resistência horizontal
+        LVL_SUP_C = "#5b9bd5"   # azul aço — suporte horizontal
+        strong_res = _chart_horizontal_level(highs, _sh, _i0, _tol, _cur_price, "res")
+        strong_sup = _chart_horizontal_level(lows, _slw, _i0, _tol, _cur_price, "sup")
+        _lvl_x0 = max(0, n - WIN)
+        if strong_res:
+            _lvl_price, _lvl_touches = strong_res
+            ax.plot([_lvl_x0, n - 1], [_lvl_price, _lvl_price],
+                    color=LVL_RES_C, linewidth=1.3, linestyle="-", alpha=0.75, zorder=3)
+            ax.text(_lvl_x0, _lvl_price + price_range * 0.006,
+                    f"Resistência forte ({_lvl_touches}x)", color=LVL_RES_C,
+                    fontsize=7.3, fontweight="bold", va="bottom", ha="left")
+        if strong_sup:
+            _lvl_price, _lvl_touches = strong_sup
+            ax.plot([_lvl_x0, n - 1], [_lvl_price, _lvl_price],
+                    color=LVL_SUP_C, linewidth=1.3, linestyle="-", alpha=0.75, zorder=3)
+            ax.text(_lvl_x0, _lvl_price - price_range * 0.006,
+                    f"Suporte forte ({_lvl_touches}x)", color=LVL_SUP_C,
+                    fontsize=7.3, fontweight="bold", va="top", ha="left")
+
+        if resistance and support:
+            mr, br, rx, _ = resistance
+            ms, bs, sx, _ = support
+            figura = _chart_classify_figure(ms, mr, entry)
+            x_lo = min(rx[0], sx[0])
+            # Limita a extensão futura a um avanço curto (EXT) — a linha não
+            # invade a zona de projeção/alvos, onde já há texto e setas.
+            x_hi = n + EXT
+            if abs(ms - mr) > 1e-12:
+                cross_x = (br - bs) / (ms - mr)
+                if n - 2 <= cross_x < x_hi:
+                    x_hi = cross_x
+            ax.plot([x_lo, x_hi], [mr * x_lo + br, mr * x_hi + br],
+                    color=RES_C, linewidth=2.0, alpha=0.95, zorder=4,
+                    path_effects=_GLOW)
+            ax.plot([x_lo, x_hi], [ms * x_lo + bs, ms * x_hi + bs],
+                    color=SUP_C, linewidth=2.0, alpha=0.95, zorder=4,
+                    path_effects=_GLOW)
+            ax.scatter(rx, [highs[i] for i in rx], s=22, color=RES_C,
+                       edgecolors=BG, linewidths=0.7, alpha=0.95, zorder=6)
+            ax.scatter(sx, [lows[i] for i in sx], s=22, color=SUP_C,
+                       edgecolors=BG, linewidths=0.7, alpha=0.95, zorder=6)
+
+        # zona-alvo + caminho projetado SUAVE (espalhado por todo o futuro)
+        if entry and (tp1 or tp2):
+            tgt = tp2 or tp1
+            same_tp = bool(tp1 and tp2 and abs(tp1 - tp2) <= entry * 1e-6)
+            z_lo, z_hi = (entry, tgt) if is_long else (tgt, entry)
+            ax.add_patch(mpatches.Rectangle(
+                (n - 0.5, z_lo), FUTURE, z_hi - z_lo,
+                facecolor=(UP if is_long else DOWN), alpha=0.05,
+                edgecolor="none", zorder=1))
+            _dip = (sl - entry) * 0.20 if sl else entry * (-0.0015 if is_long else 0.0015)
+            if same_tp or not tp1:
+                _px = [n - 1, n + 3, n + 8, n + 12, n + FUTURE]
+                _py = [entry, entry + _dip, entry + (tgt - entry) * 0.55,
+                       entry + (tgt - entry) * 0.42, tgt]
+            else:
+                _px = [n - 1, n + 3, n + 8, n + 11, n + FUTURE]
+                _py = [entry, entry + _dip, tp1, tp1 - (tp1 - entry) * 0.25, tp2]
+            ax.plot(_px, _py, color=PROJ_C, linewidth=2.1,
+                    linestyle=(0, (4, 3)), zorder=6)
+            ax.annotate("", xy=(_px[-1], _py[-1]), xytext=(_px[-2], _py[-2]),
+                        arrowprops=dict(arrowstyle="-|>", color=PROJ_C, lw=1.6,
+                                        mutation_scale=14), zorder=6)
+            # Rótulo no início do caminho (perto do "dip"). O offset fixo de 5%
+            # do price_range falhava quando Entry/SL/TP ficam comprimidos numa
+            # faixa estreita (range total inflado por um movimento antigo no
+            # histórico) — em vez disso, empurra o rótulo pra longe de qualquer
+            # nível Entry/SL/TP1/TP2 que esteja realmente por perto.
+            _occupied_lvls = sorted({y for y in [entry, sl, tp1, tp2] if y})
+            _label_gap = price_range * 0.035
+            projection_x = _px[1]
+            _proj_dir = 1 if is_long else -1
+            projection_y = _py[1] + _proj_dir * price_range * 0.05
+            _tries = 0
+            while any(abs(projection_y - lvl) < _label_gap for lvl in _occupied_lvls) and _tries < 8:
+                projection_y += _proj_dir * _label_gap
+                _tries += 1
+            ax.text(
+                projection_x, projection_y, "Projeção esperada",
+                color=PROJ_C, fontsize=8.2, fontweight="bold",
+                ha="left", va="bottom" if is_long else "top",
+                bbox=dict(facecolor=BG, alpha=0.78, edgecolor=PROJ_C, linewidth=0.6, pad=2.0),
+            )
+
         # ── Linhas Entry / SL / TP (full-width, label no lado direito) ───────────
-        x1 = n + 0.3
+        x1 = n + FUTURE + 0.3
         px_off = price_range * 0.006
 
         def hline_full(y, color, ls, lw, label):
             ax.axhline(y, color=color, linewidth=lw, linestyle=ls, zorder=5, alpha=0.9)
             ax.text(x1 - 0.5, y + px_off, label, color=color,
-                    fontsize=7.5, fontweight="bold", va="bottom", ha="right")
+                    fontsize=9.2, fontweight="bold", va="bottom", ha="right")
 
         dir_label = "LONG" if is_long else "SHORT"
+        # % de distância do nível em relação ao ENTRY (mostra se o alvo é realista)
+        def _pct(y):
+            return (y - entry) / entry * 100 if entry else 0.0
         if entry: hline_full(entry, SIG,  "--", 1.5, f"Entry  ${entry:,.4f}")
-        if sl:    hline_full(sl,    DOWN, "-",  1.2, f"SL  ${sl:,.4f}")
-        if tp1:   hline_full(tp1,   UP,   "--", 1.2, f"TP1  ${tp1:,.4f}")
-        if tp2:   hline_full(tp2,   UP,   ":",  1.0, f"TP2  ${tp2:,.4f}")
+        if sl:    hline_full(sl,    DOWN, "-",  1.2, f"SL  ${sl:,.4f}  ({_pct(sl):+.1f}%)")
+        # TP1==TP2 é por design (alvo único) → desenha UMA linha "TP" em vez de
+        # duas sobrepostas. Quando forem distintos, mostra TP1 e TP2 separados.
+        if tp1 and tp2 and abs(tp1 - tp2) <= entry * 1e-6:
+            hline_full(tp1, UP, "--", 1.3, f"TP  ${tp1:,.4f}  ({_pct(tp1):+.1f}%)")
+        else:
+            if tp1: hline_full(tp1, UP, "--", 1.2, f"TP1  ${tp1:,.4f}  ({_pct(tp1):+.1f}%)")
+            if tp2: hline_full(tp2, UP, ":",  1.0, f"TP2  ${tp2:,.4f}  ({_pct(tp2):+.1f}%)")
 
         # Faixas risco/retorno
         if sl and entry:
@@ -1126,6 +1414,14 @@ async def _generate_signal_chart(asset: str, timeframe: str, signal: dict) -> by
                 alpha=0.04, transform=ax.transAxes, ha="center", va="center",
                 rotation=20, fontweight="bold")
 
+        # ── Badge da figura gráfica (topo, centralizado) ─────────────────────────
+        if figura:
+            ax.text(0.5, 0.965, f"◈ {figura}", transform=ax.transAxes,
+                    color=PROJ_C, fontsize=9.5, fontweight="bold",
+                    va="top", ha="center",
+                    bbox=dict(boxstyle="round,pad=0.3", facecolor="#10243a",
+                              edgecolor=PROJ_C, linewidth=1.0, alpha=0.92))
+
         # ── Eixo X com datas reais ──────────────────────────────────────────────
         step = max(1, n // 8)
         ticks = list(range(0, n, step))
@@ -1149,7 +1445,7 @@ async def _generate_signal_chart(asset: str, timeframe: str, signal: dict) -> by
         axr.axhline(30, color="#0ecb81", linewidth=0.8, linestyle="--", alpha=0.6)
         axr.axhline(50, color=MUTED, linewidth=0.5, linestyle=":", alpha=0.4)
         axr.axhspan(30, 70, facecolor="#2b2f36", alpha=0.15)
-        axr.plot(range(n), rsi_vals, color="#f0b90b", linewidth=1.2, label="RSI 14")
+        axr.plot(range(n), rsi_vals, color="#7a5cff", linewidth=1.6, label="RSI 14")
         axr.set_ylim(15, 85)
         axr.set_yticks([30, 50, 70])
         axr.set_ylabel("RSI", color=MUTED, fontsize=7, labelpad=2)
@@ -1174,20 +1470,16 @@ async def _generate_signal_chart(asset: str, timeframe: str, signal: dict) -> by
         axv.yaxis.set_label_position("right")
 
         # ── Legenda inline (estilo Binance) ─────────────────────────────────────
-        ax.legend(loc="upper left", fontsize=8, facecolor=BG,
-                  edgecolor=GRID, labelcolor=TEXT, framealpha=0.85,
-                  borderpad=0.5, handlelength=1.5)
-
         # ── Cabeçalho estilo Binance ─────────────────────────────────────────────
         ax.set_title(
             f"{asset} / USDT  ·  {tf_disp}  ·  Binance Futures     "
             f"{dir_label}  ▪  Score {score:.0f}  ▪  R:R 1:{rr:.1f}  ▪  {conf_label}",
-            color=TEXT, fontsize=10, pad=10, loc="left", fontweight="bold")
-        ax.set_xlim(-1, n + 1.5)
+            color=TEXT, fontsize=15, pad=13, loc="left", fontweight="bold")
+        ax.set_xlim(-1, n + FUTURE + 1.5)
 
-        fig.subplots_adjust(left=0.02, right=0.88, top=0.94, bottom=0.05, hspace=0.02)
+        fig.subplots_adjust(left=0.018, right=0.89, top=0.93, bottom=0.055, hspace=0.025)
         buf = io.BytesIO()
-        plt.savefig(buf, format="png", dpi=130, facecolor=BG, bbox_inches=None)
+        plt.savefig(buf, format="png", dpi=135, facecolor=BG, bbox_inches=None)
         plt.close(fig)
         buf.seek(0)
         return buf.read()
@@ -1197,6 +1489,8 @@ async def _generate_signal_chart(asset: str, timeframe: str, signal: dict) -> by
         print(f"[CHART] Erro ao gerar grafico {asset} {timeframe}: {e}")
         print(f"[CHART] Traceback: {traceback.format_exc()}")
         return None
+
+
 
 
 # Explicações curtas para cada tag estrutural detectada no V6
