@@ -3,6 +3,16 @@ import json
 from datetime import datetime
 from database import save_setting, get_setting
 
+# ── Estrutura fixa de modos/perfis — NÃO editar em runtime ───────────────────
+# activate_mode() só pode TRANSITAR entre estes valores; qualquer string fora
+# daqui é rejeitada antes de tocar em qualquer atributo de estado (atômico:
+# ou a transição inteira é válida, ou nada muda). Isso trava a estrutura
+# definida no código contra corrupção por um chamador que esqueça de validar
+# (ex.: /config/approve chegava aqui sem checar o enum antes desta trava).
+VALID_OPERATION_MODES = {"AUTONOMOUS", "SUPERVISED", "GRID", "SINAIS"}
+VALID_RISK_PROFILES   = {"CONSERVATIVE", "NORMAL", "AGGRESSIVE"}
+
+
 class BotState:
     def __init__(self):
         # Modo de operação e perfis
@@ -78,14 +88,18 @@ class BotState:
         except Exception as e:
             print(f"[STATE] Erro ao persistir setting {key}={value} no banco: {e}")
 
-    async def activate_mode(self, mode: str, profile: str = "AGGRESSIVE", exec_mode: str = None, 
+    async def activate_mode(self, mode: str, profile: str = "AGGRESSIVE", exec_mode: str = None,
                             sinais_brain: bool = False, exec_brain: bool = False):
         """
         Método atômico definitivo para alterar modos de operação.
         Garante que NENHUMA flag de estado fique órfã ou inconsistente.
+
+        TRAVA DE SEGURANÇA: valida mode/exec_mode/profile contra a estrutura
+        fixa (VALID_OPERATION_MODES/VALID_RISK_PROFILES) ANTES de mutar
+        qualquer atributo — o bot pode TRANSITAR entre os valores definidos,
+        nunca gravar um valor fora dessa estrutura. Levanta ValueError se
+        algum valor for desconhecido; nada no estado é alterado nesse caso.
         """
-        self.mode_started_at = datetime.utcnow().isoformat()
-        
         # Converte modos pt-BR se vierem de comandos do Telegram
         _alias = {
             "supervisao": "SUPERVISED", "supervisionado": "SUPERVISED",
@@ -93,10 +107,22 @@ class BotState:
             "grid": "GRID",
             "sinais": "SINAIS", "signal": "SINAIS", "signals": "SINAIS",
         }
-        
+
         mode = _alias.get(mode.lower(), mode.upper())
         if exec_mode is not None:
             exec_mode = _alias.get(exec_mode.lower(), exec_mode.upper())
+        profile_norm = (profile or "").upper()
+
+        if mode not in VALID_OPERATION_MODES:
+            raise ValueError(f"Modo invalido: '{mode}'. Use um de {sorted(VALID_OPERATION_MODES)}.")
+        if exec_mode is not None and exec_mode not in VALID_OPERATION_MODES:
+            raise ValueError(f"Modo de execucao invalido: '{exec_mode}'. Use um de {sorted(VALID_OPERATION_MODES)}.")
+        if profile_norm not in VALID_RISK_PROFILES:
+            raise ValueError(f"Perfil invalido: '{profile}'. Use um de {sorted(VALID_RISK_PROFILES)}.")
+        profile = profile_norm
+
+        # Validação passou — só agora a transição começa a mutar estado.
+        self.mode_started_at = datetime.utcnow().isoformat()
 
         # Configura as flags com base na ativação do modo dual ou unitário
         if exec_mode is not None:

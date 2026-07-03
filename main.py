@@ -793,6 +793,35 @@ def _check_daily_loss() -> bool:
     return _daily_pnl > -_loss_limit_usdt
 
 
+_REQUIRED_PROFILES = {"CONSERVATIVE", "NORMAL", "AGGRESSIVE"}
+_REQUIRED_MODE_FIELDS = {
+    "min_score", "min_rr", "scan_interval_s", "max_open_trades", "risk_pct",
+    "timeframes", "bonus_cap", "leverage_cap", "allowed_assets",
+    "max_spread_pct", "entry_cadence_s",
+}
+
+
+def _check_structural_integrity() -> list[str]:
+    """TRAVA DE SEGURANÇA (boot): confere se MODE_SETTINGS/GRID_SETTINGS ainda
+    têm exatamente os 3 perfis esperados e os campos obrigatórios — a estrutura
+    definida em config.py é fonte da verdade única; o bot só TRANSITA entre os
+    valores dela (via activate_mode/CURRENT_MODE), nunca deveria alterar seu
+    formato. Se uma edição futura remover/renomear uma chave por engano, isso
+    aparece aqui alto no boot em vez de quebrar silenciosamente em produção.
+    Não impede o boot (fail-open é mais seguro que travar o bot inteiro por um
+    aviso), só alerta."""
+    problems = []
+    if set(MODE_SETTINGS.keys()) != _REQUIRED_PROFILES:
+        problems.append(f"MODE_SETTINGS: perfis inesperados {sorted(MODE_SETTINGS.keys())}, esperado {sorted(_REQUIRED_PROFILES)}")
+    for _prof, _cfg in MODE_SETTINGS.items():
+        _missing = _REQUIRED_MODE_FIELDS - set(_cfg.keys())
+        if _missing:
+            problems.append(f"MODE_SETTINGS[{_prof}]: campos faltando {sorted(_missing)}")
+    if set(GRID_SETTINGS.keys()) != _REQUIRED_PROFILES:
+        problems.append(f"GRID_SETTINGS: perfis inesperados {sorted(GRID_SETTINGS.keys())}, esperado {sorted(_REQUIRED_PROFILES)}")
+    return problems
+
+
 def _effective_mode_label() -> str:
     """Rótulo de modo exibido ao usuário — espelha EXATAMENTE a lógica do
     dashboard (dashboard/index.html:syncModeUI): SINAIS só conta como ativo se
@@ -3684,6 +3713,11 @@ async def _telegram_command_handler(text: str) -> str:
         if sub == "alvo" and len(args) > 1:
             try:
                 _new_alvo = float(args[1])
+                # Trava de segurança: só o VALOR muda, dentro de limites sãos — as
+                # CHAVES/estrutura de GRID_SETTINGS (perfis, campos) nunca são criadas
+                # ou removidas aqui, só o profit_target_usdt de perfis já existentes.
+                if not (0 < _new_alvo <= 1000):
+                    return "Alvo invalido. Use um valor entre 0 e 1000 (USDT)."
                 # FIX #7: atualiza GRID_SETTINGS (fonte real do monitor) + global (exibição)
                 GRID_PROFIT_TARGET_USDT = _new_alvo
                 GRID_SETTINGS["NORMAL"]["profit_target_usdt"]     = _new_alvo
@@ -4158,6 +4192,20 @@ async def lifespan(app: FastAPI):
         print(f"[STARTUP] Boot OCIOSO (single-mode) — aguardando o usuário. Banca: {BANCA_USDT} | Perfil: {CURRENT_MODE}")
     except Exception as e:
         print(f"[STARTUP] Erro ao carregar/sincronizar configurações do DB: {e}")
+
+    # TRAVA DE SEGURANÇA: valida a estrutura de MODE_SETTINGS/GRID_SETTINGS antes
+    # de operar. Ver _check_structural_integrity().
+    _struct_problems = _check_structural_integrity()
+    if _struct_problems:
+        for _p in _struct_problems:
+            print(f"[STARTUP] ⚠️ INTEGRIDADE ESTRUTURAL: {_p}")
+        asyncio.create_task(log_event("STARTUP_INTEGRITY", "; ".join(_struct_problems)))
+        asyncio.create_task(send_alert(
+            "🛑 *ALERTA DE INTEGRIDADE* — a estrutura de modos/perfis foi alterada "
+            "em relação ao esperado:\n" + "\n".join(f"• {p}" for p in _struct_problems)
+        ))
+    else:
+        print("[STARTUP] ✅ Integridade estrutural de MODE_SETTINGS/GRID_SETTINGS OK")
 
     # Popula cache de trades abertos (evita _active_trades_cache vazio após restart)
     for _t in await get_open_trades():
@@ -5557,8 +5605,19 @@ async def propose_config(
         p = perfil.upper()
         if p in ("CONSERVATIVE", "NORMAL", "AGGRESSIVE"):
             _pending_config["trading_mode"] = p
+        else:
+            raise HTTPException(400, "Perfil invalido. Use: CONSERVATIVE, NORMAL ou AGGRESSIVE")
     if mode is not None:
-        _pending_config["operation_mode"] = mode
+        _alias = {
+            "supervisao": "SUPERVISED", "supervisionado": "SUPERVISED",
+            "autonomo": "AUTONOMOUS", "automatico": "AUTONOMOUS",
+            "grid": "GRID",
+            "sinais": "SINAIS", "signal": "SINAIS", "signals": "SINAIS",
+        }
+        m = _alias.get(mode.lower(), mode.upper())
+        if m not in ("AUTONOMOUS", "SUPERVISED", "GRID", "SINAIS"):
+            raise HTTPException(400, "Modo invalido. Use: AUTONOMOUS, SUPERVISED, GRID ou SINAIS")
+        _pending_config["operation_mode"] = m
 
     return {"status": "pending", "pending": _pending_config}
 
@@ -5589,7 +5648,12 @@ async def approve_config():
     if "operation_mode" in _pending_config:
         # Se for mudar de modo enquanto já rodando, se auto_off/auto_on/etc forem ativados
         # passamos o profile ativo atual
-        await bot_state.activate_mode(_pending_config["operation_mode"], profile=CURRENT_MODE)
+        try:
+            await bot_state.activate_mode(_pending_config["operation_mode"], profile=CURRENT_MODE)
+        except ValueError as _e:
+            # Trava de segurança de activate_mode (state.py) rejeitou a transição —
+            # nada foi alterado no estado. Devolve erro claro em vez de 500 cru.
+            raise HTTPException(400, str(_e))
         sync_state_to_globals()
         applied["Modo de Operação"] = OPERATION_MODE
 
