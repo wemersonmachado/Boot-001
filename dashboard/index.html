@@ -2136,8 +2136,8 @@ async function shutdownRailway() {
     'Continuar?'
   );
   if (!step1) return;
-  const step2 = prompt('Pra confirmar de verdade, digite DESLIGAR:');
-  if (step2 !== 'DESLIGAR') { toast('Cancelado.', 'warn'); return; }
+  const step2 = confirm('Tem certeza? Essa ação vai desligar o servidor agora.');
+  if (!step2) { toast('Cancelado.', 'warn'); return; }
 
   toast('Desligando o servidor no Railway...', 'error');
   const r = await apiFetch('/bot/shutdown_railway', 'POST');
