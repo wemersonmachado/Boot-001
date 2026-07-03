@@ -2497,9 +2497,14 @@ async def job_sinais_scan():
     if OPERATION_MODE != "SINAIS":
         return
 
-    if TRADES_PER_SESSION > 0 and _sinais_session_count >= TRADES_PER_SESSION:
-        print(f"[SINAIS] Limite de {TRADES_PER_SESSION} sinais/sessao atingido — aguardando reset.")
-        return
+    # 2026-07-04: TRADES_PER_SESSION é o limite de TRADES REAIS (AUTONOMOUS/
+    # SUPERVISED/GRID) — o canal SINAIS nunca abre ordem, então não deveria
+    # compartilhar esse teto. Reusar o mesmo contador travava o canal inteiro
+    # em silêncio (só um print no log do Railway, nenhum aviso no Telegram)
+    # sempre que TRADES_PER_SESSION estivesse configurado baixo (ex.: 2) —
+    # dashboard mostrava "ativado" mas nenhum sinal novo saía. Quantidade do
+    # canal SINAIS já é 100% controlada pelo dashboard via RATE_LIMIT_PUBLIC/
+    # VIP_PER_HOUR (ver notifier.py); esse gate aqui era redundante e escondido.
 
     # Single-mode: o perfil de risco ativo (CURRENT_MODE) governa os thresholds do
     # canal de sinais — assim o seletor de perfil realmente afeta os sinais.
@@ -2694,8 +2699,6 @@ async def job_sinais_scan():
 
     from risk_manager import get_leverage as _get_lev
     for signal_dict, pd_info in to_send:
-        if TRADES_PER_SESSION > 0 and _sinais_session_count >= TRADES_PER_SESSION:
-            break
         if not signal_dict.get("leverage"):
             signal_dict["leverage"] = _get_lev(signal_dict.get("asset", ""))
         signal_dict["perfil"] = scan_mode  # NORMAL | AGGRESSIVE
