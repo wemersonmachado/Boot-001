@@ -1186,8 +1186,11 @@ input:checked + .slider:before {
 <script>
 'use strict';
 
-// API: relativo quando servido pelo FastAPI (porta 8000), absoluto caso contrário
-const API = 'http://127.0.0.1:8000';
+// API: sempre relativo — a mesma instância FastAPI que serve este HTML também
+// serve os endpoints, seja local (porta 8000) ou no Railway. Um valor absoluto
+// fixo em 127.0.0.1 quebrava o dashboard sempre que aberto fora do PC que roda
+// o bot local (ex: acessando o Railway com o bot local desligado).
+const API = '';
 
 // ════ PERFIS DE RISCO (3 perfis) ════
 const PROFILE_BTN = { CONSERVATIVE: 'ob-cons', NORMAL: 'ob-norm', AGGRESSIVE: 'ob-aggr' };
@@ -2416,6 +2419,10 @@ document.addEventListener('DOMContentLoaded', () => {
   loadBrainStatus();
   _loadBacktestStrategies();
   setInterval(loadBalance,       8000);
+  // loadSettings só rodava 1x no carregamento — se essa chamada falhasse (rede
+  // lenta, hiccup passageiro), o painel de Modo ficava travado em "Desligado"
+  // pra sempre, mesmo com o bot ativo. Agora repolla como os outros cards.
+  setInterval(loadSettings,     20000);
   setInterval(loadMarket,       10000);
   setInterval(loadActiveTrades,  5000);
   setInterval(loadSignals,      15000);
