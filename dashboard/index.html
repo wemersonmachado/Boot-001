@@ -706,6 +706,7 @@ input:checked + .slider:before {
       <button class="qb pause" onclick="quickPause()">&#9646;&#9646; Pausar Bot</button>
       <button class="qb stop"  onclick="quickStop()">&#9632; Parar Bot</button>
       <button class="qb reset" onclick="quickReset()">&#8635; Resetar Bot</button>
+      <button class="qb stop" style="background:#3a0d0d;border-color:#7a1f1f" onclick="shutdownRailway()">&#9211; Desligar Servidor (Railway)</button>
     </div>
     <div class="ptog">
       <span class="ptog-lbl">Paper Trading (simulação — sem dinheiro real)</span>
@@ -2122,6 +2123,28 @@ async function quickStop() {
   if (r) {
     toast('Bot PARADO — sinais e ordens bloqueados.', 'error');
     loadSettings();
+  }
+}
+
+async function shutdownRailway() {
+  const step1 = confirm(
+    'DESLIGAR O SERVIDOR NO RAILWAY?\n\n' +
+    'Isso é DIFERENTE de "Parar Bot" — vai desligar o container inteiro, ' +
+    'economizando o custo do Railway.\n\n' +
+    'IRREVERSÍVEL POR AQUI: o dashboard vai parar de responder. Só liga de ' +
+    'novo indo no painel do Railway (Deployments → Redeploy).\n\n' +
+    'Continuar?'
+  );
+  if (!step1) return;
+  const step2 = prompt('Pra confirmar de verdade, digite DESLIGAR:');
+  if (step2 !== 'DESLIGAR') { toast('Cancelado.', 'warn'); return; }
+
+  toast('Desligando o servidor no Railway...', 'error');
+  const r = await apiFetch('/bot/shutdown_railway', 'POST');
+  if (r) {
+    toast(r.message || 'Servidor desligando — religue pelo painel do Railway.', 'error');
+  } else {
+    toast('Falha ao desligar (ou já desligou — verifique o painel do Railway).', 'error');
   }
 }
 async function quickReset() {

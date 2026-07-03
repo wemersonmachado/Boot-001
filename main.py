@@ -6001,6 +6001,75 @@ async def resume_bot():
     return {"status": "running", "bot_paused": False, "paper_trading": PAPER_TRADING, "sinais_enabled": SINAIS_ENABLED}
 
 
+# IDs fixos do projeto/serviço no Railway (não são segredo, aparecem na própria URL
+# do painel) — só o RAILWAY_PROJECT_TOKEN (env var) é sensível.
+_RAILWAY_PROJECT_ID     = "cba184f2-5988-46c5-977f-4af22e443014"
+_RAILWAY_SERVICE_ID     = "58815b1d-9515-460a-816c-f22d4aa21d27"
+_RAILWAY_ENVIRONMENT_ID = "7d91ba84-8e1b-41ee-a45f-971c7ac65474"
+_RAILWAY_GRAPHQL_URL    = "https://backboard.railway.com/graphql/v2"
+
+
+@app.post("/bot/shutdown_railway")
+async def shutdown_railway_service():
+    """Desliga o SERVIÇO de verdade no Railway (para o container, não só o bot em
+    memória) via API pública do Railway. Diferente de /bot/pause: isso economiza o
+    custo do Railway enquanto desligado, mas é IRREVERSÍVEL por aqui — o dashboard
+    fica inacessível até religar manualmente pelo painel do Railway (Deployments →
+    Redeploy no último deployment)."""
+    import aiohttp
+    token = os.environ.get("RAILWAY_PROJECT_TOKEN")
+    if not token:
+        raise HTTPException(400, "RAILWAY_PROJECT_TOKEN não configurado nas variáveis do serviço.")
+
+    headers = {"Project-Access-Token": token, "Content-Type": "application/json"}
+    async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=15)) as session:
+        # 1) Acha o deployment ativo (mais recente com status SUCCESS)
+        q = {
+            "query": "query deployments($input: DeploymentListInput!) { "
+                     "deployments(input: $input, first: 5) { edges { node { id status } } } }",
+            "variables": {"input": {
+                "projectId": _RAILWAY_PROJECT_ID,
+                "environmentId": _RAILWAY_ENVIRONMENT_ID,
+                "serviceId": _RAILWAY_SERVICE_ID,
+            }},
+        }
+        async with session.post(_RAILWAY_GRAPHQL_URL, json=q, headers=headers) as r:
+            data = await r.json()
+        edges = (data.get("data") or {}).get("deployments", {}).get("edges", [])
+        active_id = next((e["node"]["id"] for e in edges if e["node"]["status"] == "SUCCESS"), None)
+        if not active_id:
+            raise HTTPException(500, f"Não achei o deployment ativo no Railway: {data}")
+
+    # Avisa ANTES de desligar — depois disso o bot não consegue mais mandar nada.
+    await send_alert(
+        "🛑 *DESLIGANDO O SERVIÇO NO RAILWAY* — acionado pelo dashboard.\n"
+        "O bot e o dashboard vão parar de responder em instantes.\n"
+        "Pra religar: painel do Railway → Deployments → Redeploy no último deployment."
+    )
+    print(f"[RAILWAY] Desligando deployment {active_id} via API pública (acionado pelo dashboard)")
+
+    async def _stop_after_delay():
+        # Atraso curto pra essa resposta HTTP conseguir chegar no navegador antes
+        # do container morrer de verdade.
+        await asyncio.sleep(2)
+        m = {
+            "query": "mutation deploymentStop($id: String!) { deploymentStop(id: $id) }",
+            "variables": {"id": active_id},
+        }
+        try:
+            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=15)) as s2:
+                await s2.post(_RAILWAY_GRAPHQL_URL, json=m, headers=headers)
+        except Exception as e:
+            print(f"[RAILWAY] Erro ao chamar deploymentStop: {e}")
+
+    asyncio.create_task(_stop_after_delay())
+    return {
+        "status": "shutting_down",
+        "deployment_id": active_id,
+        "message": "Serviço será desligado em ~2s. Religue pelo painel do Railway (Deployments → Redeploy).",
+    }
+
+
 @app.post("/bot/killswitch/reset")
 async def killswitch_reset():
     """Reset manual do kill-switch -20% do modo AUTÔNOMO (libera novas entradas)."""
