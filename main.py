@@ -2022,7 +2022,7 @@ async def job_grid_scan(pairs: list = None):
             if now_ts - _grid_stale_alerted.get(sym, 0) >= _STALE_ALERT_INTERVAL:
                 hours = (now_ts - last_ts) / 3600
                 print(f"[GRID] {sym} sem ciclo completo ha {hours:.1f}h")
-                asyncio.create_task(send_grid_stale_alert(sym, hours))
+                # Notificação desativada — só abrir/fechar ordem ou atingir alvo/stop devem notificar.
                 _grid_stale_alerted[sym] = now_ts
 
     # ── Verificações globais (uma vez por ciclo, antes de iterar pares) ────────
@@ -2131,12 +2131,12 @@ async def job_grid_scan(pairs: list = None):
                 if signal.direction.value == "LONG" and strong_down and rsi_last > 55:
                     reason = f"EMA bearish 9<21<55 + RSI {rsi_last:.0f}>55"
                     print(f"[GRID] {symbol} skip — contra-trend duplo ({reason})")
-                    asyncio.create_task(send_grid_trend_alert(symbol, "LONG", rsi_last, reason))
+                    # Notificação desativada — só abrir/fechar ordem ou atingir alvo/stop devem notificar.
                     continue
                 if signal.direction.value == "SHORT" and strong_up and rsi_last < 45:
                     reason = f"EMA bullish 9>21>55 + RSI {rsi_last:.0f}<45"
                     print(f"[GRID] {symbol} skip — contra-trend duplo ({reason})")
-                    asyncio.create_task(send_grid_trend_alert(symbol, "SHORT", rsi_last, reason))
+                    # Notificação desativada — só abrir/fechar ordem ou atingir alvo/stop devem notificar.
                     continue
                 flow = _smart_flow(df15)
                 # Só bloqueia breakout extremo (era 40, agora 60 para não bloquear consolidações)
@@ -3220,10 +3220,7 @@ async def job_update_trades():
                     await asyncio.to_thread(
                         lambda: update_stop_loss(_asset, _dir, _new_stop, _get_binance_client_synced())
                     )
-                    raw_profit = trade.pnl_pct / trade.leverage
-                    asyncio.create_task(send_trailing_update(
-                        trade.asset, action["new_stop"], raw_profit
-                    ))
+                    # Notificação de trailing stop desativada — só abrir/fechar ordem ou atingir alvo/stop notificam.
                 elif action["action"] == "PARTIAL_CLOSE":
                     _asset = trade.asset
                     _dir   = trade.direction.value
@@ -4163,8 +4160,9 @@ async def lifespan(app: FastAPI):
     scheduler.add_job(job_scan_anomalies,            "interval", seconds=120, id="anomalies",         max_instances=1, coalesce=True, jitter=20)
     scheduler.add_job(_refresh_balance_cache_async,  "interval", seconds=60,  id="balance_refresh",   max_instances=1, coalesce=True, jitter=10)
     scheduler.add_job(_job_sync_binance,             "interval", seconds=120, id="sync_binance",      max_instances=1, coalesce=True, jitter=20)
-    scheduler.add_job(_job_daily_summary,            "cron",     hour=23, minute=55, id="daily_summary")
-    scheduler.add_job(_job_weekly_sinais_stats,      "cron",     day_of_week="sun", hour=20, minute=0, id="weekly_sinais")
+    # Resumo diário/semanal desativados — só abrir/fechar ordem ou atingir alvo/stop devem notificar.
+    # scheduler.add_job(_job_daily_summary,            "cron",     hour=23, minute=55, id="daily_summary")
+    # scheduler.add_job(_job_weekly_sinais_stats,      "cron",     day_of_week="sun", hour=20, minute=0, id="weekly_sinais")
     scheduler.add_job(job_grid_monitor,              "interval", seconds=45,  id="grid_monitor",      max_instances=1, coalesce=True, jitter=8)
     scheduler.add_job(job_grid_scan,                 "interval", seconds=180, id="grid_scan",         max_instances=1, coalesce=True, jitter=20)
     scheduler.add_job(job_pump_dump_scan,                "interval", seconds=120, id="pump_dump",           max_instances=1, coalesce=True, jitter=20)
@@ -4175,7 +4173,8 @@ async def lifespan(app: FastAPI):
     scheduler.add_job(_run_walk_forward_job,             "interval", hours=12,   id="walk_forward",       max_instances=1, coalesce=True)
     scheduler.add_job(_job_universe_builder,         "interval", hours=1,    id="universe_builder",   max_instances=1, coalesce=True, jitter=120)
     scheduler.add_job(job_macro_guard,               "interval", minutes=30, id="macro_guard",        max_instances=1, coalesce=True, jitter=60)
-    scheduler.add_job(job_open_positions_report,     "interval", minutes=10, id="positions_report",   max_instances=1, coalesce=True, jitter=20)
+    # Relatório periódico de posições desativado — só abrir/fechar ordem ou atingir alvo/stop devem notificar.
+    # scheduler.add_job(job_open_positions_report,     "interval", minutes=10, id="positions_report",   max_instances=1, coalesce=True, jitter=20)
     scheduler.add_job(job_circuit_breaker_watch,     "interval", seconds=30, id="circuit_breaker",    max_instances=1, coalesce=True)
     scheduler.add_job(job_autotune_score,            "interval", minutes=15, id="autotune_score",     max_instances=1, coalesce=True)
     scheduler.add_job(job_sinais_outcome_watch,      "interval", minutes=3,  id="sinais_outcome",     max_instances=1, coalesce=True, jitter=20)
