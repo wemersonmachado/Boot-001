@@ -156,8 +156,6 @@ _channel_pd_counter: dict = {"date": "", "count": 0}   # pump/dump
 
 _CHANNEL_PD_DAILY_LIMIT = 4   # pump/dump por dia
 
-_last_channel_send_time = 0.0
-
 
 def _reset_daily(counter: dict) -> None:
     today = datetime.utcnow().strftime("%Y-%m-%d")
@@ -167,21 +165,14 @@ def _reset_daily(counter: dict) -> None:
 
 
 def _channel_ok(conf_label: str, asset: str = "") -> bool:
-    """True se o sinal deve ir para o canal público (Alta + cooldown).
-    Limite diário removido (2026-06-23) — controle agora é só via limite/hora
-    configurável no dashboard (RATE_LIMIT_PUBLIC_PER_HOUR)."""
-    global _last_channel_send_time
-    if not TELEGRAM_CHANNEL_ID:
-        return False
-    # Apenas sinais de Alta qualidade
-    if conf_label != "Alta":
-        return False
-    # Cooldown de 10 minutos (600 segundos)
-    now = time.time()
-    if now - _last_channel_send_time < 600:
-        return False
-    _last_channel_send_time = now
-    return True
+    """True se o sinal deve ir para o canal público.
+    2026-07-04: removida a exigência de conf_label=='Alta' e o cooldown fixo
+    de 10min — eram um filtro invisível fora do dashboard que zerava o canal
+    público independente da config visível (RATE_LIMIT_PUBLIC_PER_HOUR e os
+    níveis de detalhe em _public_tier_pct). Qualidade agora é paridade total
+    com o canal privado (mesmos sinais, mesmos gates de signal_filters.py);
+    quantidade é 100% controlada pelo dashboard (limite/hora)."""
+    return bool(TELEGRAM_CHANNEL_ID)
 
 
 def _channel_pd_ok() -> bool:
