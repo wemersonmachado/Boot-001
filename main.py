@@ -793,6 +793,20 @@ def _check_daily_loss() -> bool:
     return _daily_pnl > -_loss_limit_usdt
 
 
+def _effective_mode_label() -> str:
+    """Rótulo de modo exibido ao usuário — espelha EXATAMENTE a lógica do
+    dashboard (dashboard/index.html:syncModeUI): SINAIS só conta como ativo se
+    o canal estiver ligado (state.sinais_enabled); senão o bot está OCIOSO,
+    igual ao badge 'Desligado' do painel. Antes, /status e /menu imprimiam o
+    OPERATION_MODE cru — dava 'Modo: SINAIS' no Telegram enquanto o dashboard
+    já mostrava 'Desligado' pro mesmo estado real, parecendo dessincronizado.
+    """
+    from state import state
+    if OPERATION_MODE == "SINAIS" and not state.sinais_enabled:
+        return "DESLIGADO (ocioso — canal Sinais off)"
+    return OPERATION_MODE
+
+
 def _entry_cadence_s() -> int:
     """Espera mínima (s) entre aberturas no modo AUTÔNOMO, por perfil (MODE_SETTINGS).
     0 = consecutivas (Conservador). 120 = Normal (2min). 180 = Agressivo (3min)."""
@@ -3374,7 +3388,7 @@ async def _telegram_command_handler(text: str) -> str:
         paper_str = "ON (simulacao)" if PAPER_TRADING else "OFF (conta REAL)"
         return (
             f"*🎛️ TRADER 001 — Painel de Controle*\n\n"
-            f"Modo atual: `{OPERATION_MODE}`\n"
+            f"Modo atual: `{_effective_mode_label()}`\n"
             f"Perfil atual: `{CURRENT_MODE}`\n"
             f"Paper: `{paper_str}`\n\n"
             f"Toque abaixo para escolher *modo* e *perfil*.\n"
@@ -3386,7 +3400,7 @@ async def _telegram_command_handler(text: str) -> str:
         brain_str = "ON" if _claude_brain_enabled else "OFF"
         return (
             f"*TRADER 001 — Menu Completo*\n"
-            f"Modo: `{OPERATION_MODE}` | Perfil: `{CURRENT_MODE}` | Brain: `{brain_str}`\n\n"
+            f"Modo: `{_effective_mode_label()}` | Perfil: `{CURRENT_MODE}` | Brain: `{brain_str}`\n\n"
             "👉 *Use `/menu` para o painel de botões* (escolher modo e perfil com 1 toque).\n\n"
             "*📊 Informacoes:*\n"
             "`/status` — Estado atual do bot\n"
@@ -3430,7 +3444,7 @@ async def _telegram_command_handler(text: str) -> str:
         paper_str   = "ON (simulacao)" if PAPER_TRADING else "OFF (real)"
         brain_str   = "ON" if _claude_brain_enabled else "OFF"
         
-        mode_desc = f"Modo: `{OPERATION_MODE}` | Perfil: `{CURRENT_MODE}` | Claude Brain: `{brain_str}`"
+        mode_desc = f"Modo: `{_effective_mode_label()}` | Perfil: `{CURRENT_MODE}` | Claude Brain: `{brain_str}`"
 
         # Estado do kill-switch -20% (modo AUTÔNOMO)
         if _auto_killswitch_tripped:
