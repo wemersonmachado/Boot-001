@@ -91,6 +91,7 @@ from database import (
     upsert_asset_profile, upsert_confluence_pattern,
     record_signal_outcome, upsert_daily_stats, get_score_adjustment,
     get_recent_trade_stats, get_recent_signal_stats, get_signal_kpi_summary,
+    get_setting, save_setting,
 )
 from notifier import (
     send_signal_alert, send_trade_opened, send_trade_closed,
@@ -480,6 +481,9 @@ async def _set_operation_mode(mode: str, *, current_mode: str = None):
         raise ValueError("Modo invalido. Use: AUTONOMOUS, SUPERVISED, GRID ou SINAIS")
     await bot_state.activate_mode(resolved, profile=current_mode if current_mode else CURRENT_MODE)
     sync_state_to_globals()
+    # Ativar um modo é intenção explícita de rodar — limpa qualquer pausa
+    # persistida para a AUTO-RETOMADA restaurar este modo após restart.
+    await save_setting("user_paused", "False")
     return resolved
 
 
@@ -3862,11 +3866,13 @@ async def _telegram_command_handler(text: str) -> str:
     # /continuar e /pausar — resposta ao CIRCUIT BREAKER (e pausa/retomada manual)
     if cmd in ("/continuar", "/continue", "/retomar"):
         BOT_PAUSED = False
+        await save_setting("user_paused", "False")  # auto-retomada volta a valer
         return _cb_resume()
     global _cb_pending
     if cmd in ("/pausar", "/pause"):
         BOT_PAUSED = True
         _cb_pending = False
+        await save_setting("user_paused", "True")   # pausa SUA sobrevive a restart
         print("[CONTROL] Pausado pelo usuário via /pausar.")
         return ("⏸️ *Bot pausado* — não abre novas entradas. Posições abertas e "
                 "monitoramento continuam. Use `/continuar` para retomar.")
@@ -3874,6 +3880,7 @@ async def _telegram_command_handler(text: str) -> str:
     if cmd in ("/parar", "/pararbot"):
         BOT_PAUSED = True
         _cb_pending = False
+        await save_setting("user_paused", "True")   # pausa SUA sobrevive a restart
         # AUDITORIA 2026-07-04: PAPER_TRADING é flag de segurança de dinheiro
         # real — sem persistir, um restart do Railway podia voltar a operar
         # com conta REAL mesmo depois do usuário ter mandado "parar tudo".
@@ -4645,21 +4652,65 @@ async def lifespan(app: FastAPI):
     try:
         await bot_state.load_from_db()
         sync_state_to_globals()
-        # SEGURANÇA (conta REAL): boota com TODOS os modos DESLIGADOS, aguardando o
-        # usuário ativar pelo dashboard. Preserva parâmetros (banca, alavancagem,
-        # perfil, watchlists) mas nada transmite nem executa até a ativação manual.
-        # SINGLE-MODE: boot OCIOSO — nenhum modo transmite/executa até o usuário
-        # ativar pelo dashboard. OPERATION_MODE é a base nominal; SINAIS_ENABLED=False
-        # mantém tudo inerte. EXEC_MODE apenas espelha o modo único ativo.
-        OPERATION_MODE    = "SINAIS"
-        EXEC_MODE         = "SINAIS"
-        DUAL_MODE_ENABLED = False      # dual mode removido (1 modo por vez)
-        SINAIS_ENABLED    = False      # canal de sinais desligado (ocioso)
-        BOT_PAUSED        = False      # bot não-pausado; ocioso é garantido por SINAIS/mode
-        # PAPER_TRADING preservado do DB (não force aqui) — simulação é sticky entre restarts.
-        set_alerts_paused(False)       # gate liberado; ativação controla o envio
-        await save_global_state_to_db()
-        print(f"[STARTUP] Boot OCIOSO (single-mode) — aguardando o usuário. Banca: {BANCA_USDT} | Perfil: {CURRENT_MODE}")
+        # ── AUTO-RETOMADA 24/7 (2026-07-04) ──────────────────────────────────
+        # Antes: todo restart (deploy, crash, manutenção do Railway) forçava o
+        # bot para OCIOSO silenciosamente — o usuário achava que estava rodando
+        # e não estava ("o bot para/pausa repentinamente"). Agora o bot RETOMA
+        # o exato modo persistido no banco e AVISA no Telegram que reiniciou.
+        #
+        # Proteção anti-crash-loop: se reiniciar 3+ vezes em 10 minutos, algo
+        # está errado (crash em série) — aí sim boota OCIOSO e alerta, para não
+        # operar dinheiro real em cima de instabilidade.
+        _now_ts = time.time()
+        try:
+            _boot_hist = json.loads(await get_setting("boot_timestamps", "[]"))
+        except Exception:
+            _boot_hist = []
+        _boot_hist = [t for t in _boot_hist if _now_ts - t < 600][-5:] + [_now_ts]
+        await save_setting("boot_timestamps", json.dumps(_boot_hist))
+        _crash_loop = len(_boot_hist) >= 3
+        _user_paused = (await get_setting("user_paused", "False")) == "True"
+
+        DUAL_MODE_ENABLED = False   # dual mode removido (1 modo por vez)
+        BOT_PAUSED        = _user_paused   # pausa intencional do usuário sobrevive a restart
+        # PAPER_TRADING preservado do DB — simulação é sticky entre restarts.
+        set_alerts_paused(False)
+
+        _was_active = ((OPERATION_MODE != "SINAIS") or SINAIS_ENABLED) and not _user_paused
+        if _user_paused and not _crash_loop:
+            OPERATION_MODE = "SINAIS"
+            EXEC_MODE      = "SINAIS"
+            SINAIS_ENABLED = False
+            await save_global_state_to_db()
+            print("[STARTUP] Boot PAUSADO — você tinha pausado/parado o bot antes do restart (pausa respeitada).")
+        elif _crash_loop and _was_active:
+            OPERATION_MODE = "SINAIS"
+            EXEC_MODE      = "SINAIS"
+            SINAIS_ENABLED = False
+            await save_global_state_to_db()
+            print(f"[STARTUP] ⚠️ CRASH-LOOP detectado ({len(_boot_hist)} boots em 10min) — boot OCIOSO por segurança.")
+            asyncio.create_task(send_alert(
+                "🛑 *Bot reiniciou várias vezes seguidas* (possível crash-loop).\n"
+                "Por segurança, bootei OCIOSO — nada opera até você reativar.\n"
+                "Verifique os logs do Railway e reative pelo dashboard ou /auto on."
+            ))
+        elif _was_active:
+            EXEC_MODE = OPERATION_MODE  # espelha o modo único ativo
+            await save_global_state_to_db()
+            _mode_lbl = OPERATION_MODE if OPERATION_MODE != "SINAIS" else "SINAIS (canal ativo)"
+            print(f"[STARTUP] ♻️ AUTO-RETOMADA: modo {_mode_lbl} restaurado após restart. Banca: {BANCA_USDT} | Perfil: {CURRENT_MODE} | Paper: {PAPER_TRADING}")
+            asyncio.create_task(send_alert(
+                f"♻️ *Bot reiniciou e RETOMOU sozinho* (deploy/restart do Railway).\n"
+                f"Modo: `{_mode_lbl}` | Perfil: `{CURRENT_MODE}` | "
+                f"Paper: `{'ON' if PAPER_TRADING else 'OFF (real)'}`\n"
+                f"_Nada precisou ser reativado manualmente._"
+            ))
+        else:
+            OPERATION_MODE = "SINAIS"
+            EXEC_MODE      = "SINAIS"
+            SINAIS_ENABLED = False
+            await save_global_state_to_db()
+            print(f"[STARTUP] Boot ocioso — nenhum modo estava ativo antes do restart. Banca: {BANCA_USDT} | Perfil: {CURRENT_MODE}")
     except Exception as e:
         print(f"[STARTUP] Erro ao carregar/sincronizar configurações do DB: {e}")
 
@@ -6568,6 +6619,8 @@ async def pause_bot():
     SINAIS_ENABLED = False
     set_alerts_paused(True)   # bloqueia QUALQUER envio ao Telegram, inclusive tasks já agendadas
     print("[BOT] Pausado via dashboard — BOT_PAUSED=True, SINAIS_ENABLED=False, Telegram bloqueado")
+    # Persistido para a AUTO-RETOMADA respeitar: pausa SUA sobrevive a restart.
+    await save_setting("user_paused", "True")
     await save_global_state_to_db()
     return {"status": "paused", "bot_paused": True, "paper_trading": PAPER_TRADING, "sinais_enabled": False}
 
@@ -6584,6 +6637,7 @@ async def resume_bot():
     print(f"[BOT] Retomado via dashboard — BOT_PAUSED=False, PAPER_TRADING={PAPER_TRADING}, SINAIS_ENABLED={SINAIS_ENABLED}, modo={OPERATION_MODE}")
     _kind = "SIMULADO (paper)" if PAPER_TRADING else "REAL"
     await send_alert(f"▶️ BOT RETOMADO — modo {OPERATION_MODE} ({CURRENT_MODE}) · execução {_kind}.")
+    await save_setting("user_paused", "False")
     await save_global_state_to_db()
     return {"status": "running", "bot_paused": False, "paper_trading": PAPER_TRADING, "sinais_enabled": SINAIS_ENABLED}
 
