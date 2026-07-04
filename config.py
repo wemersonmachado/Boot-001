@@ -8,9 +8,10 @@ BINANCE_SECRET_KEY = os.getenv("BINANCE_SECRET_KEY", "")
 BINANCE_TESTNET = os.getenv("BINANCE_TESTNET", "true").lower() == "true"
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "")
 # Senha do dashboard/API (Basic Auth em TODAS as rotas exceto /health e /webhook).
-# Sem ela, a URL pública do Railway deixaria qualquer pessoa ativar o modo
-# Autônomo/fechar posições na conta REAL via curl. Fallback: WEBHOOK_SECRET.
-DASHBOARD_PASSWORD = os.getenv("DASHBOARD_PASSWORD", "") or WEBHOOK_SECRET
+# 2026-07-04: fallback para WEBHOOK_SECRET REMOVIDO a pedido do usuário — a
+# senha só ativa se DASHBOARD_PASSWORD for definido explicitamente nas
+# Variables do Railway. Vazio = dashboard aberto (estado anterior à auditoria).
+DASHBOARD_PASSWORD = os.getenv("DASHBOARD_PASSWORD", "")
 HOST = os.getenv("HOST", "0.0.0.0")
 PORT = int(os.getenv("PORT", "8000"))
 

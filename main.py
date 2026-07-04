@@ -666,6 +666,40 @@ async def _loop_heartbeat():
             _loop_lag_max_recent = drift
 
 
+# ── Vigia de ociosidade (2026-07-04, pedido do usuário) ─────────────────────
+_idle_since: float = 0.0          # ts de quando o estado ocioso começou (0 = ativo)
+_idle_last_alert_ts: float = 0.0  # throttle do alerta (1x/30min)
+
+
+async def job_idle_watch():
+    """Alerta no Telegram se o bot ficar >10 min OCIOSO — pausado ou sem nenhum
+    modo ativo (ex.: pós-deploy, que boota desligado por segurança, e ninguém
+    religou). Complementa o job_health_watch, que já cobre o lado TÉCNICO
+    (scan travado / event loop / Binance fora) com alerta de transição."""
+    global _idle_since, _idle_last_alert_ts
+    from state import state
+    now = time.time()
+
+    idle = BOT_PAUSED or (OPERATION_MODE == "SINAIS" and not state.sinais_enabled)
+    if not idle:
+        _idle_since = 0.0
+        return
+
+    if _idle_since == 0.0:
+        _idle_since = now
+        return
+
+    idle_min = (now - _idle_since) / 60
+    if idle_min >= 10 and now - _idle_last_alert_ts > 1800:
+        _idle_last_alert_ts = now
+        motivo = "bot PAUSADO" if BOT_PAUSED else "nenhum modo ativo (canal Sinais desligado)"
+        await send_alert(
+            f"⏸️ *BOT OCIOSO há {idle_min:.0f} min* — {motivo}.\n"
+            f"Se não foi intencional (ex.: reboot pós-deploy), ative um modo "
+            f"no dashboard ou use /auto sinais."
+        )
+
+
 async def job_health_watch():
     """
     Roda a cada 5 min e checa 3 sinais de vida do bot:
@@ -4207,14 +4241,11 @@ async def lifespan(app: FastAPI):
     else:
         print("[STARTUP] ✅ Integridade estrutural de MODE_SETTINGS/GRID_SETTINGS OK")
 
-    # AUDITORIA 2026-07-04: alerta alto se a API estiver SEM senha (URL pública!)
+    # Autenticação opcional (2026-07-04: senha desativada a pedido do usuário —
+    # define DASHBOARD_PASSWORD nas Variables do Railway para religar; aviso
+    # fica só no log para não spammar o Telegram a cada deploy).
     if not _DASH_PWD:
-        print("[STARTUP] 🛑 API SEM AUTENTICAÇÃO — configure DASHBOARD_PASSWORD (ou WEBHOOK_SECRET) nas Variables do Railway!")
-        asyncio.create_task(send_alert(
-            "🛑 *SEGURANÇA*: o dashboard/API está SEM SENHA — qualquer pessoa com a URL "
-            "pode controlar o bot (conta REAL). Configure `DASHBOARD_PASSWORD` nas "
-            "Variables do Railway e redeploy."
-        ))
+        print("[STARTUP] ⚠️ Dashboard/API SEM senha (escolha do usuário). Defina DASHBOARD_PASSWORD nas Variables para religar a autenticação.")
     else:
         print("[STARTUP] ✅ Basic Auth ativo no dashboard/API (exceto /health e /webhook)")
 
@@ -4258,6 +4289,7 @@ async def lifespan(app: FastAPI):
     scheduler.add_job(_job_correlation_refresh,      "interval", minutes=30, id="correlation",        max_instances=1, coalesce=True, jitter=60)
     scheduler.add_job(job_pairs_arbitrage,           "interval", minutes=15, id="pairs_arbitrage",      max_instances=1, coalesce=True, jitter=30)
     scheduler.add_job(job_health_watch,              "interval", minutes=5,  id="health_watch",       max_instances=1, coalesce=True, jitter=15)
+    scheduler.add_job(job_idle_watch,                "interval", minutes=2,  id="idle_watch",         max_instances=1, coalesce=True, jitter=10)
     scheduler.add_job(job_db_prune,                  "cron", hour=4, minute=10, id="db_prune",        max_instances=1, coalesce=True)
     scheduler.start()
     asyncio.create_task(_loop_heartbeat())
