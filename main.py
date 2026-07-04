@@ -334,17 +334,105 @@ def _audit_settings_sync() -> list[str]:
     return problems
 
 
+# ── TRAVA DE SEGURANÇA — camada 2: faixas válidas por configuração (2026-07-04) ──
+# A camada acima só pega "memória != banco" — não pega um valor que os DOIS
+# concordam mas que é absurdo (ex.: alavancagem 40x salva por engano em algum
+# lugar antigo, exposição 150%, banca negativa). Aqui cada configuração tem um
+# range plausível; violar o range dispara alerta mesmo com memória==banco.
+# Isso NÃO trava/reverte nada sozinho — só avisa, igual à camada 1.
+_SETTINGS_RANGES = {
+    "BANCA_USDT":              (0.0, 100000.0),
+    "EXPOSURE_PCT":            (0.0, 100.0),
+    "TRADES_PER_SESSION":      (0, 50),
+    "DAILY_TARGET_USDT":       (0.0, 100000.0),
+    "LEVERAGE_OVERRIDE":       (0, 25),
+    "GRID_LEVERAGE":           (1, 25),
+    "GRID_MAX_CONCURRENT":     (0, 20),
+    "GRID_PROFIT_TARGET_USDT": (0.0, 100000.0),
+}
+
+
+def _audit_settings_ranges() -> list[str]:
+    """Retorna violações de faixa plausível. Vazio = todos os valores dentro
+    do esperado (independente de estarem ou não sincronizados com o banco)."""
+    problems = []
+    g = globals()
+    for global_name, (lo, hi) in _SETTINGS_RANGES.items():
+        val = g.get(global_name)
+        if val is None:
+            continue
+        try:
+            fval = float(val)
+        except (TypeError, ValueError):
+            problems.append(f"{global_name}={val!r} não é numérico (esperado entre {lo} e {hi})")
+            continue
+        if not (lo <= fval <= hi):
+            problems.append(f"{global_name}={val!r} fora da faixa esperada [{lo}, {hi}]")
+    return problems
+
+
+def _audit_structural_consistency() -> list[str]:
+    """Camada 3: estados que a lógica do bot nunca deveria permitir juntos,
+    mesmo que cada campo individualmente esteja "válido". Pega inconsistência
+    entre módulos (modo/perfil/execução) que as camadas 1 e 2 não enxergam."""
+    problems = []
+
+    if OPERATION_MODE not in VALID_OPERATION_MODES:
+        problems.append(f"OPERATION_MODE={OPERATION_MODE!r} fora do enum {sorted(VALID_OPERATION_MODES)}")
+    if EXEC_MODE not in VALID_OPERATION_MODES:
+        problems.append(f"EXEC_MODE={EXEC_MODE!r} fora do enum {sorted(VALID_OPERATION_MODES)}")
+    if CURRENT_MODE not in VALID_RISK_PROFILES:
+        problems.append(f"CURRENT_MODE={CURRENT_MODE!r} fora do enum {sorted(VALID_RISK_PROFILES)}")
+    if SINAIS_PROFILE not in VALID_RISK_PROFILES:
+        problems.append(f"SINAIS_PROFILE={SINAIS_PROFILE!r} fora do enum {sorted(VALID_RISK_PROFILES)}")
+
+    # Modo SINAIS ativo mas alertas desligados por >10min é coberto pelo
+    # job_idle_watch — aqui só o par logicamente impossível:
+    if OPERATION_MODE != "SINAIS" and SINAIS_ENABLED and not DUAL_MODE_ENABLED:
+        problems.append(
+            f"OPERATION_MODE={OPERATION_MODE!r} mas SINAIS_ENABLED=True fora do modo SINAIS/dual "
+            "(canal de sinais achando que está ativo num modo que não é o dele)"
+        )
+
+    for name, wl in (
+        ("SUPERVISED_WATCHLIST", SUPERVISED_WATCHLIST),
+        ("AUTONOMOUS_WATCHLIST", AUTONOMOUS_WATCHLIST),
+        ("SINAIS_WATCHLIST", SINAIS_WATCHLIST),
+        ("GRID_PAIRS", GRID_PAIRS),
+    ):
+        if not isinstance(wl, list):
+            problems.append(f"{name} não é uma lista (tipo {type(wl).__name__}) — corrompido")
+
+    return problems
+
+
 async def job_settings_integrity_watch():
-    """Roda a cada 10 min: se alguma configuração divergir entre memória e
-    banco, avisa no Telegram — sinal de que um endpoint novo esqueceu de
-    persistir (a mesma classe de bug já corrigida 3x hoje)."""
+    """Roda a cada 10 min: 3 camadas de checagem —
+    (1) memória vs. banco (persistência), (2) faixa plausível de valores,
+    (3) consistência estrutural entre módulos. Qualquer uma que falhar avisa
+    no Telegram; nenhuma delas altera ou reverte estado sozinha."""
     problems = _audit_settings_sync()
+    range_problems = _audit_settings_ranges()
+    structural_problems = _audit_structural_consistency()
+
     if problems:
         print(f"[SETTINGS-INTEGRITY] {len(problems)} divergencia(s) encontrada(s): {problems}")
         await send_alert(
             "🛑 *TRAVA DE SEGURANÇA — configuração não persistindo*\n"
             "Vai sumir no próximo deploy se não for corrigido:\n"
             + "\n".join(f"• {p}" for p in problems)
+        )
+    if range_problems:
+        print(f"[SETTINGS-RANGE] {len(range_problems)} valor(es) fora da faixa: {range_problems}")
+        await send_alert(
+            "⚠️ *TRAVA DE SEGURANÇA — valor fora da faixa esperada*\n"
+            + "\n".join(f"• {p}" for p in range_problems)
+        )
+    if structural_problems:
+        print(f"[SETTINGS-STRUCTURAL] {len(structural_problems)} inconsistencia(s): {structural_problems}")
+        await send_alert(
+            "🛑 *TRAVA DE SEGURANÇA — estado estrutural inconsistente*\n"
+            + "\n".join(f"• {p}" for p in structural_problems)
         )
 
 
@@ -6524,14 +6612,24 @@ async def health():
 
 @app.get("/selftest/settings")
 async def selftest_settings():
-    """Checagem sob demanda da trava de integridade memória↔banco (ver
-    _audit_settings_sync). Rode isso depois de adicionar qualquer novo
-    endpoint /settings/* ou comando Telegram que altere configuração."""
-    problems = _audit_settings_sync()
+    """Checagem sob demanda das 3 camadas da trava de segurança:
+    (1) memória vs. banco, (2) faixa plausível de valores,
+    (3) consistência estrutural entre módulos. Rode isso depois de
+    adicionar qualquer novo endpoint /settings/* ou comando Telegram
+    que altere configuração."""
+    sync_problems = _audit_settings_sync()
+    range_problems = _audit_settings_ranges()
+    structural_problems = _audit_structural_consistency()
+    all_problems = sync_problems + range_problems + structural_problems
     return {
-        "ok": not problems,
+        "ok": not all_problems,
         "checked": len(_SETTINGS_SYNC_REGISTRY),
-        "problems": problems,
+        "problems": all_problems,
+        "detail": {
+            "sync": sync_problems,
+            "range": range_problems,
+            "structural": structural_problems,
+        },
     }
 
 
