@@ -5392,6 +5392,9 @@ async def get_sinais_rate_limit():
     return {
         "public_per_hour": notifier.RATE_LIMIT_PUBLIC_PER_HOUR,
         "vip_per_hour": notifier.RATE_LIMIT_VIP_PER_HOUR,
+        # Uso real na janela móvel de 1h — se 'sent' está longe do limite, o
+        # gargalo NÃO é a cota: é o pipeline (cooldowns/filtros/mercado).
+        **notifier.get_hourly_usage(),
     }
 
 

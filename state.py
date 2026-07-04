@@ -1,7 +1,16 @@
 import asyncio
 import json
+import os
 from datetime import datetime
 from database import save_setting, get_setting
+
+# Defaults dos limites de sinais/hora — sobrescreva pelas ENVS nas Variables do
+# Railway (SINAIS_MAX_HOUR_PUBLIC / SINAIS_MAX_HOUR_VIP). Motivo (2026-07-04):
+# o SQLite do Railway ZERA a cada deploy (sem volume), então o valor salvo pelo
+# dashboard voltava ao default 10/30 em todo restart — o usuário reajustava e a
+# "nova diretriz" sumia sozinha. Com a env, o SEU padrão sobrevive ao deploy.
+_DEF_MAX_HOUR_PUBLIC = os.getenv("SINAIS_MAX_HOUR_PUBLIC", "10")
+_DEF_MAX_HOUR_VIP    = os.getenv("SINAIS_MAX_HOUR_VIP", "30")
 
 # ── Estrutura fixa de modos/perfis — NÃO editar em runtime ───────────────────
 # activate_mode() só pode TRANSITAR entre estes valores; qualquer string fora
@@ -35,8 +44,8 @@ class BotState:
         self.daily_target_usdt = 0.0
 
         # Limite de sinais por hora, por canal (0 = sem limite)
-        self.sinais_max_hour_public = 10
-        self.sinais_max_hour_vip    = 30
+        self.sinais_max_hour_public = int(_DEF_MAX_HOUR_PUBLIC)
+        self.sinais_max_hour_vip    = int(_DEF_MAX_HOUR_VIP)
 
         # % de cada nível de detalhe (1-4) do canal PÚBLICO — não afeta o VIP.
         self.public_tier_pct = {1: 65, 2: 20, 3: 10, 4: 5}
@@ -66,8 +75,8 @@ class BotState:
             self.exposure_pct = float(await get_setting("exposure_pct", "10.0"))
             self.trades_per_session = int(await get_setting("trades_per_session", "0"))
             self.daily_target_usdt = float(await get_setting("daily_target_usdt", "0.0"))
-            self.sinais_max_hour_public = int(await get_setting("sinais_max_hour_public", "10"))
-            self.sinais_max_hour_vip = int(await get_setting("sinais_max_hour_vip", "30"))
+            self.sinais_max_hour_public = int(await get_setting("sinais_max_hour_public", _DEF_MAX_HOUR_PUBLIC))
+            self.sinais_max_hour_vip = int(await get_setting("sinais_max_hour_vip", _DEF_MAX_HOUR_VIP))
             try:
                 _raw_pct = await get_setting("public_tier_pct", json.dumps(self.public_tier_pct))
                 self.public_tier_pct = {int(k): int(v) for k, v in json.loads(_raw_pct).items()}

@@ -77,6 +77,19 @@ def _pick_public_tier() -> int:
     return best_tier
 
 
+def get_hourly_usage() -> dict:
+    """Uso real da cota na janela móvel de 1h — para o dashboard mostrar
+    'enviados/limite' e o usuário ver se o gargalo é a cota ou o pipeline."""
+    now = time.time()
+    for dq in (_sent_hour_public, _sent_hour_vip):
+        while dq and now - dq[0] > 3600:
+            dq.popleft()
+    return {
+        "public_sent_last_hour": len(_sent_hour_public),
+        "vip_sent_last_hour":    len(_sent_hour_vip),
+    }
+
+
 def _hourly_ok(dq: deque, limit: int) -> bool:
     """True se ainda há cota na janela de 1h; já registra o envio (rolling window)."""
     if limit <= 0:
