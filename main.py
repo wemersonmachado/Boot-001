@@ -215,6 +215,7 @@ LEVERAGE_OVERRIDE: int = 0      # 0 = automático (engine decide por sinal). N>0
 
 # Sincronização centralizada com o BotState
 from state import state as bot_state
+from state import VALID_OPERATION_MODES, VALID_RISK_PROFILES
 
 def sync_state_to_globals():
     """Sincroniza as variáveis de BotState para as variáveis globais do main.py."""
