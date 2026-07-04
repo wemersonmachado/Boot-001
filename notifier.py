@@ -196,7 +196,13 @@ def _is_configured() -> bool:
 
 
 async def _post(endpoint: str, data: dict) -> dict:
-    """POST para Telegram usando session persistente (reutiliza conexão TCP)."""
+    """POST para Telegram usando session persistente (reutiliza conexão TCP).
+
+    BLINDAGEM MARKDOWN (auditoria 2026-07-04): se o Telegram recusar por erro
+    de parse ("can't parse entities" — ex.: '_' solto num @handle, que já
+    derrubou o canal free uma vez), reenvia AUTOMATICAMENTE sem parse_mode.
+    Mensagem chega sem negrito, mas CHEGA — nunca mais silêncio por formatação.
+    """
     if not _is_configured():
         return {}
     try:
@@ -206,7 +212,18 @@ async def _post(endpoint: str, data: dict) -> dict:
             json=data,
             timeout=aiohttp.ClientTimeout(total=10),
         ) as r:
-            return await r.json()
+            resp = await r.json()
+            if (not resp.get("ok", True)
+                    and "parse" in str(resp.get("description", "")).lower()
+                    and data.get("parse_mode")):
+                print(f"[TELEGRAM] Parse Markdown falhou — reenviando sem formatação: {resp.get('description','')[:80]}")
+                data2 = {k: v for k, v in data.items() if k != "parse_mode"}
+                async with session.post(
+                    f"{TELEGRAM_API}/{endpoint}", json=data2,
+                    timeout=aiohttp.ClientTimeout(total=10),
+                ) as r2:
+                    return await r2.json()
+            return resp
     except aiohttp.ClientConnectorError:
         # Reconecta e tenta mais duas vezes (com pequeno delay) se a conexão/DNS falhou
         global _tg_session
