@@ -437,6 +437,246 @@ async def job_settings_integrity_watch():
         )
 
 
+# ── Ponto único de escrita das 18 configs do _SETTINGS_SYNC_REGISTRY ────────
+# Cada uma tinha DOIS caminhos independentes (endpoint FastAPI + comando
+# Telegram) que duplicavam validação e persistência — várias vezes um dos
+# dois esquecia de persistir (ver comentário da trava acima). Estas funções
+# `_set_*` são chamadas por AMBOS os caminhos: só validação + global + save.
+# Levantam ValueError com mensagem pronta para exibir ao usuário/endpoint.
+
+async def _set_current_mode(value: str):
+    """Perfil de risco: CONSERVATIVE | NORMAL | AGGRESSIVE (aceita slugs pt-BR
+    usados hoje em /modo: 'conserv...', 'agres.../aggress...', 'normal')."""
+    global CURRENT_MODE
+    v = str(value).strip().lower()
+    if "conserv" in v:
+        new = "CONSERVATIVE"
+    elif "agres" in v or "aggress" in v:
+        new = "AGGRESSIVE"
+    elif "normal" in v:
+        new = "NORMAL"
+    else:
+        new = str(value).strip().upper()
+    if new not in VALID_RISK_PROFILES:
+        raise ValueError(f"Perfil invalido. Use: conservador|normal|agressivo (atual: {CURRENT_MODE})")
+    CURRENT_MODE = new
+    _update_scan_interval()
+    await save_global_state_to_db()
+    return CURRENT_MODE
+
+
+async def _set_operation_mode(mode: str, *, current_mode: str = None):
+    """Modo de operação: AUTONOMOUS | SUPERVISED | GRID | SINAIS (aceita slugs
+    pt-BR). Delegado inteiramente a bot_state.activate_mode — não duplica a
+    lógica de single-mode aqui, só resolve o alias e valida o enum."""
+    _alias = {
+        "supervisao": "SUPERVISED", "supervisionado": "SUPERVISED",
+        "autonomo": "AUTONOMOUS", "automatico": "AUTONOMOUS",
+        "grid": "GRID",
+        "sinais": "SINAIS", "signal": "SINAIS", "signals": "SINAIS",
+    }
+    resolved = _alias.get(str(mode).lower(), str(mode).upper())
+    if resolved not in ("AUTONOMOUS", "SUPERVISED", "GRID", "SINAIS"):
+        raise ValueError("Modo invalido. Use: AUTONOMOUS, SUPERVISED, GRID ou SINAIS")
+    await bot_state.activate_mode(resolved, profile=current_mode if current_mode else CURRENT_MODE)
+    sync_state_to_globals()
+    return resolved
+
+
+async def _set_exec_mode(value: str):
+    """EXEC_MODE hoje só espelha OPERATION_MODE (ver /settings/mode) — mantido
+    aqui só para completar o registro; não tem caminho de escrita próprio."""
+    global EXEC_MODE
+    EXEC_MODE = value
+    await save_global_state_to_db()
+    return EXEC_MODE
+
+
+async def _set_sinais_enabled(enabled: bool):
+    global SINAIS_ENABLED
+    SINAIS_ENABLED = bool(enabled)
+    await save_global_state_to_db()
+    return SINAIS_ENABLED
+
+
+async def _set_sinais_profile(value: str):
+    global SINAIS_PROFILE
+    new = str(value).strip().upper()
+    if new not in VALID_RISK_PROFILES:
+        raise ValueError(f"Perfil invalido. Use: {'|'.join(sorted(VALID_RISK_PROFILES))}")
+    SINAIS_PROFILE = new
+    await save_global_state_to_db()
+    return SINAIS_PROFILE
+
+
+async def _set_banca_usdt(value):
+    global BANCA_USDT
+    try:
+        banca = round(float(value), 2)
+    except (TypeError, ValueError):
+        raise ValueError("Banca deve ser um numero (USDT)")
+    if banca < 0:
+        raise ValueError("Banca deve ser >= 0 (0 = usa saldo disponível)")
+    BANCA_USDT = banca
+    await save_global_state_to_db()
+    return BANCA_USDT
+
+
+async def _set_exposure_pct(value):
+    """Faixa 1-50%, igual ao endpoint /settings/exposure (comando Telegram
+    dedicado não existe hoje — só o endpoint escreve nesta config)."""
+    global EXPOSURE_PCT
+    try:
+        pct = float(value)
+    except (TypeError, ValueError):
+        raise ValueError("Exposição deve ser um número")
+    if pct < 1 or pct > 50:
+        raise ValueError("Exposição deve ser entre 1% e 50%")
+    EXPOSURE_PCT = round(pct, 1)
+    await save_global_state_to_db()
+    return EXPOSURE_PCT
+
+
+async def _set_trades_per_session(value):
+    global TRADES_PER_SESSION, _session_trades, _sinais_session_count
+    try:
+        count = int(value)
+    except (TypeError, ValueError):
+        raise ValueError("Uso: /limites 5  (0 = ilimitado)")
+    if count < 0:
+        raise ValueError("Use 0 para ilimitado ou valor > 0")
+    TRADES_PER_SESSION = count
+    await save_global_state_to_db()
+    return TRADES_PER_SESSION
+
+
+async def _set_daily_target_usdt(value):
+    global DAILY_TARGET_USDT
+    try:
+        target = float(value)
+    except (TypeError, ValueError):
+        raise ValueError("Meta deve ser um numero (USDT)")
+    if target < 0:
+        raise ValueError("Meta deve ser >= 0 (0 = desativada)")
+    DAILY_TARGET_USDT = round(target, 2)
+    await save_global_state_to_db()
+    return DAILY_TARGET_USDT
+
+
+async def _set_paper_trading(enabled: bool):
+    global PAPER_TRADING
+    PAPER_TRADING = bool(enabled)
+    await save_global_state_to_db()
+    return PAPER_TRADING
+
+
+async def _set_leverage_override(value):
+    global LEVERAGE_OVERRIDE
+    try:
+        lev = int(value)
+    except (TypeError, ValueError):
+        raise ValueError("Uso: valor entre 0 (automático) e 25")
+    if lev < 0 or lev > 25:
+        raise ValueError("Use 0 (automático) ou um valor entre 1 e 25")
+    LEVERAGE_OVERRIDE = lev
+    await save_global_state_to_db()
+    return LEVERAGE_OVERRIDE
+
+
+async def _set_grid_pairs(value):
+    """Aceita lista de símbolos (list[str]) ou string separada por vírgula/
+    espaço; normaliza para sufixo USDT em maiúsculas."""
+    global GRID_PAIRS
+    if isinstance(value, str):
+        raw = [p.strip() for p in value.replace(",", " ").split() if p.strip()]
+    else:
+        raw = [str(p).strip() for p in value if str(p).strip()]
+    cleaned = [p.upper() if p.upper().endswith("USDT") else p.upper() + "USDT" for p in raw]
+    GRID_PAIRS = cleaned
+    await save_global_state_to_db()
+    return GRID_PAIRS
+
+
+async def _set_grid_profit_target_usdt(value):
+    global GRID_PROFIT_TARGET_USDT
+    try:
+        target = float(value)
+    except (TypeError, ValueError):
+        raise ValueError("Alvo invalido. Use um valor entre 0 e 1000 (USDT)")
+    if not (0 <= target <= 1000):
+        raise ValueError("Alvo invalido. Use um valor entre 0 e 1000 (USDT)")
+    GRID_PROFIT_TARGET_USDT = target
+    GRID_SETTINGS["NORMAL"]["profit_target_usdt"] = target
+    GRID_SETTINGS["AGGRESSIVE"]["profit_target_usdt"] = round(target * 0.6, 2)
+    await save_global_state_to_db()
+    return GRID_PROFIT_TARGET_USDT
+
+
+async def _set_grid_leverage(value):
+    global GRID_LEVERAGE
+    try:
+        lev = int(value)
+    except (TypeError, ValueError):
+        raise ValueError("Uso: alavancagem entre 1 e 50")
+    if not (1 <= lev <= 50):
+        raise ValueError("Alavancagem grid deve ser entre 1 e 50")
+    GRID_LEVERAGE = lev
+    await save_global_state_to_db()
+    return GRID_LEVERAGE
+
+
+async def _set_grid_max_concurrent(value):
+    global GRID_MAX_CONCURRENT
+    try:
+        n = int(value)
+    except (TypeError, ValueError):
+        raise ValueError("Uso: max simultaneos entre 1 e 10")
+    if not (1 <= n <= 10):
+        raise ValueError("Max simultaneos deve ser entre 1 e 10")
+    GRID_MAX_CONCURRENT = n
+    await save_global_state_to_db()
+    return GRID_MAX_CONCURRENT
+
+
+def _clean_watchlist_symbols(symbols) -> list:
+    """Normaliza lista/string de símbolos para lista com sufixo USDT.
+    '' ou 'all' (string) = lista vazia (usa watchlist global)."""
+    if isinstance(symbols, str):
+        if not symbols or symbols.lower() == "all":
+            raw = []
+        else:
+            raw = [s.strip().upper() for s in symbols.split(",") if s.strip()]
+    else:
+        raw = [str(s).strip().upper() for s in (symbols or []) if str(s).strip()]
+    return [s if s.endswith("USDT") else s + "USDT" for s in raw]
+
+
+async def _set_mode_watchlist(mode: str, symbols):
+    """Define a watchlist de um dos 4 modos (supervised/autonomous/grid/sinais).
+    Para 'grid' com lista vazia, GRID_PAIRS não é alterado (mantém pares atuais)
+    — mesmo comportamento do endpoint /settings/watchlist original."""
+    global SUPERVISED_WATCHLIST, AUTONOMOUS_WATCHLIST, GRID_PAIRS, SINAIS_WATCHLIST
+    cleaned = _clean_watchlist_symbols(symbols)
+    m = mode.lower()
+    if m in ("supervised", "supervisionado"):
+        SUPERVISED_WATCHLIST = cleaned
+        label = "supervised"
+    elif m in ("autonomous", "autonomo"):
+        AUTONOMOUS_WATCHLIST = cleaned
+        label = "autonomous"
+    elif m == "grid":
+        if cleaned:
+            GRID_PAIRS = cleaned
+        label = "grid"
+    elif m in ("sinais", "signal", "signals"):
+        SINAIS_WATCHLIST = cleaned
+        label = "sinais"
+    else:
+        raise ValueError("mode deve ser: supervised | autonomous | grid | sinais")
+    await save_global_state_to_db()
+    return label, cleaned
+
+
 _VALID_EXEC_MODES = ("SUPERVISED", "AUTONOMOUS", "GRID", "SINAIS")
 
 def _resolve_effective_mode() -> str:
@@ -3633,12 +3873,11 @@ async def _telegram_command_handler(text: str) -> str:
     # /parar — STOP forte: pausa entradas E corta operação com dinheiro REAL (vira paper)
     if cmd in ("/parar", "/pararbot"):
         BOT_PAUSED = True
-        PAPER_TRADING = True
         _cb_pending = False
         # AUDITORIA 2026-07-04: PAPER_TRADING é flag de segurança de dinheiro
         # real — sem persistir, um restart do Railway podia voltar a operar
         # com conta REAL mesmo depois do usuário ter mandado "parar tudo".
-        await save_global_state_to_db()
+        await _set_paper_trading(True)
         print("[CONTROL] PARADO pelo usuário via /parar (BOT_PAUSED + PAPER ON).")
         return ("🛑 *Bot PARADO* — sem novas entradas e *sem operar dinheiro real* "
                 "(modo simulação ON).\n"
@@ -3812,8 +4051,7 @@ async def _telegram_command_handler(text: str) -> str:
 
         # ── Volta para SINAIS — sempre permitido, sem validacao ─────────────
         if val in ("sinais", "signal", "signals"):
-            await bot_state.activate_mode("SINAIS", profile=CURRENT_MODE)
-            sync_state_to_globals()
+            await _set_operation_mode("SINAIS")
             wl_str = ", ".join(SINAIS_WATCHLIST) if SINAIS_WATCHLIST else "watchlist global"
             return (
                 f"Modo SINAIS ativado!\n"
@@ -3894,8 +4132,7 @@ async def _telegram_command_handler(text: str) -> str:
 
             # Tudo ok (ou usuario confirmou) — ativa o modo ÚNICO (single-mode)
             if val == "on":
-                await bot_state.activate_mode("AUTONOMOUS", profile=CURRENT_MODE)
-                sync_state_to_globals()
+                await _set_operation_mode("AUTONOMOUS")
                 _reset_auto_killswitch()  # sessão autônoma limpa (kill-switch -20%)
                 return (
                     f"{summary}\n\n"
@@ -3904,16 +4141,14 @@ async def _telegram_command_handler(text: str) -> str:
                     f"Banca efetiva: ${banca_efetiva:.2f}"
                 )
             elif val == "off":
-                await bot_state.activate_mode("SUPERVISED", profile=CURRENT_MODE)
-                sync_state_to_globals()
+                await _set_operation_mode("SUPERVISED")
                 return (
                     f"{summary}\n\n"
                     f"✅ *Modo SUPERVISIONADO ativado!*\n"
                     f"Bot envia sinal e aguarda sua aprovacao antes de executar."
                 )
             elif val == "grid":
-                await bot_state.activate_mode("GRID", profile=CURRENT_MODE)
-                sync_state_to_globals()
+                await _set_operation_mode("GRID")
                 asyncio.create_task(job_grid_scan())
                 return (
                     f"{summary}\n\n"
@@ -3945,66 +4180,43 @@ async def _telegram_command_handler(text: str) -> str:
         # /grid alvo 10
         if sub == "alvo" and len(args) > 1:
             try:
-                _new_alvo = float(args[1])
-                # Trava de segurança: só o VALOR muda, dentro de limites sãos — as
-                # CHAVES/estrutura de GRID_SETTINGS (perfis, campos) nunca são criadas
-                # ou removidas aqui, só o profit_target_usdt de perfis já existentes.
-                if not (0 < _new_alvo <= 1000):
-                    return "Alvo invalido. Use um valor entre 0 e 1000 (USDT)."
-                # FIX #7: atualiza GRID_SETTINGS (fonte real do monitor) + global (exibição)
-                GRID_PROFIT_TARGET_USDT = _new_alvo
-                GRID_SETTINGS["NORMAL"]["profit_target_usdt"]     = _new_alvo
-                GRID_SETTINGS["AGGRESSIVE"]["profit_target_usdt"] = round(_new_alvo * 0.6, 2)
-                await save_global_state_to_db()  # AUDITORIA 2026-07-04
-                return (f"Alvo grid definido: ${_new_alvo:.2f} por ciclo (NORMAL) | "
-                        f"${_new_alvo * 0.6:.2f} (AGGRESSIVE)")
-            except ValueError:
-                return "Uso: /grid alvo 10"
+                value = await _set_grid_profit_target_usdt(args[1])
+            except ValueError as e:
+                return str(e)
+            return (f"Alvo grid definido: ${value:.2f} por ciclo (NORMAL) | "
+                    f"${round(value * 0.6, 2):.2f} (AGGRESSIVE)")
         # /grid pares BTC ETH SOL
         if sub == "pares" and len(args) > 1:
-            GRID_PAIRS = [p.upper() if "USDT" in p.upper() else p.upper()+"USDT" for p in args[1:]]
-            await save_global_state_to_db()  # AUDITORIA 2026-07-04
-            return f"Pares grid: {', '.join(GRID_PAIRS)}"
+            value = await _set_grid_pairs(args[1:])
+            return f"Pares grid: {', '.join(value)}"
         # /grid lev 10
         if sub == "lev" and len(args) > 1:
             try:
-                GRID_LEVERAGE = int(args[1])
-                await save_global_state_to_db()  # AUDITORIA 2026-07-04
-                return f"Alavancagem grid: {GRID_LEVERAGE}x"
+                value = await _set_grid_leverage(args[1])
             except ValueError:
                 return "Uso: /grid lev 10"
+            return f"Alavancagem grid: {value}x"
         return "Uso: /grid | /grid alvo 10 | /grid pares BTC ETH SOL | /grid lev 10"
 
     # /paper on|off
     if cmd == "/paper":
         val = args[0].lower() if args else ""
         if val == "on":
-            PAPER_TRADING = True
-            await save_global_state_to_db()  # AUDITORIA 2026-07-04: flag de dinheiro real, critico persistir
+            await _set_paper_trading(True)
             return "Paper Trading ATIVADO. Trades serao simulados sem dinheiro real."
         elif val == "off":
-            PAPER_TRADING = False
-            await save_global_state_to_db()  # AUDITORIA 2026-07-04
+            await _set_paper_trading(False)
             return "Paper Trading DESATIVADO. Bot opera com conta real."
         return f"Uso: /paper on|off  (atual: {'ON' if PAPER_TRADING else 'OFF'})"
 
     # /modo conservador|normal|agressivo
     if cmd == "/modo":
         val = args[0].lower() if args else ""
-        _new = None
-        if "conserv" in val:
-            _new = "CONSERVATIVE"
-        elif "agres" in val or "aggress" in val:
-            _new = "AGGRESSIVE"
-        elif "normal" in val:
-            _new = "NORMAL"
-        if _new:
-            CURRENT_MODE = _new
-            _update_scan_interval()
-            # AUDITORIA 2026-07-04: faltava persistir — igual /banca, /ntrades,
-            # /settings/grid e /settings/watchlist. Achado pelo próprio
-            # job_settings_integrity_watch (a trava detectou sozinha).
-            await save_global_state_to_db()
+        if val:
+            try:
+                _new = await _set_current_mode(val)
+            except ValueError as e:
+                return str(e)
             _c = MODE_SETTINGS[_new]
             return (f"Perfil de risco alterado para: `{_new}`\n"
                     f"Score>=`{_c['min_score']}` | RR>=`{_c['min_rr']}` | "
@@ -4032,50 +4244,37 @@ async def _telegram_command_handler(text: str) -> str:
     if cmd == "/banca":
         if args:
             try:
-                BANCA_USDT = round(float(args[0]), 2)
-                if BANCA_USDT < 0:
-                    return "Banca deve ser >= 0 (0 = usa saldo disponível)"
-                margin = round(BANCA_USDT / max(TRADES_PER_SESSION, 1), 2)
-                # AUDITORIA 2026-07-04: faltava persistir — /banca mudava só a
-                # variável em memória; dashboard e Telegram divergiam após
-                # qualquer restart (a mesma classe de bug do modo/sinais).
-                await save_global_state_to_db()
-                return f"Banca definida: `${BANCA_USDT:.2f}` / {TRADES_PER_SESSION} trades = `${margin:.2f}` por trade"
+                value = await _set_banca_usdt(args[0])
             except ValueError:
                 return "Uso: /banca 500  (valor em USDT)"
+            margin = round(value / max(TRADES_PER_SESSION, 1), 2)
+            return f"Banca definida: `${value:.2f}` / {TRADES_PER_SESSION} trades = `${margin:.2f}` por trade"
         return f"Banca atual: ${BANCA_USDT:.2f}"
 
     # /ntrades 3
     if cmd == "/ntrades":
         if args:
             try:
-                TRADES_PER_SESSION = int(args[0])
-                if TRADES_PER_SESSION < 0:
-                    return "Uso: /ntrades 3  (0 = ilimitado)"
-                margin = round(BANCA_USDT / max(TRADES_PER_SESSION, 1), 2) if BANCA_USDT > 0 else 0
-                await save_global_state_to_db()  # AUDITORIA 2026-07-04: idem /banca
-                return (
-                    f"Trades por sessao: `{TRADES_PER_SESSION}`\n"
-                    f"Margem por trade: `${margin:.2f}`" if BANCA_USDT > 0 else
-                    f"Trades por sessao: `{TRADES_PER_SESSION}` (defina banca com /banca)"
-                )
+                value = await _set_trades_per_session(args[0])
             except ValueError:
-                return "Uso: /ntrades 3  (numero inteiro)"
+                return "Uso: /ntrades 3  (0 = ilimitado)"
+            margin = round(BANCA_USDT / max(value, 1), 2) if BANCA_USDT > 0 else 0
+            return (
+                f"Trades por sessao: `{value}`\n"
+                f"Margem por trade: `${margin:.2f}`" if BANCA_USDT > 0 else
+                f"Trades por sessao: `{value}` (defina banca com /banca)"
+            )
         return f"Trades por sessao atual: {TRADES_PER_SESSION}"
 
     # /alavancagem_fixa 10  |  /alavancagem_fixa 0 (automático)
     if cmd in ("/alavancagem_fixa", "/leverage_fixa", "/alavancagemfixa"):
         if args:
             try:
-                lev = int(args[0])
-                if lev < 0 or lev > 25:
-                    return "Uso: /alavancagem_fixa 10  (0=automático, 1-25)"
-                LEVERAGE_OVERRIDE = lev
-                await save_global_state_to_db()
-                msg = "automática (engine decide por sinal)" if lev == 0 else f"travada em {lev}x"
-                return f"Alavancagem dos trades reais: {msg}."
+                value = await _set_leverage_override(args[0])
             except ValueError:
                 return "Uso: /alavancagem_fixa 10  (0=automático, 1-25)"
+            msg = "automática (engine decide por sinal)" if value == 0 else f"travada em {value}x"
+            return f"Alavancagem dos trades reais: {msg}."
         _cur = "automática (engine decide por sinal)" if LEVERAGE_OVERRIDE == 0 else f"{LEVERAGE_OVERRIDE}x fixo"
         return f"Alavancagem atual: {_cur}\nUse /alavancagem_fixa <1-25> para travar ou /alavancagem_fixa 0 para automático."
 
@@ -4116,9 +4315,8 @@ async def _telegram_command_handler(text: str) -> str:
                 _v = int(args[0])
                 if not (1 <= _v <= 25):
                     return "Alavancagem deve ser entre 1 e 25x."
-                GRID_LEVERAGE = _v
-                LEVERAGE_OVERRIDE = _v
-                await save_global_state_to_db()
+                await _set_grid_leverage(_v)
+                await _set_leverage_override(_v)
                 return (f"⚡ Alavancagem travada em `{_v}x` — vale para Autônomo, "
                         "Supervisionado e Grid.\n"
                         "_(Tetos de segurança do perfil/exposição/volatilidade ainda podem reduzir, nunca aumentar.)_")
@@ -4141,12 +4339,11 @@ async def _telegram_command_handler(text: str) -> str:
     if cmd in ("/limites", "/limite", "/limits"):
         if args:
             try:
-                TRADES_PER_SESSION = int(args[0])
-                _lbl = "ilimitado" if TRADES_PER_SESSION == 0 else str(TRADES_PER_SESSION)
-                await save_global_state_to_db()  # AUDITORIA 2026-07-04
-                return f"🔢 Limite de trades/sessão: `{_lbl}`"
+                value = await _set_trades_per_session(args[0])
             except ValueError:
                 return "Uso: /limites 5  (0 = ilimitado)"
+            _lbl = "ilimitado" if value == 0 else str(value)
+            return f"🔢 Limite de trades/sessão: `{_lbl}`"
         max_open = _active_max_open()
         sess_lbl = "Ilimitado" if TRADES_PER_SESSION == 0 else str(TRADES_PER_SESSION)
         return (
@@ -5255,15 +5452,13 @@ async def enable_dual_mode(
 @app.post("/settings/sinais_enabled")
 async def set_sinais_enabled(enabled: bool):
     """Ativa ou desativa canal de transmissão de sinais."""
-    global SINAIS_ENABLED
-    SINAIS_ENABLED = enabled
-    status = "ATIVADO" if enabled else "DESATIVADO"
+    value = await _set_sinais_enabled(enabled)
+    status = "ATIVADO" if value else "DESATIVADO"
     msg = f"Canal de SINAIS {status} via dashboard."
     print(f"[SETTINGS] {msg}")
     await log_event("SETTINGS", f"Sinais canal: {status}")
     await send_alert(f"📡 Canal de Sinais {status}.")
-    await save_global_state_to_db()
-    return {"sinais_enabled": SINAIS_ENABLED, "message": msg}
+    return {"sinais_enabled": value, "message": msg}
 
 
 @app.post("/dual-mode/disable")
@@ -5587,15 +5782,15 @@ async def get_settings():
 
 @app.post("/settings/trades_per_session")
 async def set_trades_per_session(count: int):
-    global TRADES_PER_SESSION, _session_trades, _sinais_session_count
-    if count < 0:
-        raise HTTPException(400, "Use 0 para ilimitado ou valor > 0")
-    TRADES_PER_SESSION = count
+    global _session_trades, _sinais_session_count
+    try:
+        value = await _set_trades_per_session(count)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
     _session_trades = 0
     _sinais_session_count = 0
-    print(f"[SETTINGS] Trades/sessão: {count or 'ilimitado'}")
-    await save_global_state_to_db()
-    return {"trades_per_session": TRADES_PER_SESSION, "session_trades": _session_trades}
+    print(f"[SETTINGS] Trades/sessão: {value or 'ilimitado'}")
+    return {"trades_per_session": value, "session_trades": _session_trades}
 
 
 @app.post("/settings/sinais_rate_limit")
@@ -5696,15 +5891,14 @@ async def test_public_tiers():
 
 @app.post("/settings/daily_target")
 async def set_daily_target(target: float):
-    global DAILY_TARGET_USDT
-    if target < 0:
-        raise HTTPException(400, "Meta deve ser >= 0 (0 = desativada)")
-    DAILY_TARGET_USDT = round(target, 2)
-    remaining = max(0, DAILY_TARGET_USDT - _daily_pnl)
-    print(f"[SETTINGS] Meta diária: ${DAILY_TARGET_USDT:.2f} | PnL atual: ${_daily_pnl:.2f} | Falta: ${remaining:.2f}")
-    await log_event("SETTINGS", f"Meta diária: ${DAILY_TARGET_USDT:.2f}")
-    await save_global_state_to_db()
-    return {"daily_target_usdt": DAILY_TARGET_USDT, "daily_pnl": round(_daily_pnl, 2), "remaining": round(remaining, 2)}
+    try:
+        value = await _set_daily_target_usdt(target)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    remaining = max(0, value - _daily_pnl)
+    print(f"[SETTINGS] Meta diária: ${value:.2f} | PnL atual: ${_daily_pnl:.2f} | Falta: ${remaining:.2f}")
+    await log_event("SETTINGS", f"Meta diária: ${value:.2f}")
+    return {"daily_target_usdt": value, "daily_pnl": round(_daily_pnl, 2), "remaining": round(remaining, 2)}
 
 
 @app.post("/settings/reset_session")
@@ -5718,34 +5912,32 @@ async def reset_session():
 @app.post("/settings/exposure")
 async def set_exposure(pct: float):
     """Define % de exposição da banca por trade (5-50%)."""
-    global EXPOSURE_PCT
-    if pct < 1 or pct > 50:
-        raise HTTPException(400, "Exposição deve ser entre 1% e 50%")
-    EXPOSURE_PCT = round(pct, 1)
-    trade_size = round(BANCA_USDT * EXPOSURE_PCT / 100, 2) if BANCA_USDT > 0 else 0
-    print(f"[SETTINGS] Exposição: {EXPOSURE_PCT}% | Por trade: ${trade_size:.2f}")
-    await save_global_state_to_db()
-    return {"exposure_pct": EXPOSURE_PCT, "trade_size_usdt": trade_size}
+    try:
+        value = await _set_exposure_pct(pct)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    trade_size = round(BANCA_USDT * value / 100, 2) if BANCA_USDT > 0 else 0
+    print(f"[SETTINGS] Exposição: {value}% | Por trade: ${trade_size:.2f}")
+    return {"exposure_pct": value, "trade_size_usdt": trade_size}
 
 
 @app.post("/settings/banca")
 async def set_banca(banca: float):
     """Define a banca alocada para o bot (usada no modo AUTÔNOMO)."""
-    global BANCA_USDT
-    if banca < 0:
-        raise HTTPException(400, "Banca deve ser >= 0 (0 = usa saldo disponível)")
-    BANCA_USDT = round(banca, 2)
+    try:
+        value = await _set_banca_usdt(banca)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
     n = TRADES_PER_SESSION if TRADES_PER_SESSION > 0 else 5
-    trade_size = round(BANCA_USDT / n, 2) if BANCA_USDT > 0 else 0
+    trade_size = round(value / n, 2) if value > 0 else 0
     pct = round(100.0 / n, 1)
-    print(f"[SETTINGS] Banca: ${BANCA_USDT:.2f} ÷ {n} trades = ${trade_size:.2f}/trade ({pct}%)")
-    await log_event("SETTINGS", f"Banca atualizada: ${BANCA_USDT:.2f}")
-    await save_global_state_to_db()
+    print(f"[SETTINGS] Banca: ${value:.2f} ÷ {n} trades = ${trade_size:.2f}/trade ({pct}%)")
+    await log_event("SETTINGS", f"Banca atualizada: ${value:.2f}")
     return {
-        "banca_usdt": BANCA_USDT,
+        "banca_usdt": value,
         "trade_size_usdt": trade_size,
         "exposure_pct": pct,
-        "message": f"Banca: ${BANCA_USDT:.2f} ÷ {n} trades = ${trade_size:.2f}/trade ({pct}%)"
+        "message": f"Banca: ${value:.2f} ÷ {n} trades = ${trade_size:.2f}/trade ({pct}%)"
     }
 
 
@@ -5755,40 +5947,28 @@ async def set_leverage_override(leverage: int):
     valor fixo escolhido pelo usuário. 0 = automático (a engine volta a
     calcular por sinal, comportamento original). Equivalente ao comando
     Telegram /alavancagem_fixa — mesma fonte de verdade (bot_state)."""
-    global LEVERAGE_OVERRIDE
-    if leverage < 0 or leverage > 25:
-        raise HTTPException(400, "Use 0 (automático) ou um valor entre 1 e 25")
-    LEVERAGE_OVERRIDE = leverage
-    print(f"[SETTINGS] Alavancagem fixa: {'automática (engine decide)' if leverage == 0 else f'{leverage}x travado'}")
-    await log_event("SETTINGS", f"Alavancagem override: {leverage if leverage else 'automática'}")
-    await save_global_state_to_db()
-    msg = "automática (a engine volta a calcular por sinal)" if leverage == 0 else f"travada em {leverage}x para todo trade real"
+    try:
+        value = await _set_leverage_override(leverage)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    print(f"[SETTINGS] Alavancagem fixa: {'automática (engine decide)' if value == 0 else f'{value}x travado'}")
+    await log_event("SETTINGS", f"Alavancagem override: {value if value else 'automática'}")
+    msg = "automática (a engine volta a calcular por sinal)" if value == 0 else f"travada em {value}x para todo trade real"
     await send_alert(f"⚙️ Alavancagem dos trades reais: {msg}.")
-    return {"leverage_override": LEVERAGE_OVERRIDE, "message": msg}
+    return {"leverage_override": value, "message": msg}
 
 
 @app.post("/settings/mode")
 async def set_operation_mode(mode: str):
     """Define modo de operação: AUTONOMOUS, SUPERVISED ou GRID (aceita slugs pt-BR)."""
-    global OPERATION_MODE, EXEC_MODE, PAPER_TRADING, SINAIS_ENABLED, BOT_PAUSED
-    _alias = {
-        "supervisao": "SUPERVISED", "supervisionado": "SUPERVISED",
-        "autonomo": "AUTONOMOUS", "automatico": "AUTONOMOUS",
-        "grid": "GRID",
-        "sinais": "SINAIS", "signal": "SINAIS", "signals": "SINAIS",
-    }
-    mode = _alias.get(mode.lower(), mode.upper())
-    if mode not in ("AUTONOMOUS", "SUPERVISED", "GRID", "SINAIS"):
-        raise HTTPException(400, "Modo invalido. Use: AUTONOMOUS, SUPERVISED, GRID ou SINAIS")
-    # SINGLE-MODE: ativa exatamente 1 modo; o anterior é desligado por activate_mode.
-    await bot_state.activate_mode(mode, profile=CURRENT_MODE)
-    sync_state_to_globals()
-    EXEC_MODE = OPERATION_MODE  # espelha o modo único ativo
+    global PAPER_TRADING, BOT_PAUSED
+    try:
+        mode = await _set_operation_mode(mode)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
     # Ativar modo retoma o bot (un-pausa). NÃO mexe em PAPER_TRADING — simulação
     # é controlada SÓ por /settings/paper_trading (correção do bug que abria ordem real).
     BOT_PAUSED = False
-    # SINAIS só transmite em modo SINAIS; nos demais o canal de sinais fica off.
-    SINAIS_ENABLED = (mode == "SINAIS")
     set_alerts_paused(False)  # garante Telegram liberado ao ativar qualquer modo
     # Aviso de ativação no Telegram (chat pessoal) — feedback IMEDIATO de que o
     # modo está no ar, mesmo antes de qualquer sinal qualificar nos filtros.
@@ -5847,18 +6027,17 @@ async def update_grid_settings(
     max_concurrent: int = None,
 ):
     """Atualiza configurações do Grid Mode."""
-    global GRID_PAIRS, GRID_PROFIT_TARGET_USDT, GRID_LEVERAGE, GRID_MAX_CONCURRENT
     if pairs:
-        GRID_PAIRS = [p.strip().upper() for p in pairs.split(",") if p.strip()]
+        await _set_grid_pairs(pairs)
     if profit_target is not None and profit_target >= 0:   # 0 = ilimitado
-        GRID_PROFIT_TARGET_USDT = profit_target
+        try:
+            await _set_grid_profit_target_usdt(profit_target)
+        except ValueError:
+            pass  # fora da faixa (0-1000) — ignora silenciosamente, igual ao comportamento original
     if leverage is not None and 1 <= leverage <= 50:
-        GRID_LEVERAGE = leverage
+        await _set_grid_leverage(leverage)
     if max_concurrent is not None and 1 <= max_concurrent <= 10:
-        GRID_MAX_CONCURRENT = max_concurrent
-    # AUDITORIA 2026-07-04: faltava persistir — mudava só em memória, zerava
-    # a cada deploy (mesma classe de bug do /banca, /ntrades e da alavancagem).
-    await save_global_state_to_db()
+        await _set_grid_max_concurrent(max_concurrent)
     return await get_grid_settings()
 
 
@@ -5869,30 +6048,12 @@ async def set_mode_watchlist(mode: str, symbols: str = ""):
     mode: supervised | autonomous | grid
     symbols: "BTCUSDT,ETHUSDT,SOLUSDT" ou "all" para usar lista global
     """
-    global SUPERVISED_WATCHLIST, AUTONOMOUS_WATCHLIST, GRID_PAIRS, SINAIS_WATCHLIST
-    cleaned = [s.strip().upper() for s in symbols.split(",") if s.strip()] if symbols and symbols.lower() != "all" else []
-    # Garante sufixo USDT
-    cleaned = [s if s.endswith("USDT") else s + "USDT" for s in cleaned]
-    m = mode.lower()
-    if m in ("supervised", "supervisionado"):
-        SUPERVISED_WATCHLIST = cleaned
-        label = "supervised"
-    elif m in ("autonomous", "autonomo"):
-        AUTONOMOUS_WATCHLIST = cleaned
-        label = "autonomous"
-    elif m == "grid":
-        if cleaned:
-            GRID_PAIRS = cleaned
-        label = "grid"
-    elif m in ("sinais", "signal", "signals"):
-        SINAIS_WATCHLIST = cleaned
-        label = "sinais"
-    else:
-        raise HTTPException(400, "mode deve ser: supervised | autonomous | grid | sinais")
+    try:
+        label, cleaned = await _set_mode_watchlist(mode, symbols)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
     msg = f"Watchlist {label}: {', '.join(cleaned) if cleaned else 'todas (global)'}"
     print(f"[SETTINGS] {msg}")
-    # AUDITORIA 2026-07-04: idem /settings/grid — faltava persistir.
-    await save_global_state_to_db()
     await send_alert(msg)
     return {"mode": label, "symbols": cleaned or "all", "message": msg}
 
@@ -5979,34 +6140,33 @@ async def approve_config():
 
     applied = {}
     if "banca_usdt" in _pending_config:
-        BANCA_USDT = _pending_config["banca_usdt"]
+        BANCA_USDT = await _set_banca_usdt(_pending_config["banca_usdt"])
         applied["Banca"] = f"${BANCA_USDT:.2f}"
     if "exposure_pct" in _pending_config:
-        EXPOSURE_PCT = _pending_config["exposure_pct"]
+        EXPOSURE_PCT = await _set_exposure_pct(_pending_config["exposure_pct"])
         applied["Exposição por Trade"] = f"{EXPOSURE_PCT}%"
     if "daily_target_usdt" in _pending_config:
-        DAILY_TARGET_USDT = _pending_config["daily_target_usdt"]
+        DAILY_TARGET_USDT = await _set_daily_target_usdt(_pending_config["daily_target_usdt"])
         applied["Meta Diária"] = f"${DAILY_TARGET_USDT:.2f}"
     if "grid_leverage" in _pending_config:
-        GRID_LEVERAGE = _pending_config["grid_leverage"]
+        GRID_LEVERAGE = await _set_grid_leverage(_pending_config["grid_leverage"])
         applied["Alavancagem Grid"] = f"{GRID_LEVERAGE}x"
     if "trading_mode" in _pending_config:
-        CURRENT_MODE = _pending_config["trading_mode"]
-        _update_scan_interval()
+        CURRENT_MODE = await _set_current_mode(_pending_config["trading_mode"])
         applied["Perfil de Risco"] = CURRENT_MODE
     if "operation_mode" in _pending_config:
         # Se for mudar de modo enquanto já rodando, se auto_off/auto_on/etc forem ativados
         # passamos o profile ativo atual
         try:
-            await bot_state.activate_mode(_pending_config["operation_mode"], profile=CURRENT_MODE)
+            await _set_operation_mode(_pending_config["operation_mode"])
         except ValueError as _e:
             # Trava de segurança de activate_mode (state.py) rejeitou a transição —
             # nada foi alterado no estado. Devolve erro claro em vez de 500 cru.
             raise HTTPException(400, str(_e))
-        sync_state_to_globals()
         applied["Modo de Operação"] = OPERATION_MODE
 
-    # Persiste no banco de dados SQLite e sincroniza
+    # Persiste no banco de dados SQLite e sincroniza (os _set_* já persistem
+    # individualmente; mantido por segurança/compatibilidade com o formato antigo)
     await save_global_state_to_db()
     sync_state_to_globals()
 
@@ -6118,10 +6278,7 @@ def _profile_alert(name_pt: str, key: str) -> str:
 
 @app.post("/mode/conservative")
 async def set_conservative_mode():
-    global CURRENT_MODE
-    CURRENT_MODE = "CONSERVATIVE"
-    _update_scan_interval()
-    await save_global_state_to_db()
+    await _set_current_mode("CONSERVATIVE")
     await send_alert(_profile_alert("CONSERVADOR", "CONSERVATIVE"))
     asyncio.create_task(job_scan_market())
     return {"mode": "CONSERVATIVE", "settings": MODE_SETTINGS["CONSERVATIVE"]}
@@ -6129,10 +6286,7 @@ async def set_conservative_mode():
 
 @app.post("/mode/normal")
 async def set_normal_mode():
-    global CURRENT_MODE
-    CURRENT_MODE = "NORMAL"
-    _update_scan_interval()
-    await save_global_state_to_db()
+    await _set_current_mode("NORMAL")
     await send_alert(_profile_alert("NORMAL", "NORMAL"))
     asyncio.create_task(job_scan_market())
     return {"mode": "NORMAL", "settings": MODE_SETTINGS["NORMAL"]}
@@ -6140,10 +6294,7 @@ async def set_normal_mode():
 
 @app.post("/mode/aggressive")
 async def set_aggressive_mode():
-    global CURRENT_MODE
-    CURRENT_MODE = "AGGRESSIVE"
-    _update_scan_interval()
-    await save_global_state_to_db()
+    await _set_current_mode("AGGRESSIVE")
     await send_alert(_profile_alert("AGRESSIVO", "AGGRESSIVE"))
     asyncio.create_task(job_scan_market())
     return {"mode": "AGGRESSIVE", "settings": MODE_SETTINGS["AGGRESSIVE"]}
@@ -6152,14 +6303,12 @@ async def set_aggressive_mode():
 @app.post("/settings/paper_trading")
 async def set_paper_trading(enabled: bool):
     """Ativa/desativa Paper Trading (simulação sem dinheiro real)."""
-    global PAPER_TRADING
-    PAPER_TRADING = enabled
-    status = "ATIVADO" if enabled else "DESATIVADO"
+    value = await _set_paper_trading(enabled)
+    status = "ATIVADO" if value else "DESATIVADO"
     print(f"[SETTINGS] Paper Trading {status}")
-    await save_global_state_to_db()
-    if enabled:
+    if value:
         await send_alert("[PAPER] PAPER TRADING ativado — Nenhuma ordem real sera enviada a Binance!")
-    return {"paper_trading": PAPER_TRADING, "message": f"Paper Trading {status}"}
+    return {"paper_trading": value, "message": f"Paper Trading {status}"}
 
 
 @app.get("/fear_greed")
