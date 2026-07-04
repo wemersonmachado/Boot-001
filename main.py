@@ -211,6 +211,7 @@ DAILY_TARGET_USDT: float = 0.0 # objetivo diário de lucro em USDT (0 = desativa
 
 PAPER_TRADING: bool = False    # True = simulação sem dinheiro real (NÃO é pausa!)
 BOT_PAUSED: bool = False        # True = bot pausado (não abre trades). Separado de PAPER_TRADING.
+LEVERAGE_OVERRIDE: int = 0      # 0 = automático (engine decide por sinal). N>0 = trava Nx nos trades reais.
 
 # Sincronização centralizada com o BotState
 from state import state as bot_state
@@ -219,6 +220,7 @@ def sync_state_to_globals():
     """Sincroniza as variáveis de BotState para as variáveis globais do main.py."""
     global CURRENT_MODE, OPERATION_MODE, DUAL_MODE_ENABLED, SINAIS_ENABLED, SINAIS_PROFILE, EXEC_MODE
     global _sinais_claude_brain, _exec_claude_brain, BANCA_USDT, EXPOSURE_PCT, TRADES_PER_SESSION, DAILY_TARGET_USDT, PAPER_TRADING, _mode_started_at
+    global LEVERAGE_OVERRIDE
     CURRENT_MODE = bot_state.current_mode
     OPERATION_MODE = bot_state.operation_mode
     DUAL_MODE_ENABLED = False  # dual mode removido — sistema single-mode (1 modo por vez)
@@ -233,6 +235,7 @@ def sync_state_to_globals():
     DAILY_TARGET_USDT = bot_state.daily_target_usdt
     PAPER_TRADING = bot_state.paper_trading
     _mode_started_at = bot_state.mode_started_at
+    LEVERAGE_OVERRIDE = bot_state.leverage_override
     import notifier
     notifier.RATE_LIMIT_PUBLIC_PER_HOUR = bot_state.sinais_max_hour_public
     notifier.RATE_LIMIT_VIP_PER_HOUR = bot_state.sinais_max_hour_vip
@@ -254,6 +257,7 @@ async def save_global_state_to_db():
     await bot_state.save_key("daily_target_usdt", DAILY_TARGET_USDT)
     await bot_state.save_key("paper_trading", PAPER_TRADING)
     await bot_state.save_key("mode_started_at", _mode_started_at)
+    await bot_state.save_key("leverage_override", LEVERAGE_OVERRIDE)
 
 _VALID_EXEC_MODES = ("SUPERVISED", "AUTONOMOUS", "GRID", "SINAIS")
 
@@ -1252,6 +1256,17 @@ async def _execute_trade_inner(signal_dict: dict):
     signal = _build_signal_from_dict(signal_dict)
     from risk_manager import get_leverage as _get_lev
     user_leverage = int(signal_dict.get("leverage") or _get_lev(signal.asset))
+
+    # AUDITORIA 2026-07-04: override do usuário tem prioridade sobre o cálculo
+    # dinâmico da engine. Antes, o campo "alavancagem" do dashboard só gravava
+    # GRID_LEVERAGE (usado só no modo Grid) — Autônomo/Supervisionado nunca
+    # respeitavam um valor fixo pedido pelo usuário, sempre usavam o cálculo
+    # próprio (suggest_leverage/get_leverage). Agora, se LEVERAGE_OVERRIDE > 0,
+    # ele vira a BASE em vez do valor da engine — mas os tetos de segurança
+    # abaixo (perfil, exposição, volatilidade) continuam valendo por cima,
+    # só para REDUZIR, nunca para subir além do que o usuário pediu.
+    if LEVERAGE_OVERRIDE > 0:
+        user_leverage = LEVERAGE_OVERRIDE
 
     # Teto de alavancagem do perfil ativo (CONSERVATIVE = 10x)
     _lev_cap = MODE_SETTINGS.get(CURRENT_MODE, MODE_SETTINGS["NORMAL"]).get("leverage_cap")
@@ -3420,7 +3435,7 @@ async def _telegram_command_handler(text: str) -> str:
     global OPERATION_MODE, CURRENT_MODE, BANCA_USDT, TRADES_PER_SESSION, PAPER_TRADING
     global GRID_PROFIT_TARGET_USDT, GRID_PAIRS, GRID_LEVERAGE, EXEC_MODE
     global DUAL_MODE_ENABLED, SINAIS_PROFILE, _claude_brain_enabled, _sinais_claude_brain, _exec_claude_brain
-    global BOT_PAUSED
+    global BOT_PAUSED, LEVERAGE_OVERRIDE
 
     parts = text.strip().split()
     cmd   = parts[0].lower()
@@ -3492,6 +3507,7 @@ async def _telegram_command_handler(text: str) -> str:
             "`/modo normal|agressivo|conservador` — Perfil de risco\n"
             "`/banca 500` — Definir banca em USDT\n"
             "`/ntrades 3` — Limite de trades por sessao\n"
+            "`/alavancagem_fixa 10` — Trava alavancagem dos trades reais (0=automatico)\n"
             "`/paper on|off` — Paper trading\n"
             "`/grid alvo 10` — Alvo por ciclo GRID\n"
             "`/macro pausar|continuar` — Pausar em evento macro\n\n"
@@ -3525,6 +3541,7 @@ async def _telegram_command_handler(text: str) -> str:
             f"{mode_desc}\n"
             f"Paper Trading: `{paper_str}`\n"
             f"Banca: `${BANCA_USDT:.2f}` | Trades/sessao: `{TRADES_PER_SESSION}`\n"
+            f"Alavancagem: `{'automatica (por sinal)' if LEVERAGE_OVERRIDE == 0 else f'{LEVERAGE_OVERRIDE}x fixo'}`\n"
             f"Cadencia entradas: `{_entry_cadence_s()}s` ({CURRENT_MODE})\n"
             f"Kill-switch -{AUTO_KILLSWITCH_PCT:.0f}%: {ks_str}\n"
             f"Saldo disponivel: `{balance_str}`\n"
@@ -3824,8 +3841,14 @@ async def _telegram_command_handler(text: str) -> str:
     if cmd == "/banca":
         if args:
             try:
-                BANCA_USDT = float(args[0])
+                BANCA_USDT = round(float(args[0]), 2)
+                if BANCA_USDT < 0:
+                    return "Banca deve ser >= 0 (0 = usa saldo disponível)"
                 margin = round(BANCA_USDT / max(TRADES_PER_SESSION, 1), 2)
+                # AUDITORIA 2026-07-04: faltava persistir — /banca mudava só a
+                # variável em memória; dashboard e Telegram divergiam após
+                # qualquer restart (a mesma classe de bug do modo/sinais).
+                await save_global_state_to_db()
                 return f"Banca definida: `${BANCA_USDT:.2f}` / {TRADES_PER_SESSION} trades = `${margin:.2f}` por trade"
             except ValueError:
                 return "Uso: /banca 500  (valor em USDT)"
@@ -3836,7 +3859,10 @@ async def _telegram_command_handler(text: str) -> str:
         if args:
             try:
                 TRADES_PER_SESSION = int(args[0])
+                if TRADES_PER_SESSION < 0:
+                    return "Uso: /ntrades 3  (0 = ilimitado)"
                 margin = round(BANCA_USDT / max(TRADES_PER_SESSION, 1), 2) if BANCA_USDT > 0 else 0
+                await save_global_state_to_db()  # AUDITORIA 2026-07-04: idem /banca
                 return (
                     f"Trades por sessao: `{TRADES_PER_SESSION}`\n"
                     f"Margem por trade: `${margin:.2f}`" if BANCA_USDT > 0 else
@@ -3845,6 +3871,22 @@ async def _telegram_command_handler(text: str) -> str:
             except ValueError:
                 return "Uso: /ntrades 3  (numero inteiro)"
         return f"Trades por sessao atual: {TRADES_PER_SESSION}"
+
+    # /alavancagem_fixa 10  |  /alavancagem_fixa 0 (automático)
+    if cmd in ("/alavancagem_fixa", "/leverage_fixa", "/alavancagemfixa"):
+        if args:
+            try:
+                lev = int(args[0])
+                if lev < 0 or lev > 25:
+                    return "Uso: /alavancagem_fixa 10  (0=automático, 1-25)"
+                LEVERAGE_OVERRIDE = lev
+                await save_global_state_to_db()
+                msg = "automática (engine decide por sinal)" if lev == 0 else f"travada em {lev}x"
+                return f"Alavancagem dos trades reais: {msg}."
+            except ValueError:
+                return "Uso: /alavancagem_fixa 10  (0=automático, 1-25)"
+        _cur = "automática (engine decide por sinal)" if LEVERAGE_OVERRIDE == 0 else f"{LEVERAGE_OVERRIDE}x fixo"
+        return f"Alavancagem atual: {_cur}\nUse /alavancagem_fixa <1-25> para travar ou /alavancagem_fixa 0 para automático."
 
     # /capital — capital alocado vs disponível
     if cmd in ("/capital", "/capitalalocado"):
@@ -5314,6 +5356,7 @@ async def get_settings():
         "trades_per_session":TRADES_PER_SESSION,
         "session_trades":    _session_trades,
         "daily_target_usdt": DAILY_TARGET_USDT,
+        "leverage_override": LEVERAGE_OVERRIDE,
         "daily_pnl":         round(_daily_pnl, 2),
         "daily_remaining":   round(daily_remaining, 2),
         "wallet_balance":    round(cached.get("wallet_balance", 0), 2),
@@ -5502,6 +5545,24 @@ async def set_banca(banca: float):
         "exposure_pct": pct,
         "message": f"Banca: ${BANCA_USDT:.2f} ÷ {n} trades = ${trade_size:.2f}/trade ({pct}%)"
     }
+
+
+@app.post("/settings/leverage_override")
+async def set_leverage_override(leverage: int):
+    """Trava a alavancagem dos trades REAIS (AUTONOMOUS/SUPERVISED/GRID) num
+    valor fixo escolhido pelo usuário. 0 = automático (a engine volta a
+    calcular por sinal, comportamento original). Equivalente ao comando
+    Telegram /alavancagem_fixa — mesma fonte de verdade (bot_state)."""
+    global LEVERAGE_OVERRIDE
+    if leverage < 0 or leverage > 25:
+        raise HTTPException(400, "Use 0 (automático) ou um valor entre 1 e 25")
+    LEVERAGE_OVERRIDE = leverage
+    print(f"[SETTINGS] Alavancagem fixa: {'automática (engine decide)' if leverage == 0 else f'{leverage}x travado'}")
+    await log_event("SETTINGS", f"Alavancagem override: {leverage if leverage else 'automática'}")
+    await save_global_state_to_db()
+    msg = "automática (a engine volta a calcular por sinal)" if leverage == 0 else f"travada em {leverage}x para todo trade real"
+    await send_alert(f"⚙️ Alavancagem dos trades reais: {msg}.")
+    return {"leverage_override": LEVERAGE_OVERRIDE, "message": msg}
 
 
 @app.post("/settings/mode")

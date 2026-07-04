@@ -1686,8 +1686,10 @@ async function loadSettings() {
   wz.vals.trades = tps;
   markTradeSel(tps);
 
-  // Alavancagem
-  const lev = d.grid_leverage || 10;
+  // Alavancagem — leverage_override é a trava REAL (Autônomo/Supervisionado/
+  // Grid); grid_leverage é só o espelho usado internamente pelo modo Grid.
+  // Mostra o override quando ativo (>0); senão cai no valor do grid/default.
+  const lev = (d.leverage_override && d.leverage_override > 0) ? d.leverage_override : (d.grid_leverage || 10);
   wz.vals.leverage = lev;
   markLevSel(lev);
   txt('bg-lev', lev + 'x');
@@ -1899,8 +1901,18 @@ async function setLeverage(v) {
   markLevSel(v);
   txt('bg-lev', v + 'x');
   const w = $id('lev-warn'); if (w) w.style.display = v >= 15 ? 'block' : 'none';
-  const r = await apiFetch('/settings/grid?leverage=' + v + '&pairs=BTCUSDT,ETHUSDT,SOLUSDT,HYPEUSDT', 'POST');
-  toast(r ? `⚙️ Alavancagem: ${v}x` : 'Erro ao definir alavancagem.', r ? 'success' : 'error');
+  // AUDITORIA 2026-07-04: este botão só gravava /settings/grid (usado SÓ pelo
+  // modo Grid) — Autônomo/Supervisionado nunca respeitavam o valor escolhido
+  // aqui, sempre calculavam a alavancagem sozinhos por sinal. Agora grava
+  // também /settings/leverage_override, que TRAVA esse valor em qualquer modo
+  // de execução real (o teto de segurança do perfil ainda pode reduzir, nunca
+  // aumentar além do escolhido aqui).
+  const [rGrid, rOverride] = await Promise.all([
+    apiFetch('/settings/grid?leverage=' + v + '&pairs=BTCUSDT,ETHUSDT,SOLUSDT,HYPEUSDT', 'POST'),
+    apiFetch('/settings/leverage_override?leverage=' + v, 'POST'),
+  ]);
+  const ok = rGrid && rOverride;
+  toast(ok ? `⚙️ Alavancagem travada em ${v}x (Autônomo/Supervisionado/Grid)` : 'Erro ao definir alavancagem.', ok ? 'success' : 'error');
 }
 
 async function setProfile(p) {

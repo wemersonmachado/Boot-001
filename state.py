@@ -42,6 +42,12 @@ class BotState:
         self.exposure_pct = 10.0
         self.trades_per_session = 0
         self.daily_target_usdt = 0.0
+        # Alavancagem FIXA definida pelo usuário para trades REAIS (AUTONOMOUS/
+        # SUPERVISED/GRID). 0 = automático (a engine calcula por sinal, como
+        # sempre fez). N>0 = trava exatamente Nx como base, respeitando ainda
+        # o leverage_cap do perfil e as reduções de segurança (exposição/ATR)
+        # como TETO — nunca sobe além do que o usuário pediu.
+        self.leverage_override = 0
 
         # Limite de sinais por hora, por canal (0 = sem limite)
         self.sinais_max_hour_public = int(_DEF_MAX_HOUR_PUBLIC)
@@ -75,6 +81,7 @@ class BotState:
             self.exposure_pct = float(await get_setting("exposure_pct", "10.0"))
             self.trades_per_session = int(await get_setting("trades_per_session", "0"))
             self.daily_target_usdt = float(await get_setting("daily_target_usdt", "0.0"))
+            self.leverage_override = int(await get_setting("leverage_override", "0"))
             self.sinais_max_hour_public = int(await get_setting("sinais_max_hour_public", _DEF_MAX_HOUR_PUBLIC))
             self.sinais_max_hour_vip = int(await get_setting("sinais_max_hour_vip", _DEF_MAX_HOUR_VIP))
             try:
