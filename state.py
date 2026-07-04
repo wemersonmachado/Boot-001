@@ -60,6 +60,21 @@ class BotState:
         self.paper_trading = False
         self.mode_started_at = datetime.utcnow().isoformat()
 
+        # Grid + watchlists por modo (AUDITORIA 2026-07-04: estes 7 campos
+        # nunca persistiam — /settings/grid e /settings/watchlist só mudavam
+        # a variável em memória, igual ao bug da alavancagem. Corrigido.)
+        self.grid_pairs = [
+            "BTCUSDT", "ETHUSDT", "SOLUSDT",
+            "HYPEUSDT", "XRPUSDT", "BNBUSDT",
+            "SUIUSDT", "AVAXUSDT", "DOTUSDT",
+        ]
+        self.grid_profit_target_usdt = 0.0
+        self.grid_leverage = 10
+        self.grid_max_concurrent = 2
+        self.supervised_watchlist = []
+        self.autonomous_watchlist = []
+        self.sinais_watchlist = []
+
     async def load_from_db(self):
         """Carrega todas as configurações salvas no SQLite para manter persistência pós-reboot."""
         try:
@@ -90,7 +105,23 @@ class BotState:
             except Exception:
                 pass  # mantém o default já definido em __init__ se o JSON salvo estiver corrompido
             self.paper_trading = (await get_setting("paper_trading", "False")) == "True"
-            
+
+            # Grid + watchlists (json — listas)
+            for _attr, _key in (
+                ("grid_pairs", "grid_pairs"),
+                ("supervised_watchlist", "supervised_watchlist"),
+                ("autonomous_watchlist", "autonomous_watchlist"),
+                ("sinais_watchlist", "sinais_watchlist"),
+            ):
+                try:
+                    _raw = await get_setting(_key, json.dumps(getattr(self, _attr)))
+                    setattr(self, _attr, json.loads(_raw))
+                except Exception:
+                    pass  # mantém o default do __init__ se o JSON salvo estiver corrompido
+            self.grid_profit_target_usdt = float(await get_setting("grid_profit_target_usdt", "0.0"))
+            self.grid_leverage = int(await get_setting("grid_leverage", "10"))
+            self.grid_max_concurrent = int(await get_setting("grid_max_concurrent", "2"))
+
             self.mode_started_at = await get_setting("mode_started_at", datetime.utcnow().isoformat())
             print(f"[STATE] Configurações carregadas do banco com sucesso. Modo atual: {self.operation_mode} | Brain: {self.claude_brain_enabled}")
         except Exception as e:
@@ -103,6 +134,17 @@ class BotState:
             await save_setting(key, str(value))
         except Exception as e:
             print(f"[STATE] Erro ao persistir setting {key}={value} no banco: {e}")
+
+    async def save_key_json(self, key: str, value):
+        """Como save_key, mas para listas/dicts: guarda o objeto NATIVO em
+        memória (não a string) e persiste como JSON — evita o tipo divergir
+        entre 'valor em memória' e 'valor recarregado do banco' (o que
+        quebraria a trava de integridade de main.py:_audit_settings_sync)."""
+        setattr(self, key, value)
+        try:
+            await save_setting(key, json.dumps(value))
+        except Exception as e:
+            print(f"[STATE] Erro ao persistir setting json {key}={value} no banco: {e}")
 
     async def activate_mode(self, mode: str, profile: str = "AGGRESSIVE", exec_mode: str = None,
                             sinais_brain: bool = False, exec_brain: bool = False):

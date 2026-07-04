@@ -221,6 +221,8 @@ def sync_state_to_globals():
     global CURRENT_MODE, OPERATION_MODE, DUAL_MODE_ENABLED, SINAIS_ENABLED, SINAIS_PROFILE, EXEC_MODE
     global _sinais_claude_brain, _exec_claude_brain, BANCA_USDT, EXPOSURE_PCT, TRADES_PER_SESSION, DAILY_TARGET_USDT, PAPER_TRADING, _mode_started_at
     global LEVERAGE_OVERRIDE
+    global GRID_PAIRS, GRID_PROFIT_TARGET_USDT, GRID_LEVERAGE, GRID_MAX_CONCURRENT
+    global SUPERVISED_WATCHLIST, AUTONOMOUS_WATCHLIST, SINAIS_WATCHLIST
     CURRENT_MODE = bot_state.current_mode
     OPERATION_MODE = bot_state.operation_mode
     DUAL_MODE_ENABLED = False  # dual mode removido — sistema single-mode (1 modo por vez)
@@ -236,6 +238,13 @@ def sync_state_to_globals():
     PAPER_TRADING = bot_state.paper_trading
     _mode_started_at = bot_state.mode_started_at
     LEVERAGE_OVERRIDE = bot_state.leverage_override
+    GRID_PAIRS = bot_state.grid_pairs
+    GRID_PROFIT_TARGET_USDT = bot_state.grid_profit_target_usdt
+    GRID_LEVERAGE = bot_state.grid_leverage
+    GRID_MAX_CONCURRENT = bot_state.grid_max_concurrent
+    SUPERVISED_WATCHLIST = bot_state.supervised_watchlist
+    AUTONOMOUS_WATCHLIST = bot_state.autonomous_watchlist
+    SINAIS_WATCHLIST = bot_state.sinais_watchlist
     import notifier
     notifier.RATE_LIMIT_PUBLIC_PER_HOUR = bot_state.sinais_max_hour_public
     notifier.RATE_LIMIT_VIP_PER_HOUR = bot_state.sinais_max_hour_vip
@@ -258,6 +267,86 @@ async def save_global_state_to_db():
     await bot_state.save_key("paper_trading", PAPER_TRADING)
     await bot_state.save_key("mode_started_at", _mode_started_at)
     await bot_state.save_key("leverage_override", LEVERAGE_OVERRIDE)
+    await bot_state.save_key_json("grid_pairs", GRID_PAIRS)
+    await bot_state.save_key("grid_profit_target_usdt", GRID_PROFIT_TARGET_USDT)
+    await bot_state.save_key("grid_leverage", GRID_LEVERAGE)
+    await bot_state.save_key("grid_max_concurrent", GRID_MAX_CONCURRENT)
+    await bot_state.save_key_json("supervised_watchlist", SUPERVISED_WATCHLIST)
+    await bot_state.save_key_json("autonomous_watchlist", AUTONOMOUS_WATCHLIST)
+    await bot_state.save_key_json("sinais_watchlist", SINAIS_WATCHLIST)
+
+
+# ── TRAVA DE SEGURANÇA: integridade memória ↔ banco (2026-07-04) ────────────
+# Hoje encontramos 3 configurações (alavancagem, Grid inteiro, watchlists) cujo
+# endpoint mudava a global do main.py mas NUNCA chamava save_global_state_to_db
+# — o dashboard/Telegram pareciam "obedecer" na hora, mas o valor sumia no
+# próximo deploy sem nenhum aviso. Esse registro + job_settings_integrity_watch
+# (agendado abaixo) tornam essa classe de bug AUTODETECTÁVEL: se um endpoint
+# futuro repetir o erro, a global diverge de bot_state e o alerta dispara
+# sozinho — não depende de auditoria manual de novo.
+#
+# Ao adicionar uma NOVA configuração editável (dashboard OU Telegram), inclua
+# o par aqui — é o checklist mínimo: (1) campo em BotState.__init__, (2) em
+# load_from_db, (3) em sync_state_to_globals, (4) em save_global_state_to_db,
+# (5) aqui no registro.
+_SETTINGS_SYNC_REGISTRY = [
+    ("CURRENT_MODE",             "current_mode"),
+    ("OPERATION_MODE",           "operation_mode"),
+    ("SINAIS_ENABLED",           "sinais_enabled"),
+    ("SINAIS_PROFILE",           "sinais_profile"),
+    ("EXEC_MODE",                "exec_mode"),
+    ("BANCA_USDT",               "banca_usdt"),
+    ("EXPOSURE_PCT",             "exposure_pct"),
+    ("TRADES_PER_SESSION",       "trades_per_session"),
+    ("DAILY_TARGET_USDT",        "daily_target_usdt"),
+    ("PAPER_TRADING",            "paper_trading"),
+    ("LEVERAGE_OVERRIDE",        "leverage_override"),
+    ("GRID_PAIRS",               "grid_pairs"),
+    ("GRID_PROFIT_TARGET_USDT",  "grid_profit_target_usdt"),
+    ("GRID_LEVERAGE",            "grid_leverage"),
+    ("GRID_MAX_CONCURRENT",      "grid_max_concurrent"),
+    ("SUPERVISED_WATCHLIST",     "supervised_watchlist"),
+    ("AUTONOMOUS_WATCHLIST",     "autonomous_watchlist"),
+    ("SINAIS_WATCHLIST",         "sinais_watchlist"),
+]
+
+
+def _settings_values_equal(a, b) -> bool:
+    """Compara tolerando diferença de ponto flutuante (evita falso-positivo)."""
+    if isinstance(a, float) or isinstance(b, float):
+        try:
+            return abs(float(a) - float(b)) < 1e-6
+        except (TypeError, ValueError):
+            return a == b
+    return a == b
+
+
+def _audit_settings_sync() -> list[str]:
+    """Retorna a lista de divergências entre globals (memória) e bot_state
+    (fonte persistida). Vazio = tudo sincronizado corretamente."""
+    problems = []
+    g = globals()
+    for global_name, attr_name in _SETTINGS_SYNC_REGISTRY:
+        gval = g.get(global_name)
+        sval = getattr(bot_state, attr_name, "<AUSENTE>")
+        if not _settings_values_equal(gval, sval):
+            problems.append(f"{global_name}={gval!r} (memória) != bot_state.{attr_name}={sval!r} (banco)")
+    return problems
+
+
+async def job_settings_integrity_watch():
+    """Roda a cada 10 min: se alguma configuração divergir entre memória e
+    banco, avisa no Telegram — sinal de que um endpoint novo esqueceu de
+    persistir (a mesma classe de bug já corrigida 3x hoje)."""
+    problems = _audit_settings_sync()
+    if problems:
+        print(f"[SETTINGS-INTEGRITY] {len(problems)} divergencia(s) encontrada(s): {problems}")
+        await send_alert(
+            "🛑 *TRAVA DE SEGURANÇA — configuração não persistindo*\n"
+            "Vai sumir no próximo deploy se não for corrigido:\n"
+            + "\n".join(f"• {p}" for p in problems)
+        )
+
 
 _VALID_EXEC_MODES = ("SUPERVISED", "AUTONOMOUS", "GRID", "SINAIS")
 
@@ -4332,6 +4421,7 @@ async def lifespan(app: FastAPI):
     scheduler.add_job(job_pairs_arbitrage,           "interval", minutes=15, id="pairs_arbitrage",      max_instances=1, coalesce=True, jitter=30)
     scheduler.add_job(job_health_watch,              "interval", minutes=5,  id="health_watch",       max_instances=1, coalesce=True, jitter=15)
     scheduler.add_job(job_idle_watch,                "interval", minutes=2,  id="idle_watch",         max_instances=1, coalesce=True, jitter=10)
+    scheduler.add_job(job_settings_integrity_watch,  "interval", minutes=10, id="settings_integrity",  max_instances=1, coalesce=True, jitter=20)
     scheduler.add_job(job_db_prune,                  "cron", hour=4, minute=10, id="db_prune",        max_instances=1, coalesce=True)
     scheduler.start()
     asyncio.create_task(_loop_heartbeat())
@@ -5466,7 +5556,11 @@ async def set_public_tier_pct(p1: int = None, p2: int = None, p3: int = None, p4
     else:
         pct = raw
     notifier.set_public_tier_pct(pct)
-    await bot_state.save_key("public_tier_pct", json.dumps(pct))
+    # AUDITORIA 2026-07-04: save_key("public_tier_pct", json.dumps(pct)) guardava
+    # a STRING json em bot_state.public_tier_pct em vez do dict — divergia do
+    # tipo usado em memória (notifier._public_tier_pct, um dict). save_key_json
+    # guarda o dict nativo e persiste como JSON, então os dois lados batem.
+    await bot_state.save_key_json("public_tier_pct", pct)
     print(f"[SETTINGS] % por nível do canal público atualizado: {pct} (recebido: {raw})")
     return {"pct": pct, "normalized": total != 100}
 
@@ -5654,6 +5748,9 @@ async def update_grid_settings(
         GRID_LEVERAGE = leverage
     if max_concurrent is not None and 1 <= max_concurrent <= 10:
         GRID_MAX_CONCURRENT = max_concurrent
+    # AUDITORIA 2026-07-04: faltava persistir — mudava só em memória, zerava
+    # a cada deploy (mesma classe de bug do /banca, /ntrades e da alavancagem).
+    await save_global_state_to_db()
     return await get_grid_settings()
 
 
@@ -5686,6 +5783,8 @@ async def set_mode_watchlist(mode: str, symbols: str = ""):
         raise HTTPException(400, "mode deve ser: supervised | autonomous | grid | sinais")
     msg = f"Watchlist {label}: {', '.join(cleaned) if cleaned else 'todas (global)'}"
     print(f"[SETTINGS] {msg}")
+    # AUDITORIA 2026-07-04: idem /settings/grid — faltava persistir.
+    await save_global_state_to_db()
     await send_alert(msg)
     return {"mode": label, "symbols": cleaned or "all", "message": msg}
 
@@ -6401,6 +6500,19 @@ async def health():
         "time": datetime.utcnow().isoformat(),
         "bot": "TRADER 001",
         "autonomous": OPERATION_MODE == "AUTONOMOUS",
+    }
+
+
+@app.get("/selftest/settings")
+async def selftest_settings():
+    """Checagem sob demanda da trava de integridade memória↔banco (ver
+    _audit_settings_sync). Rode isso depois de adicionar qualquer novo
+    endpoint /settings/* ou comando Telegram que altere configuração."""
+    problems = _audit_settings_sync()
+    return {
+        "ok": not problems,
+        "checked": len(_SETTINGS_SYNC_REGISTRY),
+        "problems": problems,
     }
 
 
