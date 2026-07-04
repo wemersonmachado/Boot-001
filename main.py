@@ -3546,6 +3546,10 @@ async def _telegram_command_handler(text: str) -> str:
         BOT_PAUSED = True
         PAPER_TRADING = True
         _cb_pending = False
+        # AUDITORIA 2026-07-04: PAPER_TRADING é flag de segurança de dinheiro
+        # real — sem persistir, um restart do Railway podia voltar a operar
+        # com conta REAL mesmo depois do usuário ter mandado "parar tudo".
+        await save_global_state_to_db()
         print("[CONTROL] PARADO pelo usuário via /parar (BOT_PAUSED + PAPER ON).")
         return ("🛑 *Bot PARADO* — sem novas entradas e *sem operar dinheiro real* "
                 "(modo simulação ON).\n"
@@ -3862,6 +3866,7 @@ async def _telegram_command_handler(text: str) -> str:
                 GRID_PROFIT_TARGET_USDT = _new_alvo
                 GRID_SETTINGS["NORMAL"]["profit_target_usdt"]     = _new_alvo
                 GRID_SETTINGS["AGGRESSIVE"]["profit_target_usdt"] = round(_new_alvo * 0.6, 2)
+                await save_global_state_to_db()  # AUDITORIA 2026-07-04
                 return (f"Alvo grid definido: ${_new_alvo:.2f} por ciclo (NORMAL) | "
                         f"${_new_alvo * 0.6:.2f} (AGGRESSIVE)")
             except ValueError:
@@ -3869,11 +3874,13 @@ async def _telegram_command_handler(text: str) -> str:
         # /grid pares BTC ETH SOL
         if sub == "pares" and len(args) > 1:
             GRID_PAIRS = [p.upper() if "USDT" in p.upper() else p.upper()+"USDT" for p in args[1:]]
+            await save_global_state_to_db()  # AUDITORIA 2026-07-04
             return f"Pares grid: {', '.join(GRID_PAIRS)}"
         # /grid lev 10
         if sub == "lev" and len(args) > 1:
             try:
                 GRID_LEVERAGE = int(args[1])
+                await save_global_state_to_db()  # AUDITORIA 2026-07-04
                 return f"Alavancagem grid: {GRID_LEVERAGE}x"
             except ValueError:
                 return "Uso: /grid lev 10"
@@ -3884,9 +3891,11 @@ async def _telegram_command_handler(text: str) -> str:
         val = args[0].lower() if args else ""
         if val == "on":
             PAPER_TRADING = True
+            await save_global_state_to_db()  # AUDITORIA 2026-07-04: flag de dinheiro real, critico persistir
             return "Paper Trading ATIVADO. Trades serao simulados sem dinheiro real."
         elif val == "off":
             PAPER_TRADING = False
+            await save_global_state_to_db()  # AUDITORIA 2026-07-04
             return "Paper Trading DESATIVADO. Bot opera com conta real."
         return f"Uso: /paper on|off  (atual: {'ON' if PAPER_TRADING else 'OFF'})"
 
@@ -3903,6 +3912,10 @@ async def _telegram_command_handler(text: str) -> str:
         if _new:
             CURRENT_MODE = _new
             _update_scan_interval()
+            # AUDITORIA 2026-07-04: faltava persistir — igual /banca, /ntrades,
+            # /settings/grid e /settings/watchlist. Achado pelo próprio
+            # job_settings_integrity_watch (a trava detectou sozinha).
+            await save_global_state_to_db()
             _c = MODE_SETTINGS[_new]
             return (f"Perfil de risco alterado para: `{_new}`\n"
                     f"Score>=`{_c['min_score']}` | RR>=`{_c['min_rr']}` | "
@@ -4005,7 +4018,9 @@ async def _telegram_command_handler(text: str) -> str:
             f"Exposição: `{exp_ratio:.2f}x` da banca (teto `{MAX_TOTAL_EXPOSURE_RATIO:.1f}x`)"
         )
 
-    # /alavancagem [N] — mostra ou define alavancagem (GRID)
+    # /alavancagem [N] — define alavancagem em TODOS os modos de execução real
+    # (equivalente ao botão do dashboard desde a auditoria 2026-07-04: antes só
+    # mexia em GRID_LEVERAGE e Autônomo/Supervisionado ignoravam completamente).
     if cmd in ("/alavancagem", "/lev", "/leverage"):
         if args:
             try:
@@ -4013,8 +4028,11 @@ async def _telegram_command_handler(text: str) -> str:
                 if not (1 <= _v <= 25):
                     return "Alavancagem deve ser entre 1 e 25x."
                 GRID_LEVERAGE = _v
-                return (f"⚡ Alavancagem GRID definida: `{GRID_LEVERAGE}x`\n"
-                        "_(Sinais/Autônomo usam alavancagem adaptativa por ativo/volatilidade.)_")
+                LEVERAGE_OVERRIDE = _v
+                await save_global_state_to_db()
+                return (f"⚡ Alavancagem travada em `{_v}x` — vale para Autônomo, "
+                        "Supervisionado e Grid.\n"
+                        "_(Tetos de segurança do perfil/exposição/volatilidade ainda podem reduzir, nunca aumentar.)_")
             except ValueError:
                 return "Uso: /alavancagem 10  (1–25)"
         from config import MODE_SETTINGS as _MS
@@ -4036,6 +4054,7 @@ async def _telegram_command_handler(text: str) -> str:
             try:
                 TRADES_PER_SESSION = int(args[0])
                 _lbl = "ilimitado" if TRADES_PER_SESSION == 0 else str(TRADES_PER_SESSION)
+                await save_global_state_to_db()  # AUDITORIA 2026-07-04
                 return f"🔢 Limite de trades/sessão: `{_lbl}`"
             except ValueError:
                 return "Uso: /limites 5  (0 = ilimitado)"
