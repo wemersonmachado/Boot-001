@@ -4207,6 +4207,17 @@ async def lifespan(app: FastAPI):
     else:
         print("[STARTUP] ✅ Integridade estrutural de MODE_SETTINGS/GRID_SETTINGS OK")
 
+    # AUDITORIA 2026-07-04: alerta alto se a API estiver SEM senha (URL pública!)
+    if not _DASH_PWD:
+        print("[STARTUP] 🛑 API SEM AUTENTICAÇÃO — configure DASHBOARD_PASSWORD (ou WEBHOOK_SECRET) nas Variables do Railway!")
+        asyncio.create_task(send_alert(
+            "🛑 *SEGURANÇA*: o dashboard/API está SEM SENHA — qualquer pessoa com a URL "
+            "pode controlar o bot (conta REAL). Configure `DASHBOARD_PASSWORD` nas "
+            "Variables do Railway e redeploy."
+        ))
+    else:
+        print("[STARTUP] ✅ Basic Auth ativo no dashboard/API (exceto /health e /webhook)")
+
     # Popula cache de trades abertos (evita _active_trades_cache vazio após restart)
     for _t in await get_open_trades():
         _active_trades_cache[_t["id"]] = _t
@@ -4352,6 +4363,41 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# ── AUTENTICAÇÃO (auditoria 2026-07-04) ──────────────────────────────────────
+# A URL do Railway é pública; sem isto, QUALQUER pessoa podia ativar o modo
+# Autônomo, fechar posições e mudar a banca da conta REAL via curl. Basic Auth
+# em todas as rotas, exceto: /health (healthcheck do Railway) e /webhook (tem
+# secret próprio). O navegador pede a senha 1x e reanexa sozinho nas chamadas
+# do dashboard (mesma origem). Senha: env DASHBOARD_PASSWORD (fallback
+# WEBHOOK_SECRET). Se nenhuma estiver configurada, o acesso segue liberado
+# (fail-open para não brickar o bot) mas avisa alto no log e no Telegram.
+import base64 as _b64
+import secrets as _secrets_mod
+from starlette.responses import Response as _StarletteResponse
+from config import DASHBOARD_PASSWORD as _DASH_PWD
+
+_AUTH_EXEMPT_PATHS = {"/health", "/webhook"}
+
+
+@app.middleware("http")
+async def _dashboard_auth_middleware(request, call_next):
+    if not _DASH_PWD or request.url.path in _AUTH_EXEMPT_PATHS:
+        return await call_next(request)
+    auth = request.headers.get("Authorization", "")
+    if auth.startswith("Basic "):
+        try:
+            _userpass = _b64.b64decode(auth[6:]).decode("utf-8", "ignore")
+            _pwd = _userpass.partition(":")[2]
+            if _secrets_mod.compare_digest(_pwd, _DASH_PWD):
+                return await call_next(request)
+        except Exception:
+            pass
+    return _StarletteResponse(
+        content="Autenticacao requerida",
+        status_code=401,
+        headers={"WWW-Authenticate": 'Basic realm="Trader001"'},
+    )
 
 
 # ── Webhook ───────────────────────────────────────────────────────────────────
@@ -5676,6 +5722,15 @@ async def approve_config():
     await send_alert(msg)
 
     return {"status": "approved", "applied": applied}
+
+
+@app.post("/auto/force_scan")
+async def force_scan_endpoint():
+    """Dispara um scan de mercado imediato (botão 'Forçar Scan' do dashboard).
+    AUDITORIA 2026-07-04: o dashboard sempre chamou esta rota, mas ela nunca
+    existiu no backend — o botão retornava 404 e mostrava 'Erro ao forcar scan'."""
+    asyncio.create_task(job_scan_market())
+    return {"status": "started", "started_at": datetime.utcnow().strftime("%H:%M:%S")}
 
 
 @app.get("/auto/status")
