@@ -879,6 +879,20 @@ input:checked + .slider:before {
           <div class="sig-kpi-val" id="kpiSigRate">--%</div>
         </div>
       </div>
+      <div class="sig-kpi-row" title="Sinais bloqueados pelos filtros — Shadow Book (24h)">
+        <div class="sig-kpi">
+          <div class="sig-kpi-lbl">Descartados (24h)</div>
+          <div class="sig-kpi-val" id="kpiShBlocked">--</div>
+        </div>
+        <div class="sig-kpi">
+          <div class="sig-kpi-lbl">Teriam Ganho / Perdido</div>
+          <div class="sig-kpi-val"><span style="color:var(--up)" id="kpiShWin">--</span> / <span style="color:var(--down)" id="kpiShLose">--</span></div>
+        </div>
+        <div class="sig-kpi">
+          <div class="sig-kpi-lbl">WR Descartados</div>
+          <div class="sig-kpi-val" id="kpiShWr">--%</div>
+        </div>
+      </div>
       <div class="hdr-right-icons">
         <div class="scan-chip">Scan: <span id="scanDisp">--</span></div>
         <div class="hdr-btn" onclick="toggleTheme()" title="Alternar Tema" id="themeBtn" style="font-size:14px;">☀️</div>
@@ -1097,10 +1111,6 @@ input:checked + .slider:before {
         <a onclick="loadShadow()">&#8635; Atualizar</a>
       </div>
       <div style="display:flex;flex-wrap:wrap;gap:18px;margin-bottom:10px">
-        <div><div class="sc-lbl">Bloqueados</div><div class="sc-val" id="sh-total">--</div></div>
-        <div><div class="sc-lbl">Teriam ganho</div><div class="sc-val" style="color:var(--up)" id="sh-win">--</div></div>
-        <div><div class="sc-lbl">Teriam perdido</div><div class="sc-val" style="color:var(--down)" id="sh-lose">--</div></div>
-        <div><div class="sc-lbl">WR dos descartados</div><div class="sc-val" id="sh-wr">--%</div></div>
         <div><div class="sc-lbl">Pendentes</div><div class="sc-val" id="sh-pend">--</div></div>
       </div>
       <div class="sc-sub" style="margin-bottom:8px">
@@ -1576,12 +1586,12 @@ async function loadHistory() {
 async function loadShadow() {
   const d = await apiFetch('/shadow/stats');
   if (!d) return;
-  txt('sh-total', d.blocked ?? '--');
-  txt('sh-win',   d.would_win ?? '--');
-  txt('sh-lose',  d.would_lose ?? '--');
-  txt('sh-wr',    d.would_wr != null ? d.would_wr.toFixed(1) + '%' : '--%');
   txt('sh-pend',  d.pending ?? '--');
-  const el = document.getElementById('sh-wr');
+  txt('kpiShBlocked', d.blocked ?? '--');
+  txt('kpiShWin',     d.would_win ?? '--');
+  txt('kpiShLose',    d.would_lose ?? '--');
+  txt('kpiShWr',      d.would_wr != null ? d.would_wr.toFixed(1) + '%' : '--%');
+  const el = document.getElementById('kpiShWr');
   if (el && d.would_wr != null) el.style.color = d.would_wr > 50 ? 'var(--down)' : 'var(--up)';
   const rows = (d.by_reason || []).map(r => `<tr>
     <td>${r.reason || '--'}</td>
