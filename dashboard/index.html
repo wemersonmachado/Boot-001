@@ -279,12 +279,12 @@ body{
 .hdr-cfg-body{display:flex;flex-direction:column;gap:8px;padding:0 14px 12px}
 .hdr-right{display:flex;flex-direction:column;align-items:flex-end;gap:10px}
 .hdr-right-icons{display:flex;align-items:center;gap:10px}
-.sig-kpi-row{display:flex;gap:8px}
+.sig-kpi-grid{display:grid;grid-template-columns:repeat(3,minmax(118px,1fr));gap:8px}
 .sig-kpi{
   background:var(--card);border:1px solid var(--border);border-radius:10px;
-  padding:7px 12px;min-width:78px;text-align:center;
+  padding:7px 12px;text-align:center;
 }
-.sig-kpi-lbl{font-size:9px;color:var(--muted);text-transform:uppercase;letter-spacing:.4px;font-weight:700;white-space:nowrap}
+.sig-kpi-lbl{font-size:9px;color:var(--muted);text-transform:uppercase;letter-spacing:.4px;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .sig-kpi-val{font-size:16px;font-weight:900;margin-top:2px;line-height:1}
 .sig-kpi-sub{font-size:10px;font-weight:700;margin-top:2px;white-space:nowrap}
 .scan-chip{font-size:11px;color:var(--muted);padding:7px 14px;background:var(--card);border:1px solid var(--border);border-radius:20px}
@@ -865,30 +865,28 @@ input:checked + .slider:before {
 
     </div>
     <div class="hdr-right">
-      <div class="sig-kpi-row" title="Atualiza ao resolver TP1/TP2/SL dos sinais">
-        <div class="sig-kpi">
+      <div class="sig-kpi-grid">
+        <div class="sig-kpi" title="Atualiza ao resolver TP1/TP2/SL dos sinais">
           <div class="sig-kpi-lbl">Sinais Enviados (24h)</div>
           <div class="sig-kpi-val" id="kpiSigSent">--</div>
         </div>
-        <div class="sig-kpi">
+        <div class="sig-kpi" title="Atualiza ao resolver TP1/TP2/SL dos sinais">
           <div class="sig-kpi-lbl">Positivos / Negativos</div>
           <div class="sig-kpi-val"><span style="color:var(--up)" id="kpiSigPos">--</span> / <span style="color:var(--down)" id="kpiSigNeg">--</span></div>
         </div>
-        <div class="sig-kpi">
+        <div class="sig-kpi" title="Atualiza ao resolver TP1/TP2/SL dos sinais">
           <div class="sig-kpi-lbl">% Acerto</div>
           <div class="sig-kpi-val" id="kpiSigRate">--%</div>
         </div>
-      </div>
-      <div class="sig-kpi-row" title="Sinais bloqueados pelos filtros — Shadow Book (24h)">
-        <div class="sig-kpi">
+        <div class="sig-kpi" title="Sinais bloqueados pelos filtros — Shadow Book (24h)">
           <div class="sig-kpi-lbl">Descartados (24h)</div>
           <div class="sig-kpi-val" id="kpiShBlocked">--</div>
         </div>
-        <div class="sig-kpi">
+        <div class="sig-kpi" title="Sinais bloqueados pelos filtros — Shadow Book (24h)">
           <div class="sig-kpi-lbl">Teriam Ganho / Perdido</div>
           <div class="sig-kpi-val"><span style="color:var(--up)" id="kpiShWin">--</span> / <span style="color:var(--down)" id="kpiShLose">--</span></div>
         </div>
-        <div class="sig-kpi">
+        <div class="sig-kpi" title="Sinais bloqueados pelos filtros — Shadow Book (24h)">
           <div class="sig-kpi-lbl">WR Descartados</div>
           <div class="sig-kpi-val" id="kpiShWr">--%</div>
         </div>
