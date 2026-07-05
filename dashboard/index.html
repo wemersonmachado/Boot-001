@@ -1090,6 +1090,30 @@ input:checked + .slider:before {
       </div>
     </div>
 
+    <!-- SHADOW BOOK — sinais descartados pelos filtros (24h) -->
+    <div class="card" style="margin-bottom:18px" id="shadowCard">
+      <div class="ctitle">
+        Sinais Descartados (24h) — Shadow Book
+        <a onclick="loadShadow()">&#8635; Atualizar</a>
+      </div>
+      <div style="display:flex;flex-wrap:wrap;gap:18px;margin-bottom:10px">
+        <div><div class="sc-lbl">Bloqueados</div><div class="sc-val" id="sh-total">--</div></div>
+        <div><div class="sc-lbl">Teriam ganho</div><div class="sc-val" style="color:var(--up)" id="sh-win">--</div></div>
+        <div><div class="sc-lbl">Teriam perdido</div><div class="sc-val" style="color:var(--down)" id="sh-lose">--</div></div>
+        <div><div class="sc-lbl">WR dos descartados</div><div class="sc-val" id="sh-wr">--%</div></div>
+        <div><div class="sc-lbl">Pendentes</div><div class="sc-val" id="sh-pend">--</div></div>
+      </div>
+      <div class="sc-sub" style="margin-bottom:8px">
+        WR <b>baixo</b> = filtros salvando dinheiro · WR <b>alto</b> (&gt;50%) = filtros descartando lucro
+      </div>
+      <div style="overflow-x:auto">
+        <table class="tbl">
+          <thead><tr><th>Motivo do bloqueio</th><th>Qtd</th><th>Ganhariam</th><th>Perderiam</th><th>WR hipotético</th></tr></thead>
+          <tbody id="shadowBody"><tr><td colspan="5" class="empty">Sem dados ainda — aguardando sinais bloqueados serem resolvidos</td></tr></tbody>
+        </table>
+      </div>
+    </div>
+
     <!-- HISTORY -->
     <div class="card" style="margin-bottom:18px">
       <div class="ctitle">
@@ -1547,6 +1571,26 @@ async function loadHistory() {
     </tr>`;
   }).join('');
   set('histBody', rows);
+}
+
+async function loadShadow() {
+  const d = await apiFetch('/shadow/stats');
+  if (!d) return;
+  txt('sh-total', d.blocked ?? '--');
+  txt('sh-win',   d.would_win ?? '--');
+  txt('sh-lose',  d.would_lose ?? '--');
+  txt('sh-wr',    d.would_wr != null ? d.would_wr.toFixed(1) + '%' : '--%');
+  txt('sh-pend',  d.pending ?? '--');
+  const el = document.getElementById('sh-wr');
+  if (el && d.would_wr != null) el.style.color = d.would_wr > 50 ? 'var(--down)' : 'var(--up)';
+  const rows = (d.by_reason || []).map(r => `<tr>
+    <td>${r.reason || '--'}</td>
+    <td>${r.total}</td>
+    <td style="color:var(--up)">${r.wins}</td>
+    <td style="color:var(--down)">${r.losses}</td>
+    <td style="font-weight:700;color:${r.would_wr != null && r.would_wr > 50 ? 'var(--down)' : 'var(--up)'}">${r.would_wr != null ? r.would_wr.toFixed(1) + '%' : 'aguardando'}</td>
+  </tr>`).join('');
+  if (rows) set('shadowBody', rows);
 }
 
 async function loadMIE() {
@@ -2261,6 +2305,7 @@ async function loadAll() {
     loadPumpDump();
     loadSRZones();
     loadHistory();
+    loadShadow();
   });
 }
 
@@ -2462,6 +2507,7 @@ document.addEventListener('DOMContentLoaded', () => {
   setInterval(loadActiveTrades,  5000);
   setInterval(loadSignals,      15000);
   setInterval(loadPerformance,  30000);
+  setInterval(loadShadow,       60000);
   setInterval(loadSignalKPI,    15000);
   setInterval(loadGridStatus,    8000);
   setInterval(loadMIE,         600000);

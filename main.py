@@ -92,6 +92,8 @@ from database import (
     record_signal_outcome, upsert_daily_stats, get_score_adjustment,
     get_recent_trade_stats, get_recent_signal_stats, get_signal_kpi_summary,
     get_setting, save_setting,
+    save_shadow_signal, get_unresolved_shadow_signals,
+    resolve_shadow_signal, get_shadow_stats,
 )
 from notifier import (
     send_signal_alert, send_trade_opened, send_trade_closed,
@@ -1501,6 +1503,81 @@ async def job_autotune_score():
             print(f"[AUTOTUNE] win-rate {wr:.0f}% ({stats['n']} trades) → score_offset {old:+d} -> {_score_offset:+d}")
     except Exception as e:
         print(f"[AUTOTUNE] Erro: {e}")
+
+
+# ── Shadow book — registra sinais bloqueados e resolve seus outcomes ─────────
+def _record_shadow(s: dict, block_reason: str):
+    """Agenda o registro de um sinal bloqueado no shadow book (fail-open:
+    qualquer erro é engolido — o fluxo de sinais nunca depende disso)."""
+    try:
+        from config import SHADOW_BOOK_ENABLED
+        if not SHADOW_BOOK_ENABLED:
+            return
+        entry = float(s.get("entry", 0) or 0)
+        sl    = float(s.get("stop_loss", 0) or s.get("sl", 0) or 0)
+        tp    = float(s.get("tp1", 0) or s.get("tp", 0) or 0)
+        if not (entry > 0 and sl > 0 and tp > 0):
+            return
+        asyncio.create_task(save_shadow_signal(
+            str(s.get("asset", "")),
+            str(s.get("direction", "")).split(".")[-1].strip().upper(),
+            str(s.get("timeframe", "")),
+            entry, sl, tp, block_reason,
+        ))
+    except Exception as e:
+        print(f"[SHADOW] erro ao registrar (ignorado): {e}")
+
+
+async def job_shadow_outcome_watch():
+    """Resolve os sinais BLOQUEADOS: TP primeiro = WIN (o filtro custou lucro),
+    SL primeiro = LOSS (o filtro salvou dinheiro). Mesma lógica conservadora do
+    job_sinais_outcome_watch (TP e SL no mesmo candle = LOSS)."""
+    from config import SHADOW_BOOK_ENABLED, SHADOW_OUTCOME_MAX_H
+    if not SHADOW_BOOK_ENABLED:
+        return
+    import pandas as pd
+    from klines_cache import get_klines_cached as _gkl
+    pending = await get_unresolved_shadow_signals(SHADOW_OUTCOME_MAX_H)
+    if not pending:
+        return
+    _now = time.time()
+    for it in pending:
+        try:
+            entry, sl, tp = it["entry"], it["sl"], it["tp"]
+            is_long = "LONG" in (it["direction"] or "")
+            _ts = datetime.fromisoformat(it["ts"]).timestamp()
+            kl = await _gkl(it["asset"], it["timeframe"], limit=120)
+            hit_tp = hit_sl = False
+            if kl is not None and len(kl) > 0:
+                _entry_dt = pd.Timestamp(_ts, unit="s")
+                _sub = kl[kl.index >= (_entry_dt - pd.Timedelta(seconds=60))]
+                for hi, lo in zip(_sub["high"].values, _sub["low"].values):
+                    hi, lo = float(hi), float(lo)
+                    if is_long:
+                        if hi >= tp: hit_tp = True
+                        if lo <= sl: hit_sl = True
+                    else:
+                        if lo <= tp: hit_tp = True
+                        if hi >= sl: hit_sl = True
+                    if hit_tp or hit_sl:
+                        break
+            outcome, exit_px = None, entry
+            if hit_sl:
+                outcome, exit_px = "LOSS", sl
+            elif hit_tp:
+                outcome, exit_px = "WIN", tp
+            elif _now - _ts > SHADOW_OUTCOME_MAX_H * 3600:
+                try:
+                    exit_px = float(kl["close"].iloc[-1]) if kl is not None and len(kl) else entry
+                except Exception:
+                    exit_px = entry
+                outcome = "TIMEOUT"
+            if outcome is None:
+                continue
+            pnl_pct = ((exit_px - entry) / entry * 100.0) if is_long else ((entry - exit_px) / entry * 100.0)
+            await resolve_shadow_signal(int(it["id"]), outcome, exit_px, round(pnl_pct, 3))
+        except Exception as e:
+            print(f"[SHADOW-OUTCOME] erro {it.get('asset')}: {e}")
 
 
 # ── SINAIS: rastreio de resultado dos sinais transmitidos + auto-tune ─────────
@@ -3151,6 +3228,7 @@ async def job_sinais_scan():
                                  + _tf_score_bump.get(s.get("timeframe", ""), 0))
         if not result["passes"]:
             blocked_log.append(f"{s.get('asset')} [{result['block_reason']}]")
+            _record_shadow(s, result["block_reason"])
             continue
         sc = result["effective_score"]
         s["conf_label"]       = "Alta" if sc >= 80 else "Media" if sc >= 65 else "Baixa"
@@ -3173,6 +3251,7 @@ async def job_sinais_scan():
                                  + _tf_score_bump.get(s.get("timeframe", ""), 0))
         if not result["passes"]:
             blocked_log.append(f"{s.get('asset')} [{result['block_reason']}]")
+            _record_shadow(s, result["block_reason"])
             continue
         sc = result["effective_score"]
         s["conf_label"]       = "Alta" if sc >= 80 else "Media" if sc >= 65 else "Baixa"
@@ -3727,6 +3806,38 @@ async def job_update_trades():
 
             result = await process_trade_update(trade, price)
             trade = result["trade"]
+
+            # ── TIME-STOP (2026-07-05): trade que não anda é capital preso ────
+            # Se já passou TIME_STOP_MAX_CANDLES do TF e o preço não avançou nem
+            # TIME_STOP_PROGRESS_PCT% do caminho até o TP1, fecha no mercado.
+            # Só antes do TP1 (depois o trailing/scale-out já protege) e nunca
+            # sobrepõe um CLOSE que o process_trade_update já decidiu.
+            try:
+                from config import (TIME_STOP_ENABLED, TIME_STOP_MAX_CANDLES,
+                                    TIME_STOP_MIN_AGE_MIN, TIME_STOP_PROGRESS_PCT)
+                _has_close = any(a.get("action") == "CLOSE" for a in result["actions"])
+                if TIME_STOP_ENABLED and not _has_close and not trade.tp1_hit and trade.status == "OPEN":
+                    _opened_raw = trade_data.get("opened_at") or ""
+                    _opened_s   = str(_opened_raw).replace("Z", "").split("+")[0]
+                    _age_min    = (datetime.utcnow() - datetime.fromisoformat(_opened_s)).total_seconds() / 60.0
+                    _tf_min     = {"1m": 1, "3m": 3, "5m": 5, "15m": 15, "30m": 30,
+                                   "1h": 60, "4h": 240}.get(trade_data.get("timeframe") or "15m", 15)
+                    _max_age    = max(float(TIME_STOP_MIN_AGE_MIN), _tf_min * float(TIME_STOP_MAX_CANDLES))
+                    if _age_min >= _max_age:
+                        _entry_ts  = float(trade.entry_price)
+                        _dist_tp   = abs(float(trade.tp1) - _entry_ts)
+                        if _dist_tp > 0:
+                            _is_long  = getattr(trade.direction, "value", trade.direction) == "LONG"
+                            _progress = ((price - _entry_ts) if _is_long else (_entry_ts - price)) / _dist_tp
+                            if _progress < TIME_STOP_PROGRESS_PCT / 100.0:
+                                trade.status    = "CLOSED"
+                                trade.closed_at = datetime.utcnow()
+                                result["actions"].append({"action": "CLOSE", "reason": "TIME_STOP"})
+                                print(f"[TIME-STOP] {trade.asset} {trade_data.get('timeframe')} "
+                                      f"aberto há {_age_min:.0f}min, progresso {_progress*100:.0f}% "
+                                      f"até TP1 → fechando no mercado")
+            except Exception as _tse:
+                print(f"[TIME-STOP] erro (ignorado, trade segue normal): {_tse}")
 
             # Execute actions on Binance (sync calls em thread para não bloquear event loop)
             for action in result["actions"]:
@@ -4772,6 +4883,7 @@ async def lifespan(app: FastAPI):
     scheduler.add_job(job_circuit_breaker_watch,     "interval", seconds=30, id="circuit_breaker",    max_instances=1, coalesce=True)
     scheduler.add_job(job_autotune_score,            "interval", minutes=15, id="autotune_score",     max_instances=1, coalesce=True)
     scheduler.add_job(job_sinais_outcome_watch,      "interval", minutes=3,  id="sinais_outcome",     max_instances=1, coalesce=True, jitter=20)
+    scheduler.add_job(job_shadow_outcome_watch,      "interval", minutes=5,  id="shadow_outcome",     max_instances=1, coalesce=True, jitter=30)
     scheduler.add_job(job_sinais_autotune,           "interval", minutes=20, id="sinais_autotune",    max_instances=1, coalesce=True)
     scheduler.add_job(_job_correlation_refresh,      "interval", minutes=30, id="correlation",        max_instances=1, coalesce=True, jitter=60)
     scheduler.add_job(job_pairs_arbitrage,           "interval", minutes=15, id="pairs_arbitrage",      max_instances=1, coalesce=True, jitter=30)
@@ -6835,6 +6947,13 @@ async def selftest_settings():
             "structural": structural_problems,
         },
     }
+
+
+@app.get("/shadow/stats")
+async def shadow_stats_endpoint(hours: float = 24.0):
+    """Shadow book: o que os sinais BLOQUEADOS pelos filtros teriam feito.
+    would_wr alto = os filtros estão jogando lucro fora; baixo = estão salvando."""
+    return await get_shadow_stats(hours)
 
 
 @app.get("/cache/stats")

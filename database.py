@@ -170,6 +170,25 @@ CREATE TABLE IF NOT EXISTS strategy_registry (
     trained_at       TEXT,
     created_at       TEXT    NOT NULL
 );
+
+-- Shadow book (2026-07-05): sinais BLOQUEADOS pelos filtros + o que TERIA
+-- acontecido (TP ou SL primeiro). Único jeito de auditar se cada gate salva
+-- dinheiro ou joga lucro fora — sem isso, só medimos o que foi enviado.
+CREATE TABLE IF NOT EXISTS shadow_signals (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts           TEXT    NOT NULL,
+    asset        TEXT,
+    direction    TEXT,
+    timeframe    TEXT,
+    entry        REAL,
+    sl           REAL,
+    tp           REAL,
+    block_reason TEXT,
+    outcome      TEXT,            -- NULL=pendente | WIN | LOSS | TIMEOUT
+    exit_price   REAL,
+    pnl_pct      REAL,
+    resolved_at  TEXT
+);
 """
 
 _INDEXES = """
@@ -188,6 +207,8 @@ CREATE INDEX IF NOT EXISTS idx_profiles_asset    ON asset_profiles(asset, timefr
 CREATE INDEX IF NOT EXISTS idx_cp_asset_ts       ON candlestick_patterns(asset, detected_at);
 CREATE INDEX IF NOT EXISTS idx_cp_signal         ON candlestick_patterns(signal, detected_at);
 CREATE INDEX IF NOT EXISTS idx_registry_status    ON strategy_registry(status, name);
+CREATE INDEX IF NOT EXISTS idx_shadow_outcome     ON shadow_signals(outcome, ts);
+CREATE INDEX IF NOT EXISTS idx_shadow_asset       ON shadow_signals(asset, timeframe, direction, ts);
 """
 
 
@@ -555,6 +576,108 @@ async def record_signal_outcome(signal_db_id: int, asset: str, direction: str,
              pnl_pct, outcome, dt.hour, dt.weekday(), tags, rsi_val, now),
         )
         await db.commit()
+
+
+# ── Shadow book — sinais bloqueados e seus resultados hipotéticos ────────────
+
+async def save_shadow_signal(asset: str, direction: str, timeframe: str,
+                             entry: float, sl: float, tp: float,
+                             block_reason: str, dedup_min: int = 30) -> bool:
+    """Registra um sinal bloqueado pelos filtros para rastreio hipotético.
+    Dedup: ignora se o MESMO asset+tf+direction já foi registrado (pendente)
+    nos últimos dedup_min minutos — o scan roda a cada 60s e re-bloquearia o
+    mesmo setup dezenas de vezes, inflando a amostra com duplicatas."""
+    now = datetime.utcnow()
+    cutoff = (now - timedelta(minutes=dedup_min)).isoformat()
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            """SELECT 1 FROM shadow_signals
+               WHERE asset=? AND timeframe=? AND direction=? AND ts>=? LIMIT 1""",
+            (asset, timeframe, direction, cutoff),
+        ) as cur:
+            if await cur.fetchone():
+                return False
+        await db.execute(
+            """INSERT INTO shadow_signals
+               (ts, asset, direction, timeframe, entry, sl, tp, block_reason)
+               VALUES (?,?,?,?,?,?,?,?)""",
+            (now.isoformat(), asset, direction, timeframe, entry, sl, tp, block_reason[:120]),
+        )
+        await db.commit()
+    return True
+
+
+async def get_unresolved_shadow_signals(max_age_h: float, limit: int = 200) -> list:
+    """Sinais bloqueados ainda sem resultado, dentro da janela de resolução."""
+    cutoff = (datetime.utcnow() - timedelta(hours=max_age_h)).isoformat()
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            """SELECT id, ts, asset, direction, timeframe, entry, sl, tp, block_reason
+               FROM shadow_signals WHERE outcome IS NULL AND ts>=?
+               ORDER BY ts ASC LIMIT ?""",
+            (cutoff, limit),
+        ) as cur:
+            return [dict(r) for r in await cur.fetchall()]
+
+
+async def resolve_shadow_signal(row_id: int, outcome: str, exit_price: float, pnl_pct: float):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "UPDATE shadow_signals SET outcome=?, exit_price=?, pnl_pct=?, resolved_at=? WHERE id=?",
+            (outcome, exit_price, pnl_pct, datetime.utcnow().isoformat(), row_id),
+        )
+        await db.commit()
+
+
+async def get_shadow_stats(hours: float = 24.0) -> dict:
+    """Resumo das últimas N horas do shadow book: quantos sinais foram
+    bloqueados, quantos TERIAM ganho/perdido, e o ranking por motivo de
+    bloqueio — a nota de cada filtro (WR alto dos bloqueados = filtro ruim)."""
+    cutoff = (datetime.utcnow() - timedelta(hours=hours)).isoformat()
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            """SELECT outcome, COUNT(*) n, COALESCE(AVG(pnl_pct),0) avg_pnl
+               FROM shadow_signals WHERE ts>=? GROUP BY outcome""",
+            (cutoff,),
+        ) as cur:
+            by_outcome = {(r["outcome"] or "PENDENTE"): {"n": r["n"], "avg_pnl": round(r["avg_pnl"], 2)}
+                          for r in await cur.fetchall()}
+        async with db.execute(
+            """SELECT block_reason,
+                      COUNT(*) total,
+                      SUM(CASE WHEN outcome='WIN'  THEN 1 ELSE 0 END) wins,
+                      SUM(CASE WHEN outcome='LOSS' THEN 1 ELSE 0 END) losses
+               FROM shadow_signals WHERE ts>=?
+               GROUP BY block_reason ORDER BY total DESC LIMIT 10""",
+            (cutoff,),
+        ) as cur:
+            reasons = []
+            for r in await cur.fetchall():
+                resolved = (r["wins"] or 0) + (r["losses"] or 0)
+                reasons.append({
+                    "reason":   r["block_reason"],
+                    "total":    r["total"],
+                    "wins":     r["wins"] or 0,
+                    "losses":   r["losses"] or 0,
+                    "would_wr": round((r["wins"] or 0) / resolved * 100, 1) if resolved else None,
+                })
+    total   = sum(v["n"] for v in by_outcome.values())
+    wins    = by_outcome.get("WIN",  {}).get("n", 0)
+    losses  = by_outcome.get("LOSS", {}).get("n", 0)
+    resolved = wins + losses
+    return {
+        "hours":       hours,
+        "blocked":     total,
+        "resolved":    resolved,
+        "would_win":   wins,
+        "would_lose":  losses,
+        "pending":     by_outcome.get("PENDENTE", {}).get("n", 0),
+        "timeout":     by_outcome.get("TIMEOUT", {}).get("n", 0),
+        "would_wr":    round(wins / resolved * 100, 1) if resolved else None,
+        "by_reason":   reasons,
+    }
 
 
 async def get_score_adjustment(asset: str, timeframe: str,

@@ -100,6 +100,23 @@ MODE_SETTINGS = {
     },
 }
 
+# ── Shadow book (2026-07-05) ──────────────────────────────────────────────────
+# Registra os sinais BLOQUEADOS pelos filtros e acompanha o que teria acontecido
+# (TP ou SL primeiro). Auditoria dos gates: se os bloqueados de um filtro têm
+# win-rate alto, o filtro está jogando lucro fora; se baixo, está salvando.
+SHADOW_BOOK_ENABLED    = True
+SHADOW_OUTCOME_MAX_H   = 24.0   # janela para resolver (depois vira TIMEOUT)
+
+# ── Time-stop (2026-07-05) — sair de trade que não anda ───────────────────────
+# Trade aberto que após N candles do seu timeframe não avançou nem X% do caminho
+# até o TP1 é fechado no mercado (reason TIME_STOP). Capital preso é edge
+# decaindo: estatisticamente, trade que não performa cedo termina em SL com
+# frequência desproporcional. Só age ANTES do TP1 (depois o trailing protege).
+TIME_STOP_ENABLED       = True
+TIME_STOP_MAX_CANDLES   = 40     # idade máxima em candles do TF do trade
+TIME_STOP_MIN_AGE_MIN   = 45     # nunca fecha antes disso (independe do TF)
+TIME_STOP_PROGRESS_PCT  = 25.0   # precisa ter andado ≥25% do caminho até o TP1
+
 # ── Kill-switch do modo AUTÔNOMO ──────────────────────────────────────────────
 # Se a sessão autônoma perder esta % da banca inicial, PARA TUDO (não abre novas
 # entradas) até reset manual via /killswitch reset ou endpoint /bot/killswitch/reset.
