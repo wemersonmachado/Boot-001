@@ -225,40 +225,57 @@ def open_trade(trade: ActiveTrade) -> dict:
             **entry_kwargs(),
         )
 
-        # Stop Loss
-        sl_price = round_step(trade.stop_loss, prec["tick_size"])
-        sl_order = {
-            "symbol": trade.asset,
-            "side": close_side,
-            "type": "STOP_MARKET",
-            "stopPrice": sl_price,
-        }
-        sl_order.update(sl_kwargs())
-        if not hedge:
-            pass  # closePosition já incluído via sl_kwargs
-        else:
-            sl_order["quantity"] = qty
-        client.futures_create_order(**sl_order)
+        # A partir daqui a posição JA EXISTE na exchange — qualquer falha abaixo
+        # (rede, rate-limit) deixaria a posição aberta sem SL/TP e, como a função
+        # retornaria ERROR, o trade nunca seria salvo no banco (posição órfã,
+        # invisível para o bot). Por isso o SL/TP fica num try próprio: se falhar,
+        # tentamos fechar a posição recém-aberta imediatamente (rollback de
+        # segurança) em vez de deixá-la exposta.
+        try:
+            # Stop Loss
+            sl_price = round_step(trade.stop_loss, prec["tick_size"])
+            sl_order = {
+                "symbol": trade.asset,
+                "side": close_side,
+                "type": "STOP_MARKET",
+                "stopPrice": sl_price,
+            }
+            sl_order.update(sl_kwargs())
+            if not hedge:
+                pass  # closePosition já incluído via sl_kwargs
+            else:
+                sl_order["quantity"] = qty
+            client.futures_create_order(**sl_order)
 
-        tp_prices = {1: trade.tp1, 2: trade.tp2, 3: trade.tp3}
-        allocated = 0.0
-        for tp_level, fraction in SCALE_OUT_MILESTONES:
-            tp_price = tp_prices.get(int(tp_level))
-            if not tp_price:
-                continue
-            raw_qty = max(qty - allocated, 0.0) if int(tp_level) == 3 else qty * float(fraction)
-            tp_qty = round_step(raw_qty, prec["step_size"])
-            if tp_qty <= 0:
-                continue
-            allocated += tp_qty
-            client.futures_create_order(
-                symbol=trade.asset,
-                side=close_side,
-                type="TAKE_PROFIT_MARKET",
-                stopPrice=round_step(tp_price, prec["tick_size"]),
-                quantity=tp_qty,
-                **close_kwargs(),
-            )
+            tp_prices = {1: trade.tp1, 2: trade.tp2, 3: trade.tp3}
+            allocated = 0.0
+            for tp_level, fraction in SCALE_OUT_MILESTONES:
+                tp_price = tp_prices.get(int(tp_level))
+                if not tp_price:
+                    continue
+                raw_qty = max(qty - allocated, 0.0) if int(tp_level) == 3 else qty * float(fraction)
+                tp_qty = round_step(raw_qty, prec["step_size"])
+                if tp_qty <= 0:
+                    continue
+                allocated += tp_qty
+                client.futures_create_order(
+                    symbol=trade.asset,
+                    side=close_side,
+                    type="TAKE_PROFIT_MARKET",
+                    stopPrice=round_step(tp_price, prec["tick_size"]),
+                    quantity=tp_qty,
+                    **close_kwargs(),
+                )
+        except BinanceAPIException as _sl_e:
+            print(f"[EXECUTOR] FALHA ao colocar SL/TP apos entrada executada em {trade.asset}: {_sl_e}")
+            try:
+                _emrg_ok = close_position(trade.asset, trade.direction, client)
+            except Exception as _close_e:
+                _emrg_ok = False
+                print(f"[EXECUTOR] Falha no fechamento de emergencia de {trade.asset}: {_close_e}")
+            if _emrg_ok:
+                return {"status": "ERROR", "msg": f"SL/TP falhou, posicao revertida (fechamento de emergencia): {_sl_e}"}
+            return {"status": "ERROR", "msg": f"CRITICO: SL/TP falhou E fechamento de emergencia falhou — posicao {trade.asset} pode estar aberta SEM protecao: {_sl_e}"}
 
         print(f"[EXECUTOR] Opened {trade.direction} {trade.asset} qty={qty} @ market")
         return {"status": "OK", "order_id": order["orderId"], "qty": qty}
@@ -360,8 +377,10 @@ def close_position(symbol: str, direction: Direction, client: Client = None, qty
         if qty is None:
             try:
                 client.futures_cancel_all_open_orders(symbol=symbol)
-            except Exception:
-                pass
+            except Exception as _cancel_err:
+                # Não bloqueia o fechamento, mas registra — se o cancelamento
+                # falhar aqui, pode sobrar SL/TP órfão na exchange após o close.
+                print(f"[EXECUTOR] Aviso: falha ao cancelar ordens abertas de {symbol} antes do close: {_cancel_err}")
 
         if hedge:
             # Hedge Mode: need actual position size and positionSide
@@ -510,9 +529,11 @@ def execute_dca_order(symbol: str, side: str, qty_usdt: float, new_sl: float, ne
                     continue
                 try:
                     client.futures_cancel_order(symbol=symbol, orderId=o["orderId"])
-                except Exception:
-                    pass
-                    
+                except Exception as _cancel_err:
+                    # Não bloqueia o DCA, mas registra — ordem antiga pode ficar
+                    # órfã coexistindo com o novo SL/TP criado abaixo.
+                    print(f"[EXECUTOR] Aviso: falha ao cancelar ordem {o.get('orderId')} de {symbol} no DCA: {_cancel_err}")
+
         # Cria novo SL
         sl_price = round_step(new_sl, prec["tick_size"])
         sl_order = {

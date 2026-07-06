@@ -1058,6 +1058,25 @@ async def _post_photo(photo_bytes: bytes, caption: str, reply_markup: dict = Non
                 timeout=aiohttp.ClientTimeout(total=30)
             ) as r:
                 res_json = await r.json()
+                if (not res_json.get("ok")
+                        and "parse" in str(res_json.get("description", "")).lower()
+                        and caption and parse_mode):
+                    # BLINDAGEM MARKDOWN (mesmo padrão de _post): se só a legenda
+                    # falhou o parse, reenvia a MESMA foto sem parse_mode em vez
+                    # de descartar o gráfico (o fallback do chamador cai para
+                    # texto puro sem imagem, perdendo a isca visual do tier 4).
+                    print(f"[TELEGRAM] Parse Markdown falhou na legenda da foto — reenviando sem formatação: {res_json.get('description','')[:80]}")
+                    data2 = aiohttp.FormData()
+                    data2.add_field("chat_id", target)
+                    data2.add_field("photo", photo_bytes, filename="chart.png", content_type="image/png")
+                    data2.add_field("caption", caption)
+                    if reply_markup:
+                        data2.add_field("reply_markup", json.dumps(reply_markup))
+                    async with sess.post(
+                        f"{TELEGRAM_API}/sendPhoto", data=data2,
+                        timeout=aiohttp.ClientTimeout(total=30)
+                    ) as r2:
+                        return await r2.json()
                 if not res_json.get("ok"):
                     print(f"[TELEGRAM] sendPhoto respondeu erro para {target}: {res_json}")
                 return res_json

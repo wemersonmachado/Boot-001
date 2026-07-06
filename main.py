@@ -911,6 +911,7 @@ _daily_reset_date = datetime.utcnow().date()
 _balance_cache: dict = {}
 _signal_cooldown: dict = {}
 _executing_assets: set = set()  # assets currently mid-execution (prevents race-condition duplicates)
+_orphan_alerted: set = set()  # symbol_DIRECTION já alertados como posição órfã (Binance sem registro no banco)
 
 # Claude Brain — desativado por padrão; ativado via botão /brain/toggle
 import claude_brain
@@ -1829,6 +1830,12 @@ async def _execute_trade_inner(signal_dict: dict):
             print(f"[CLAUDE BRAIN] Sizing multiplier aplicado: {_size_mult}x -> novo risco = ${risk_usdt:.2f}")
 
         # Distância percentual do Stop Loss
+        if not signal.entry or signal.entry <= 0:
+            # Dado de preço corrompido/inválido — não deveria acontecer em
+            # operação normal. Aborta esta execução por segurança em vez de
+            # deixar o ZeroDivisionError propagar sem contexto.
+            print(f"[SIZING] {signal.asset} entry inválido ({signal.entry}) — abortando execução por segurança")
+            return
         sl_distance_pct = abs(signal.entry - signal.stop_loss) / signal.entry * 100
         if sl_distance_pct > 0:
             notional = (risk_usdt / sl_distance_pct * 100)
@@ -2146,8 +2153,13 @@ async def job_auto_trade(signals: list):
                 print(f"[CORR-DYN] Skip {signal.asset} — {_corr_reason}")
                 _blk("correlacao_dinamica")
                 continue
-        except Exception:
-            pass
+        except Exception as _corr_err:
+            # Fail-closed: se o cálculo de correlação falhar, bloqueia por segurança
+            # em vez de deixar passar (era fail-open). Não deveria acontecer em
+            # operação normal — só quando há erro real no cálculo.
+            print(f"[CORR-DYN] Erro no cálculo — bloqueando por segurança: {_corr_err}")
+            _blk("erro_correlacao_dinamica")
+            continue
         # Cooldown afrouxado: 60s por ativo+direção (era 90s)
         # NOTA: o timestamp é marcado SÓ quando o sinal qualifica e é enviado (mais
         # abaixo, após todos os filtros). Assim sinais reprovados por vol_spike/portfolio
@@ -2174,8 +2186,13 @@ async def job_auto_trade(signals: list):
                     print(f"[STALE] {signal.asset} sinal com {_age_min:.0f}min — limite {_STALE_MAX_MIN}min — skip")
                     _blk("staleness")
                     continue
-        except Exception:
-            pass
+        except Exception as _stale_err:
+            # Fail-closed: erro ao ler o timestamp do sinal → trata como sinal
+            # potencialmente velho e bloqueia (era fail-open). Sem impacto em
+            # operação normal (só dispara se signal.timestamp vier corrompido).
+            print(f"[STALE] Erro ao checar idade do sinal — bloqueando por segurança: {_stale_err}")
+            _blk("erro_staleness")
+            continue
 
         # FIX #9 — Structural Tag obrigatória em modo NORMAL
         if CURRENT_MODE == "NORMAL":
@@ -2202,8 +2219,12 @@ async def job_auto_trade(signals: list):
                     print(f"[VOL] ❌ {signal.asset} vol={_vol_last:.0f} < {_VOL_MIN}x media={_vol_avg:.0f} — skip")
                     _blk("vol_spike<1.2x")
                     continue
-        except Exception:
-            pass
+        except Exception as _vol_err:
+            # Fail-closed: se buscar/calcular volume falhar, bloqueia por
+            # segurança (era fail-open). Sem impacto em operação normal.
+            print(f"[VOL] Erro no cálculo de volume — bloqueando por segurança: {_vol_err}")
+            _blk("erro_vol_spike")
+            continue
 
         signal_dict = signal.model_dump()
         signal_dict["direction"]  = signal.direction.value
@@ -2397,8 +2418,13 @@ async def job_auto_trade(signals: list):
                 print(f"[PORTFOLIO] {signal.asset} bloqueado: {_port_reason}")
                 _blk("portfolio_risk")
                 continue
-        except Exception:
-            pass
+        except Exception as _port_err:
+            # Fail-closed: se o gate de risco de portfólio falhar, bloqueia por
+            # segurança (era fail-open — deixava abrir sem o VaR/correlação
+            # terem rodado). Sem impacto em operação normal.
+            print(f"[PORTFOLIO] Erro no gate de risco — bloqueando por segurança: {_port_err}")
+            _blk("erro_portfolio_risk")
+            continue
 
         # ── Funding alert ─────────────────────────────────────────────────────
         try:
@@ -2794,8 +2820,12 @@ async def job_grid_scan(pairs: list = None):
                 if not _port_ok:
                     print(f"[GRID PORTFOLIO] {symbol} bloqueado: {_port_reason}")
                     continue
-            except Exception:
-                pass
+            except Exception as _gport_err:
+                # Fail-closed: erro no gate de risco de portfólio do grid →
+                # bloqueia por segurança (era fail-open). Sem impacto em
+                # operação normal.
+                print(f"[GRID PORTFOLIO] Erro no gate de risco — bloqueando por segurança: {_gport_err}")
+                continue
 
             # [G9] Claude Brain — apenas quando ativado e score >= 65
             _brain_active = _claude_brain_enabled
@@ -3615,6 +3645,25 @@ async def _job_sync_binance():
                 except Exception as _ro_ex:
                     print(f"[SYNC] record_signal_outcome falhou: {_ro_ex}")
                 print(f"[SYNC] {symbol} {db_dir} fechado na Binance → PnL realizado ${_pnl_real:.4f} gravado")
+
+        # ── Reconciliação inversa: posição real na Binance sem registro no banco ──
+        # (ex.: processo caiu entre a ordem executada e o save_trade — ver auditoria
+        # 06/07/2026). Só ALERTA, não adota automaticamente — não muda comportamento
+        # de trading, só visibilidade.
+        _db_keys = {f"{t['asset']}_{str(t.get('direction', 'LONG')).upper()}" for t in db_trades}
+        for _okey, _odir in open_map.items():
+            if _okey not in _db_keys and _okey not in _orphan_alerted:
+                _orphan_alerted.add(_okey)
+                _osym = _okey.rsplit("_", 1)[0]
+                print(f"[SYNC] ⚠️ ÓRFÃ: posição {_osym} {_odir} existe na Binance mas não no banco")
+                asyncio.create_task(send_alert(
+                    f"⚠️ *Posição órfã detectada*\n"
+                    f"`{_osym}` `{_odir}` está aberta na Binance mas NÃO está registrada no bot.\n"
+                    f"Pode ter sido aberta manualmente ou o processo caiu entre a ordem ser executada e o "
+                    f"registro no banco. Verifique e gerencie manualmente se necessário."
+                ))
+        _orphan_alerted.intersection_update(open_map.keys())  # permite realertar se a posição sumir e reaparecer
+
         _register_binance_ok()  # chamada Binance bem-sucedida → zera streak de erros
     except Exception as e:
         print(f"[SYNC] Erro: {e}")
@@ -3875,9 +3924,23 @@ async def job_update_trades():
                 elif action["action"] == "CLOSE":
                     _asset = trade.asset
                     _dir   = trade.direction
-                    await asyncio.to_thread(
-                        lambda: close_position(_asset, _dir, _get_binance_client_synced())
-                    )
+                    _is_paper = bool(trade_data.get("paper")) or PAPER_TRADING
+                    _close_ok = True
+                    if not _is_paper:
+                        _close_ok = await asyncio.to_thread(
+                            lambda: close_position(_asset, _dir, _get_binance_client_synced())
+                        )
+                    if not _close_ok:
+                        # Fechamento real falhou na Binance — NAO marca CLOSED no
+                        # banco (posicao real continua aberta). Alerta e tenta de
+                        # novo no proximo ciclo do job_update_trades.
+                        print(f"[TRADE UPDATE] Falha ao fechar {_asset} na Binance — mantendo trade OPEN para nova tentativa")
+                        asyncio.create_task(send_alert(
+                            f"⚠️ *Falha ao fechar posicao* `{_asset}`\n"
+                            f"A Binance recusou/nao confirmou o fechamento — a posicao PODE continuar aberta. "
+                            f"O bot vai tentar novamente no proximo ciclo. Verifique manualmente se necessario."
+                        ))
+                        continue
                     _exit_px   = float(price)
                     _entry     = float(trade.entry_price)
                     _qty       = float(trade.size_usdt) / _entry if _entry > 0 else 0.0
@@ -5036,7 +5099,7 @@ async def _dashboard_auth_middleware(request, call_next):
 
 @app.post("/webhook")
 async def webhook(alert: WebhookAlert, background: BackgroundTasks):
-    if not WEBHOOK_SECRET or alert.secret != WEBHOOK_SECRET:
+    if not WEBHOOK_SECRET or not _secrets_mod.compare_digest(alert.secret, WEBHOOK_SECRET):
         raise HTTPException(status_code=401, detail="Invalid secret or WEBHOOK_SECRET not configured")
 
     symbol = alert.asset.upper()
@@ -7131,14 +7194,6 @@ async def get_asset_memory():
 @app.get("/asset_memory/{symbol}")
 async def get_asset_memory_symbol(symbol: str):
     return _asset_memory.get_stats(symbol.upper())
-
-
-# ── Fear & Greed ───────────────────────────────────────────────────────────────
-
-@app.get("/fear_greed")
-async def get_fear_greed_endpoint():
-    from fear_greed import get_fear_greed
-    return await get_fear_greed()
 
 
 # ── Portfolio Risk ─────────────────────────────────────────────────────────────
