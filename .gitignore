@@ -2,7 +2,10 @@
 .env.*
 !.env.example
 *.db
+*.db-*
 *.sqlite*
+*.pid
+.claude/
 __pycache__/
 *.pyc
 venv/

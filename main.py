@@ -95,6 +95,7 @@ from database import (
     get_setting, save_setting,
     save_shadow_signal, get_unresolved_shadow_signals,
     resolve_shadow_signal, get_shadow_stats,
+    get_recent_shadow_detail, get_recent_sinais_detail,
 )
 from notifier import (
     send_signal_alert, send_trade_opened, send_trade_closed,
@@ -7028,6 +7029,18 @@ async def shadow_stats_endpoint(hours: float = 24.0):
     """Shadow book: o que os sinais BLOQUEADOS pelos filtros teriam feito.
     would_wr alto = os filtros estão jogando lucro fora; baixo = estão salvando."""
     return await get_shadow_stats(hours)
+
+
+@app.get("/shadow/recent")
+async def shadow_recent_endpoint(limit: int = 30):
+    """Últimos sinais descartados, linha a linha (dashboard: tabela em tempo real)."""
+    return {"rows": await get_recent_shadow_detail(limit)}
+
+
+@app.get("/signals/recent")
+async def signals_recent_endpoint(limit: int = 30):
+    """Últimos sinais SINAIS enviados, linha a linha (dashboard: tabela em tempo real)."""
+    return {"rows": await get_recent_sinais_detail(limit)}
 
 
 @app.get("/cache/stats")

@@ -664,6 +664,37 @@ async def resolve_shadow_signal(row_id: int, outcome: str, exit_price: float, pn
         await db.commit()
 
 
+async def get_recent_shadow_detail(limit: int = 30) -> list:
+    """Últimos N sinais descartados (shadow book), linha a linha, para a tabela
+    em tempo real do dashboard — ativo, motivo do descarte e resultado hipotético."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            """SELECT asset, direction, timeframe, block_reason, outcome, pnl_pct, ts
+               FROM shadow_signals ORDER BY id DESC LIMIT ?""",
+            (int(limit),),
+        ) as cur:
+            return [dict(r) for r in await cur.fetchall()]
+
+
+async def get_recent_sinais_detail(limit: int = 30) -> list:
+    """Últimos N sinais SINAIS (destino 'vip') enviados, linha a linha, para a
+    tabela em tempo real do dashboard — ativo, motivo/tag e resultado real."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        await _configure_db(db)
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            """SELECT s.asset, s.direction, s.timeframe, s.confidence, s.reason,
+                      o.outcome, o.pnl_pct, s.timestamp
+               FROM signals s
+               JOIN telegram_sent t ON t.signal_db_id = s.id AND t.destination = 'vip'
+               LEFT JOIN signal_outcomes o ON o.signal_db_id = s.id
+               ORDER BY s.id DESC LIMIT ?""",
+            (int(limit),),
+        ) as cur:
+            return [dict(r) for r in await cur.fetchall()]
+
+
 async def get_shadow_stats(hours: float = 24.0) -> dict:
     """Resumo das últimas N horas do shadow book: quantos sinais foram
     bloqueados, quantos TERIAM ganho/perdido, e o ranking por motivo de

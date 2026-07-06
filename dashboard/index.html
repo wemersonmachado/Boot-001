@@ -488,6 +488,16 @@ input:checked + .slider:before {
 .ob-hint{display:block;font-size:9px;color:var(--muted);font-weight:600;margin-top:1px}
 .ob.sel .ob-hint{color:var(--gold)}
 .lever-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:7px}
+/* ══════════ TABLET (769px–1024px) — relaxa colunas, ainda lado a lado ══ */
+@media(max-width:1024px) and (min-width:769px){
+  .coin-grid{grid-template-columns:repeat(2,1fr)!important}
+  .sg{grid-template-columns:repeat(4,1fr)!important}
+  .perf-grid{grid-template-columns:repeat(3,1fr)!important}
+  .mie-row{grid-template-columns:repeat(2,1fr)!important}
+  .ts-row{grid-template-columns:1fr!important}
+  .sig-kpi-grid{grid-template-columns:repeat(3,minmax(100px,1fr))!important}
+}
+
 /* ══════════ MOBILE / SMARTPHONE (≤768px) ══════════ */
 @media(max-width:768px){
   /* libera o scroll: o desktop trava html/body com overflow:hidden+height:100% */
@@ -497,25 +507,64 @@ input:checked + .slider:before {
   .wizard{width:100%;min-width:0;max-width:none;border-right:none;
           border-bottom:1px solid var(--border);overflow:visible;height:auto;flex-shrink:1}
   .main{flex:none;width:100%;min-width:0;overflow:visible;height:auto;padding:12px}
+  .content{padding:12px 4px 18px}
   /* grids colapsam para caber no celular */
-  .coin-grid{grid-template-columns:1fr 1fr!important}
-  .sg{grid-template-columns:1fr 1fr 1fr!important}
-  .perf-grid{grid-template-columns:1fr 1fr!important}
-  .mie-row,.ts-row{grid-template-columns:1fr!important}
+  .coin-grid{grid-template-columns:1fr 1fr!important;gap:8px}
+  .sg{grid-template-columns:1fr 1fr!important;gap:8px}
+  .perf-grid{grid-template-columns:1fr 1fr!important;gap:8px}
+  .mie-row,.ts-row{grid-template-columns:1fr!important;gap:10px}
   .og,.og2,.og3,.qa-grid{grid-template-columns:1fr 1fr!important}
   .lever-grid,.exec-pills.three,.exec-pills.four{grid-template-columns:1fr 1fr!important}
-  /* cabeçalho e barras empilham */
-  .hdr{flex-direction:column;align-items:flex-start;gap:10px}
-  .periods{gap:16px;flex-wrap:wrap}
-  .hdr-right{flex-wrap:wrap;gap:8px}
-  .pd-alert{max-width:none;min-width:0}
+  /* cabeçalho e barras empilham, ocupando 100% da largura */
+  .hdr{flex-direction:column;align-items:stretch;gap:14px;padding:14px 12px}
+  .hdr-left{width:100%}
+  .hdr-box{flex-wrap:wrap;width:100%;gap:8px}
+  .periods{gap:16px;flex-wrap:wrap;width:100%}
+  .hdr-right{flex-wrap:wrap;gap:8px;align-items:stretch;width:100%}
+  .hdr-right-icons{justify-content:space-between;width:100%}
+  .sig-kpi-grid{grid-template-columns:repeat(3,1fr);width:100%;gap:6px}
+  .sig-kpi{padding:6px 6px}
+  .sig-kpi-val{font-size:14px}
+  .bal-val{font-size:clamp(28px,8vw,42px)}
+  .pd-alert{max-width:none;min-width:0;flex:1 1 45%}
   .coin-grid .spark,.spark{height:34px}
+  /* cards e tabelas: espaçamento reduzido, texto ligeiramente menor, mantém
+     rolagem horizontal (não corta colunas — cada tabela já vem com
+     overflow-x:auto no wrapper) */
+  .card{padding:12px}
+  .ctitle{flex-wrap:wrap;gap:6px}
+  .tbl{font-size:11px}
+  .tbl th,.tbl td{padding:7px 6px;white-space:nowrap}
+  .tbl td[style*="max-width"]{white-space:normal;min-width:140px}
+  /* botões e áreas clicáveis com alvo de toque confortável (≥40px) */
+  .hdr-action-btn,.qb,.ob,.exec-pill,.qa-scan,.s-conf{min-height:40px}
+  .hdr-btn,.avatar{width:40px;height:40px}
+  /* backtest: filtros empilham em 2 colunas, botões ocupam a largura toda */
+  #backtestCard > div[style*="flex-wrap:wrap"]{gap:8px}
+  #backtestCard input,#backtestCard select{flex:1 1 45%;min-width:0!important;width:auto!important}
+  #bt-runBtn,#bt-fullBtn{flex:1 1 100%}
+  #bt-stats{grid-template-columns:1fr 1fr!important}
+  /* toast não deve ficar preso à largura do wizard desktop */
+  #toast{left:12px!important;right:12px;max-width:none!important;bottom:14px}
 }
 /* telas bem pequenas (≤430px) — 1 coluna nos cartões principais */
 @media(max-width:430px){
   .coin-grid,.perf-grid,.sg{grid-template-columns:1fr 1fr!important}
+  .sig-kpi-grid{grid-template-columns:1fr 1fr!important}
+  .mie-row{grid-template-columns:1fr!important}
   .main{padding:9px}
+  .content{padding:9px 2px 16px}
   body{font-size:13px}
+  .bal-val{font-size:26px}
+  #backtestCard input,#backtestCard select{flex:1 1 100%}
+  #bt-stats{grid-template-columns:1fr 1fr!important}
+}
+/* safe-area (notch) em iOS/Android modernos */
+@supports(padding:max(0px)){
+  @media(max-width:768px){
+    .main{padding-left:max(12px,env(safe-area-inset-left));padding-right:max(12px,env(safe-area-inset-right))}
+    #toast{bottom:max(14px,env(safe-area-inset-bottom))}
+  }
 }
 </style>
 </head>
@@ -895,7 +944,7 @@ input:checked + .slider:before {
         <div class="scan-chip">Scan: <span id="scanDisp">--</span></div>
         <div class="hdr-btn" onclick="toggleTheme()" title="Alternar Tema" id="themeBtn" style="font-size:14px;">☀️</div>
         <div class="hdr-btn" onclick="loadAll()" title="Atualizar tudo">&#8635;</div>
-        <div class="hdr-btn" style="position:relative" title="Notificações">
+        <div class="hdr-btn" style="position:relative" title="Notificações — ver sinais detectados" onclick="showNotifications()">
           &#128276;
           <span class="notif-dot" id="notifDot" style="display:none"></span>
         </div>
@@ -1118,6 +1167,40 @@ input:checked + .slider:before {
         <table class="tbl">
           <thead><tr><th>Motivo do bloqueio</th><th>Qtd</th><th>Ganhariam</th><th>Perderiam</th><th>WR hipotético</th></tr></thead>
           <tbody id="shadowBody"><tr><td colspan="5" class="empty">Sem dados ainda — aguardando sinais bloqueados serem resolvidos</td></tr></tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- SINAIS ENVIADOS — DETALHADO (tempo real) -->
+    <div class="card" style="margin-bottom:18px" id="sentDetailCard">
+      <div class="ctitle">
+        Sinais Enviados — Detalhado (tempo real)
+        <span style="display:flex;align-items:center;gap:10px">
+          <span id="sentDetailWr" style="font-size:11px;color:var(--muted);font-weight:700;text-transform:none;letter-spacing:0"></span>
+          <a onclick="loadSinaisDetail()">&#8635; Atualizar</a>
+        </span>
+      </div>
+      <div style="overflow-x:auto">
+        <table class="tbl">
+          <thead><tr><th>Ativo</th><th>Direção</th><th>TF</th><th>Motivo / Tag</th><th>Resultado</th><th>PnL%</th></tr></thead>
+          <tbody id="sentDetailBody"><tr><td colspan="6" class="empty">Carregando sinais enviados...</td></tr></tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- SINAIS DESCARTADOS — DETALHADO (tempo real) -->
+    <div class="card" style="margin-bottom:18px" id="shadowDetailCard">
+      <div class="ctitle">
+        Sinais Descartados — Detalhado (tempo real)
+        <span style="display:flex;align-items:center;gap:10px">
+          <span id="shadowDetailWr" style="font-size:11px;color:var(--muted);font-weight:700;text-transform:none;letter-spacing:0"></span>
+          <a onclick="loadShadowDetail()">&#8635; Atualizar</a>
+        </span>
+      </div>
+      <div style="overflow-x:auto">
+        <table class="tbl">
+          <thead><tr><th>Ativo</th><th>Direção</th><th>TF</th><th>Motivo do Descarte</th><th>Resultado</th><th>PnL%</th></tr></thead>
+          <tbody id="shadowDetailBody"><tr><td colspan="6" class="empty">Carregando sinais descartados...</td></tr></tbody>
         </table>
       </div>
     </div>
@@ -1464,6 +1547,13 @@ async function loadSignals() {
   set('signalsBody', html || '<div class="empty">Nenhum sinal qualificado</div>');
 }
 
+function showNotifications() {
+  const dot = $id('notifDot');
+  if (dot) dot.style.display = 'none';
+  const target = $id('signalsBody');
+  if (target) target.scrollIntoView({ behavior: 'smooth', block: 'center' });
+}
+
 async function loadPerformance() {
   const d = await apiFetch('/performance');
   if (!d) return;
@@ -1599,6 +1689,78 @@ async function loadShadow() {
     <td style="font-weight:700;color:${r.would_wr != null && r.would_wr > 50 ? 'var(--down)' : 'var(--up)'}">${r.would_wr != null ? r.would_wr.toFixed(1) + '%' : 'aguardando'}</td>
   </tr>`).join('');
   if (rows) set('shadowBody', rows);
+}
+
+// ════ TABELAS DETALHADAS EM TEMPO REAL (sinais enviados / descartados) ════
+function _outcomeTag(outcome, pnl) {
+  const o = (outcome || '').toUpperCase();
+  if (o === 'WIN')  return '<span class="tag tag-up">GANHOU</span>';
+  if (o === 'LOSS') return '<span class="tag tag-down">PERDEU</span>';
+  if (o === 'TIMEOUT') {
+    const p = parseFloat(pnl || 0);
+    return p > 0 ? '<span class="tag tag-up">EXPIROU +</span>' : '<span class="tag tag-down">EXPIROU −</span>';
+  }
+  return '<span class="tag tag-muted">PENDENTE</span>';
+}
+function _isWinRow(outcome, pnl) {
+  const o = (outcome || '').toUpperCase();
+  if (o === 'WIN') return true;
+  if (o === 'LOSS') return false;
+  if (o === 'TIMEOUT') return parseFloat(pnl || 0) > 0;
+  return null; // pendente — não entra no WR
+}
+function _rowWrSummary(rows) {
+  const done = rows.map(r => _isWinRow(r.outcome, r.pnl_pct)).filter(v => v !== null);
+  if (done.length === 0) return '';
+  const wins = done.filter(Boolean).length;
+  const wr   = (wins / done.length * 100);
+  return `WR (últimos ${done.length} resolvidos): <strong style="color:${wr >= 50 ? 'var(--up)' : 'var(--down)'}">${wr.toFixed(1)}%</strong>`;
+}
+
+async function loadSinaisDetail() {
+  const d = await apiFetch('/signals/recent?limit=30');
+  if (!d) return;
+  const rows = d.rows || [];
+  txt('sentDetailWr', _rowWrSummary(rows));
+  if (rows.length === 0) { set('sentDetailBody', '<tr><td colspan="6" class="empty">Nenhum sinal enviado ainda</td></tr>'); return; }
+  const html = rows.map(r => {
+    const dir   = (r.direction || '').toUpperCase();
+    const isL   = dir.includes('LONG') || dir === 'BUY';
+    const pnl   = r.pnl_pct != null ? parseFloat(r.pnl_pct) : null;
+    const motivo = (r.reason || '--').toString().slice(0, 70);
+    return `<tr>
+      <td><strong>${(r.asset || '--').replace('USDT', '')}</strong></td>
+      <td><span class="tag ${isL ? 'tag-up' : 'tag-down'}">${isL ? 'LONG' : 'SHORT'}</span></td>
+      <td>${r.timeframe || '--'}</td>
+      <td style="font-size:10px;color:var(--muted);max-width:280px" title="${motivo.replace(/"/g,'&quot;')}">${motivo}</td>
+      <td>${_outcomeTag(r.outcome, pnl)}</td>
+      <td class="${pnl != null ? cls(pnl) : ''}" style="font-weight:700">${pnl != null ? sign(pnl) + fmt(pnl) + '%' : '--'}</td>
+    </tr>`;
+  }).join('');
+  set('sentDetailBody', html);
+}
+
+async function loadShadowDetail() {
+  const d = await apiFetch('/shadow/recent?limit=30');
+  if (!d) return;
+  const rows = d.rows || [];
+  txt('shadowDetailWr', _rowWrSummary(rows));
+  if (rows.length === 0) { set('shadowDetailBody', '<tr><td colspan="6" class="empty">Nenhum sinal descartado ainda</td></tr>'); return; }
+  const html = rows.map(r => {
+    const dir   = (r.direction || '').toUpperCase();
+    const isL   = dir.includes('LONG') || dir === 'BUY';
+    const pnl   = r.pnl_pct != null ? parseFloat(r.pnl_pct) : null;
+    const motivo = (r.block_reason || '--').toString().slice(0, 70);
+    return `<tr>
+      <td><strong>${(r.asset || '--').replace('USDT', '')}</strong></td>
+      <td><span class="tag ${isL ? 'tag-up' : 'tag-down'}">${isL ? 'LONG' : 'SHORT'}</span></td>
+      <td>${r.timeframe || '--'}</td>
+      <td style="font-size:10px;color:var(--muted);max-width:280px" title="${motivo.replace(/"/g,'&quot;')}">${motivo}</td>
+      <td>${_outcomeTag(r.outcome, pnl)}</td>
+      <td class="${pnl != null ? cls(pnl) : ''}" style="font-weight:700">${pnl != null ? sign(pnl) + fmt(pnl) + '%' : '--'}</td>
+    </tr>`;
+  }).join('');
+  set('shadowDetailBody', html);
 }
 
 async function loadMIE() {
@@ -2314,6 +2476,8 @@ async function loadAll() {
     loadSRZones();
     loadHistory();
     loadShadow();
+    loadSinaisDetail();
+    loadShadowDetail();
   });
 }
 
@@ -2516,6 +2680,8 @@ document.addEventListener('DOMContentLoaded', () => {
   setInterval(loadSignals,      15000);
   setInterval(loadPerformance,  30000);
   setInterval(loadShadow,       60000);
+  setInterval(loadSinaisDetail, 30000);
+  setInterval(loadShadowDetail, 30000);
   setInterval(loadSignalKPI,    15000);
   setInterval(loadGridStatus,    8000);
   setInterval(loadMIE,         600000);
