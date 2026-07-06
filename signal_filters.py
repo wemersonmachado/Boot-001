@@ -653,9 +653,19 @@ def evaluate_signal(
         age_min = (time.time() - gen_ts) / 60
         notes.append(f"Sinal {age_min:.0f}min atrás −{stale_penalty:.0f}pts")
 
+    # Soma dos bônus POSITIVOS de confirmação (funding/MTF/setor/CMC trending) —
+    # auditoria 06/07/2026: dentro do engine TREND, score 80+ teve WR 10.3% contra
+    # 66.7% do <70 — sinal de que confirmações empilhadas (ADX+MTF+setor+CMC juntos)
+    # inflam o score sem necessariamente indicar entrada melhor, e sim entrada mais
+    # tardia (o movimento já andou o bastante pra acionar todos os confirmadores).
+    # Capado abaixo; penalidades (negativos) NUNCA são capadas.
+    _stack_bonus = 0.0
+
     # ── 5. Funding Direction ──────────────────────────────────────────────────
     f_adj = funding_score_adj(signal, ctx["funding"])
     score += f_adj
+    if f_adj > 0:
+        _stack_bonus += f_adj
     if f_adj != 0:
         notes.append(f"Funding {f_adj:+.0f}pts ({ctx['funding']['label']})")
 
@@ -686,6 +696,8 @@ def evaluate_signal(
         notes.append(mtf["note"])
         return _block(f"MTF divergente ({mtf['note']})", notes, score)
     score += mtf["bonus"]
+    if mtf["bonus"] > 0:
+        _stack_bonus += mtf["bonus"]
     if mtf["note"]:
         notes.append(mtf["note"])
 
@@ -698,6 +710,8 @@ def evaluate_signal(
     # ── 9. Sector Rotation ────────────────────────────────────────────────────
     sec = sector_rotation_adj(signal, ctx["hot_sectors"], ctx["cold_sectors"])
     score += sec["adj"]
+    if sec["adj"] > 0:
+        _stack_bonus += sec["adj"]
     if sec["note"]:
         notes.append(sec["note"])
 
@@ -707,7 +721,18 @@ def evaluate_signal(
         asset_base = signal.get("asset", "").replace("USDT", "").replace("BUSD", "").upper()
         if asset_base in cmc_trending and "LONG" in direction:
             score += 3
+            _stack_bonus += 3
             notes.append("CMC trending +3pts")
+
+    # ── Cap de bônus empilhado ────────────────────────────────────────────────
+    try:
+        from config import SINAIS_MAX_STACK_BONUS as _MAX_STACK
+    except Exception:
+        _MAX_STACK = 12.0
+    if _stack_bonus > _MAX_STACK:
+        _excess = _stack_bonus - _MAX_STACK
+        score -= _excess
+        notes.append(f"Bonus empilhado {_stack_bonus:+.0f}pts capado em {_MAX_STACK:+.0f} (−{_excess:.0f})")
 
     # ── 10. Structural Tag + Confluência (SINAIS) ─────────────────────────────
     # Tag estrutural V6 obrigatória em TODOS os perfis (antes só NORMAL) e exigência
@@ -737,7 +762,12 @@ def evaluate_signal(
     # ── Score efetivo vs threshold ─────────────────────────────────────────────
     effective_min = base_min_score + vra_adj["score_delta"]
     if score < effective_min:
-        return _block(f"Score {score:.0f} < min {effective_min:.0f}", notes, score)
+        # Categoria genérica (sem o valor literal do score) para o shadow book
+        # conseguir agrupar por motivo real em vez de fragmentar em uma
+        # categoria quase única por bloqueio (auditoria 06/07/2026). O valor
+        # exato ainda fica em notes para quem quiser o detalhe.
+        notes.append(f"Score {score:.0f} < min {effective_min:.0f}")
+        return _block("Score abaixo do minimo", notes, score)
 
     # ── 7. Kelly Multiplier ───────────────────────────────────────────────────
     rr   = float(signal.get("rr", 0))

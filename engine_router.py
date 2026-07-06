@@ -97,6 +97,16 @@ async def _mean_rev_signal(
     if df is None or len(df) < 50:
         return None
     try:
+        from config import RANGE_ENGINE_ENABLED as _RANGE_ON
+    except Exception:
+        _RANGE_ON = True
+    if not _RANGE_ON:
+        # Pausado em 06/07/2026: achado real de 0% WR (0/10) na auditoria de
+        # qualidade de sinal — o filtro de ADX<25 não está bastando pra evitar
+        # entrar contra tendências reais no regime de mercado atual. Reversível
+        # via RANGE_ENGINE_ENABLED em config.py.
+        return None
+    try:
         # Filtro ADX para evitar entrar contra tendência forte
         regime_data = _detect_regime_agnostic(df)
         adx_val = regime_data.get("adx", 20.0)

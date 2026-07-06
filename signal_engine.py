@@ -1985,6 +1985,21 @@ async def _score_direction(
                     print(f"[STOCH-SATURADO] {symbol} {timeframe} SHORT bloqueado: StochRSI K={_k_val:.1f} "
                           f"já no fundo do momentum (<= {_SSL:.0f})")
                     return None
+
+            # ── STOCH-OVERSOLD-BOUNCE (2026-07-06) ────────────────────────────
+            # LONG "comprando o fundo" com K oversold sem reversão confirmada:
+            # achado real de 0% WR (16/16 LOSS) — exige a MESMA confirmação de
+            # reversão já usada no gate acima antes de aceitar a aposta.
+            try:
+                from config import (STOCH_OVERSOLD_BOUNCE_GATE as _SOBG,
+                                    STOCH_OVERSOLD_BOUNCE_MAX as _SOB_MAX)
+            except Exception:
+                _SOBG, _SOB_MAX = True, 20.0
+            if (_SOBG and direction == Direction.LONG
+                    and _k_val <= _SOB_MAX and not _rev_ok):
+                print(f"[STOCH-OVERSOLD-BOUNCE] {symbol} {timeframe} LONG bloqueado: StochRSI K={_k_val:.1f} "
+                      f"oversold (<= {_SOB_MAX:.0f}) sem reversão confirmada")
+                return None
         except Exception:
             pass
 

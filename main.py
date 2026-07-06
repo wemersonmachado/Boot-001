@@ -91,6 +91,7 @@ from database import (
     upsert_asset_profile, upsert_confluence_pattern,
     record_signal_outcome, upsert_daily_stats, get_score_adjustment,
     get_recent_trade_stats, get_recent_signal_stats, get_signal_kpi_summary,
+    get_score_calibration_ok,
     get_setting, save_setting,
     save_shadow_signal, get_unresolved_shadow_signals,
     resolve_shadow_signal, get_shadow_stats,
@@ -1664,12 +1665,22 @@ async def job_sinais_autotune():
             return
         wr  = stats["win_rate"]
         old = _sinais_score_offset
-        if   wr < 35:  _sinais_score_offset = min(SINAIS_AUTOTUNE_MAX_TIGHTEN, _sinais_score_offset + 2)
-        elif wr < 45:  _sinais_score_offset = min(SINAIS_AUTOTUNE_MAX_TIGHTEN, _sinais_score_offset + 1)
-        elif wr > 60:  _sinais_score_offset = max(-SINAIS_AUTOTUNE_MAX_LOOSEN, _sinais_score_offset - 1)
-        else:          _sinais_score_offset = 0 if _sinais_score_offset == 0 else (_sinais_score_offset - (1 if _sinais_score_offset > 0 else -1))
+        # Trava de sanidade (auditoria 06/07/2026): só aperta o corte se o score
+        # de fato estiver prevendo acerto (metade de cima do score com WR >= metade
+        # de baixo). Achado real: dentro do mesmo engine, score 80+ teve WR 10.3%
+        # contra 66.7% do <70 — apertar mais nessas condições so pioraria.
+        # Afrouxar continua liberado sempre (nunca piora nada).
+        _calib_ok = await get_score_calibration_ok(SINAIS_AUTOTUNE_LOOKBACK)
+        if   wr < 35 and _calib_ok:  _sinais_score_offset = min(SINAIS_AUTOTUNE_MAX_TIGHTEN, _sinais_score_offset + 2)
+        elif wr < 45 and _calib_ok:  _sinais_score_offset = min(SINAIS_AUTOTUNE_MAX_TIGHTEN, _sinais_score_offset + 1)
+        elif wr > 60:                _sinais_score_offset = max(-SINAIS_AUTOTUNE_MAX_LOOSEN, _sinais_score_offset - 1)
+        elif wr < 45 and not _calib_ok:
+            pass  # score descalibrado: não aperta mais — precisa de correção estrutural, não de corte mais alto
+        else:      _sinais_score_offset = 0 if _sinais_score_offset == 0 else (_sinais_score_offset - (1 if _sinais_score_offset > 0 else -1))
         if _sinais_score_offset != old:
             print(f"[SINAIS-AUTOTUNE] win-rate {wr:.0f}% ({stats['n']} sinais) → offset {old:+d} -> {_sinais_score_offset:+d}")
+        elif wr < 45 and not _calib_ok:
+            print(f"[SINAIS-AUTOTUNE] win-rate {wr:.0f}% baixo mas score descalibrado (calib_ok=False) — corte NAO subiu, offset segue {old:+d}")
     except Exception as e:
         print(f"[SINAIS-AUTOTUNE] Erro: {e}")
 
@@ -6711,9 +6722,9 @@ async def daily_signal_report(date: str = None):
 
 
 @app.get("/signals/kpi")
-async def signals_kpi():
+async def signals_kpi(window_h: float = 24.0):
     """KPIs do canal SINAIS para os cards do topo do dashboard."""
-    return await get_signal_kpi_summary()
+    return await get_signal_kpi_summary(window_h)
 
 
 @app.get("/balance")

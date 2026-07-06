@@ -28,6 +28,12 @@ LEVERAGE_MAP = {
 }
 LEVERAGE_MAX = {"BTC": 20, "ETH": 20, "SOL": 20, "DEFAULT": 5}
 
+# Engine RANGE (mean-reversion) — PAUSADO em 06/07/2026: auditoria de qualidade
+# de sinal achou 0% WR (0/10) com confiança média ~85 nos últimos 4 dias. O
+# filtro de ADX<25 não bastou pra evitar entrar contra tendências reais no
+# regime atual. Reversível: True volta a habilitar o engine.
+RANGE_ENGINE_ENABLED = False
+
 # Signal thresholds — DEPRECATED: a fonte da verdade são os perfis em MODE_SETTINGS.
 # Mantidos apenas como fallback global; nunca usados diretamente no scoring.
 MIN_SIGNAL_SCORE = 75
@@ -198,6 +204,15 @@ STOCH_SATURATION_GATE = True
 STOCH_SATURATION_HIGH = 90.0   # LONG bloqueado se K >= isso
 STOCH_SATURATION_LOW  = 10.0   # SHORT bloqueado se K <= isso
 
+# Gate STOCH-OVERSOLD-BOUNCE (2026-07-06) — achado real: LONG "comprando o fundo"
+# com StochRSI K<20 perdeu 16/16 (0% WR) em 86 outcomes reais dos últimos 4 dias
+# (auditoria de qualidade de sinal). Diferente do STOCH-SATURADO acima (que
+# bloqueia CHASING de momentum já esgotado), este bloqueia a aposta de REVERSÃO
+# em oversold sem confirmação real — mesma lógica de override (_rev_ok) do gate
+# acima, só que aplicada também ao lado "oversold como gatilho de compra".
+STOCH_OVERSOLD_BOUNCE_GATE = True
+STOCH_OVERSOLD_BOUNCE_MAX  = 20.0   # LONG com K <= isso exige reversão confirmada
+
 # ── Acurácia do canal SINAIS (2026-06-22) — NÃO ENVIADO AO RAILWAY ────────────
 # Melhorias que afetam SOMENTE o canal SINAIS (evaluate_signal é chamado apenas
 # pelo job_sinais_scan; o modo autônomo/real NÃO é tocado por estes gates).
@@ -223,6 +238,12 @@ SINAIS_MIN_CONFLUENCE     = {"CONSERVATIVE": 2, "NORMAL": 1, "AGGRESSIVE": 0}
 # (5) Claude Brain avalia o sinal a partir deste score (antes era 65 — sinais de
 #     55-64 do Agressivo escapavam da IA).
 SINAIS_BRAIN_MIN_SCORE    = 55
+
+# Cap do bônus POSITIVO empilhado (funding+MTF+setor+CMC trending) no evaluate_signal
+# (auditoria 06/07/2026): sem cap, os 4 bônus juntos podiam somar até +21pts —
+# achado real mostrou que score inflado por confirmações empilhadas teve WR PIOR
+# (10.3% no 80+ vs 66.7% no <70, mesmo engine). Penalidades nunca são capadas.
+SINAIS_MAX_STACK_BONUS    = 12.0
 # (6/7) Rastreio de resultado dos sinais transmitidos (paper) + auto-tune do corte
 #     do SINAIS conforme a taxa de acerto MEDIDA. Sem isto não há como medir acerto.
 SINAIS_OUTCOME_TRACKING   = True

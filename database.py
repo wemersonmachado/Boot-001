@@ -339,6 +339,40 @@ async def get_recent_signal_stats(limit: int = 30) -> dict:
     return {"n": n, "wins": wins, "win_rate": round(wr, 1)}
 
 
+async def get_score_calibration_ok(limit: int = 30, min_n: int = 20) -> bool:
+    """Checagem de sanidade do auto-tune (auditoria 06/07/2026): compara o WR
+    da metade de MAIOR confiança vs a metade de MENOR confiança dos últimos
+    `limit` sinais resolvidos. Se o score realmente prevê acerto, a metade de
+    cima deve ganhar IGUAL ou MAIS que a de baixo. Se estiver invertido (achado
+    real: dentro do mesmo engine, score 80+ teve WR 10.3% contra 66.7% do <70),
+    apertar o corte de score só pioraria — então retorna False e o auto-tune
+    não aperta (mas ainda pode afrouxar, que é sempre seguro)."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        await _configure_db(db)
+        cur = await db.execute(
+            """SELECT o.outcome, o.pnl_pct, s.confidence
+               FROM signal_outcomes o JOIN signals s ON s.id = o.signal_db_id
+               WHERE o.outcome IS NOT NULL ORDER BY o.id DESC LIMIT ?""",
+            (int(limit),),
+        )
+        rows = await cur.fetchall()
+    if len(rows) < min_n:
+        return True  # amostra pequena demais — não trava o auto-tune de propósito
+    rows_sorted = sorted(rows, key=lambda r: r[2] or 0)
+    mid = len(rows_sorted) // 2
+    lower, upper = rows_sorted[:mid], rows_sorted[mid:]
+
+    def _wr(chunk):
+        n = len(chunk)
+        if n == 0:
+            return 0.0
+        w = sum(1 for o, p, _ in chunk
+                if str(o).upper() == "WIN" or (str(o).upper() == "TIMEOUT" and float(p or 0) > 0))
+        return w / n * 100.0
+
+    return _wr(upper) >= _wr(lower)
+
+
 async def get_unresolved_sinais_signals(max_age_h: float, limit: int = 200) -> list:
     """Sinais SINAIS (destino 'vip') ainda sem outcome — lidos direto do banco em vez
     de uma lista em memória, para que o rastreio sobreviva a reinícios do bot local.
