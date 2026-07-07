@@ -698,6 +698,20 @@ input:checked + .slider:before {
       </div>
     </section>
 
+    <!-- ══ 6 · REFORÇO (DCA) ══ -->
+    <section class="cfg-card" id="cfg-dca">
+      <div class="cfg-card-hdr">
+        <span class="cfg-card-num">6</span>
+        <span class="cfg-card-ttl">Reforço (DCA)</span>
+        <span class="cfg-badge off" id="bg-dca">Off</span>
+      </div>
+      <div class="cfg-sub">Preço médio: a 1ª entrada usa 30% do capital alocado e o restante entra em reforços se o preço andar contra. Desligado = entra 100% de uma vez.</div>
+      <div class="og" style="gap:7px">
+        <button class="ob" id="dca-off" onclick="setDca(false)">Desligado<span class="ob-hint">100% na entrada</span></button>
+        <button class="ob" id="dca-on"  onclick="setDca(true)">Ligado<span class="ob-hint">30% + reforços</span></button>
+      </div>
+    </section>
+
   </div><!-- /wz-body -->
 
 
@@ -1916,6 +1930,9 @@ async function loadSettings() {
   const pel = $id(PROFILE_BTN[pr] || 'ob-norm'); if (pel) pel.classList.add('sel');
   txt('bg-prof', PROFILE_LBL[pr] || pr);
 
+  // Modo DCA (reforço / preço médio)
+  markDcaSel(d.dca_enabled === true);
+
   updateDerived();
 
   // Popula watchlist inputs
@@ -2105,6 +2122,22 @@ async function setTrades(n) {
   const r = await apiFetch('/settings/trades_per_session?count=' + n, 'POST');
   toast(r ? (n === 0 ? '♾️ Banca livre (sem limite de entradas).' : `📊 Banca dividida em ${n} entrada(s).`)
           : 'Erro ao definir limite.', r ? 'success' : 'error');
+}
+
+function markDcaSel(on) {
+  const eOn = $id('dca-on'), eOff = $id('dca-off');
+  if (eOn)  eOn.classList.toggle('sel', on === true);
+  if (eOff) eOff.classList.toggle('sel', on === false);
+  const bg = $id('bg-dca');
+  if (bg) { bg.textContent = on ? 'On' : 'Off'; bg.classList.toggle('off', !on); }
+}
+async function setDca(on) {
+  markDcaSel(on);
+  const r = await apiFetch(on ? '/dca/enable' : '/dca/disable', 'POST');
+  const ok = r && r.ok;
+  if (!ok) markDcaSel(!on); // reverte visual se falhar
+  toast(ok ? (on ? '🔁 DCA ligado: 30% na 1ª entrada + reforços.' : '⏹️ DCA desligado: entra 100% de uma vez.')
+           : 'Erro ao alterar o modo DCA.', ok ? 'success' : 'error');
 }
 
 function markLevSel(v) {

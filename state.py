@@ -60,6 +60,11 @@ class BotState:
         self.paper_trading = False
         self.mode_started_at = datetime.utcnow().isoformat()
 
+        # Modo DCA (preço médio): 1ª entrada usa 30% do capital alocado, o
+        # restante entra em reforços se o preço andar contra. Persistido para
+        # sobreviver a restart. Consumido por dca_engine via main.sync.
+        self.dca_enabled = False
+
         # Grid + watchlists por modo (AUDITORIA 2026-07-04: estes 7 campos
         # nunca persistiam — /settings/grid e /settings/watchlist só mudavam
         # a variável em memória, igual ao bug da alavancagem. Corrigido.)
@@ -105,6 +110,7 @@ class BotState:
             except Exception:
                 pass  # mantém o default já definido em __init__ se o JSON salvo estiver corrompido
             self.paper_trading = (await get_setting("paper_trading", "False")) == "True"
+            self.dca_enabled = (await get_setting("dca_enabled", "False")) == "True"
 
             # Grid + watchlists (json — listas)
             for _attr, _key in (

@@ -255,6 +255,9 @@ def sync_state_to_globals():
     notifier.RATE_LIMIT_PUBLIC_PER_HOUR = bot_state.sinais_max_hour_public
     notifier.RATE_LIMIT_VIP_PER_HOUR = bot_state.sinais_max_hour_vip
     notifier.set_public_tier_pct(bot_state.public_tier_pct)
+    # DCA vive em dca_engine (não é global do main); espelha o estado salvo
+    # para o modo persistir após restart/deploy, como as demais configs.
+    dca_engine.enable_dca(bot_state.dca_enabled)
 
 async def save_global_state_to_db():
     """Salva o estado atual das globais de volta para o SQLite através de BotState."""
@@ -1832,41 +1835,38 @@ async def _execute_trade_inner(signal_dict: dict):
             max_margin_per_trade = round(max_margin_per_trade * anti_mult, 2)
             print(f"[ANTI-MARTINGALE] {_consecutive_losses} perdas consecutivas → margem máxima x{anti_mult} = ${max_margin_per_trade:.2f}")
 
-        # Risco em USDT (ex: 1% de BANCA_USDT)
-        _profile_risk_pct = MODE_SETTINGS.get(CURRENT_MODE, MODE_SETTINGS["NORMAL"]).get("risk_pct", 1.0)
-        risk_usdt = BANCA_USDT * _profile_risk_pct / 100
-        
-        _size_mult = float(signal_dict.get("size_multiplier", 1.0))
-        if _size_mult != 1.0:
-            risk_usdt *= _size_mult
-            print(f"[CLAUDE BRAIN] Sizing multiplier aplicado: {_size_mult}x -> novo risco = ${risk_usdt:.2f}")
-
-        # Distância percentual do Stop Loss
+        # ── ALOCAÇÃO DIRETA DO CAPITAL (FIX 2026-07-07) ─────────────────────
+        # O capital alocado no dashboard é distribuído IGUALMENTE entre as
+        # entradas selecionadas: margem por trade = BANCA_USDT / n.
+        # Ex.: $30 alocados / 2 entradas = $15 de margem em CADA entrada.
+        #
+        # ANTES (bug): 'max_margin_per_trade' (= banca/n) era só um TETO. O
+        # tamanho real vinha de um sizing por risco (risk_pct × banca ÷
+        # distância do SL) que encolhia a entrada muito abaixo do alocado —
+        # ex.: nocional $20 → margem $4 em vez dos $15 pedidos. O usuário pediu
+        # que o dashboard faça EXATAMENTE o solicitado, então a margem alocada
+        # passa a ser a margem realmente usada. Os tetos de segurança acima
+        # (perfil, alavancagem adaptativa/volatilidade, anti-martingale) já
+        # foram aplicados e continuam valendo por cima.
         if not signal.entry or signal.entry <= 0:
-            # Dado de preço corrompido/inválido — não deveria acontecer em
-            # operação normal. Aborta esta execução por segurança em vez de
-            # deixar o ZeroDivisionError propagar sem contexto.
+            # Dado de preço corrompido/inválido — aborta por segurança em vez
+            # de deixar um preço zero/negativo virar uma ordem inválida.
             print(f"[SIZING] {signal.asset} entry inválido ({signal.entry}) — abortando execução por segurança")
             return
-        sl_distance_pct = abs(signal.entry - signal.stop_loss) / signal.entry * 100
-        if sl_distance_pct > 0:
-            notional = (risk_usdt / sl_distance_pct * 100)
-        else:
-            notional = BANCA_USDT * 0.1 * user_leverage * _size_mult  # fallback se SL inválido
-            
-        margin_needed = notional / user_leverage
-        
-        # Margin Cap: se a margem necessária exceder a margem máxima permitida por trade, limita e reduz notional
-        if margin_needed > max_margin_per_trade:
-            margin = max_margin_per_trade
-            notional = margin * user_leverage
-            print(f"[SIZING] {signal.asset} limitado pela margem cap: req=${margin_needed:.2f} > max=${max_margin_per_trade:.2f} -> notional=${notional:.2f}")
-        else:
-            margin = margin_needed
-            print(f"[SIZING] {signal.asset} sizing por risco: risco_usd=${risk_usdt:.2f} ({_profile_risk_pct}%) | SL_dist={sl_distance_pct:.2f}% -> notional=${notional:.2f} | margem=${margin:.2f}")
-            
-        notional = round(notional, 2)
+
+        _profile_risk_pct = MODE_SETTINGS.get(CURRENT_MODE, MODE_SETTINGS["NORMAL"]).get("risk_pct", 1.0)
+        margin = max_margin_per_trade  # = BANCA_USDT / n (anti-martingale já aplicado)
+
+        # Multiplicador do Claude Brain só pode REDUZIR a alocação, nunca
+        # ultrapassá-la — a alocação por trade é o teto de capital do usuário.
+        _size_mult = float(signal_dict.get("size_multiplier", 1.0))
+        if _size_mult != 1.0:
+            margin = round(min(max_margin_per_trade, max_margin_per_trade * _size_mult), 2)
+            print(f"[CLAUDE BRAIN] Sizing multiplier {_size_mult}x -> margem = ${margin:.2f} (teto ${max_margin_per_trade:.2f})")
+
+        notional = round(margin * user_leverage, 2)
         margin = round(margin, 2)
+        print(f"[SIZING] {signal.asset} alocação direta: banca ${BANCA_USDT:.2f} / {n} = margem ${margin:.2f} × {user_leverage}x -> nocional ${notional:.2f}")
 
         from models import ActiveTrade as _AT
         import uuid as _uuid
@@ -1885,10 +1885,10 @@ async def _execute_trade_inner(signal_dict: dict):
             confidence=signal.confidence,
         )
         origin = (
-            f"Banca ${BANCA_USDT:.2f} / {n} trades = ${max_margin_per_trade:.2f} margem"
+            f"Banca ${BANCA_USDT:.2f} / {n} trades = ${margin:.2f} margem"
             f" | Nocional ${notional:.2f} | {user_leverage}x"
         )
-        print(f"[SIZING] {signal.asset}: margem=${max_margin_per_trade:.2f} nocional=${notional:.2f} (banca ${BANCA_USDT:.2f}/{n})")
+        print(f"[SIZING] {signal.asset}: margem=${margin:.2f} nocional=${notional:.2f} (banca ${BANCA_USDT:.2f}/{n})")
     else:
         # Sem banca definida: usa risk_pct do PERFIL ATIVO (CONSERVATIVE=0.5%, NORMAL=1%, AGGRESSIVE=1.5%)
         balance = await _get_balance() or 100
@@ -6015,6 +6015,7 @@ async def get_settings():
         "exec_brain_enabled":    _exec_claude_brain,
         "claude_brain_enabled":  _claude_brain_enabled,
         "sinais_enabled":        SINAIS_ENABLED,
+        "dca_enabled":           dca_engine.is_dca_enabled(),
     }
 
 
@@ -7079,15 +7080,17 @@ async def get_dca_status():
 
 @app.post("/dca/enable")
 async def enable_dca_mode():
-    """Ativa modo DCA para novas entradas."""
+    """Ativa modo DCA para novas entradas (persiste no estado)."""
     dca_engine.enable_dca(True)
+    await bot_state.save_key("dca_enabled", True)
     return {"ok": True, "dca_enabled": True}
 
 
 @app.post("/dca/disable")
 async def disable_dca_mode():
-    """Desativa modo DCA."""
+    """Desativa modo DCA (persiste no estado)."""
     dca_engine.enable_dca(False)
+    await bot_state.save_key("dca_enabled", False)
     return {"ok": True, "dca_enabled": False}
 
 
