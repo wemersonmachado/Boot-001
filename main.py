@@ -1950,7 +1950,27 @@ async def _execute_trade_inner(signal_dict: dict):
         _active_trades_cache[trade.id] = trade_dict
         _session_trades += 1  # conta trades abertos (funciona em todos os modos)
         paper_tag = " [PAPER]" if trade_dict["paper"] else ""
-        await send_trade_opened(trade_dict, OPERATION_MODE)
+
+        # GARANTIA DE NOTIFICAÇÃO (FIX 2026-07-07): a ordem já foi executada de
+        # verdade na Binance (ou simulada) e salva no banco NESTE ponto — o
+        # usuário tem exposição real a partir daqui. send_trade_opened() monta
+        # texto + gráfico e podia lançar uma exceção não tratada (ex.: campo
+        # inesperado no dict, falha ao formatar) e derrubar a notificação
+        # SILENCIOSAMENTE, sem nenhum aviso no Telegram, mesmo com o trade já
+        # aberto de verdade. Agora qualquer falha na notificação "rica" cai
+        # para um alerta de texto puro (send_alert, blindado) — o usuário
+        # NUNCA fica sem saber que uma entrada real foi aberta.
+        try:
+            await send_trade_opened(trade_dict, OPERATION_MODE)
+        except Exception as _notify_ex:
+            print(f"[TELEGRAM] send_trade_opened falhou ({_notify_ex}); enviando alerta de fallback em texto puro")
+            _margin_fb = round(trade.size_usdt / trade.leverage, 2) if trade.leverage else 0
+            await send_alert(
+                f"Entrada aberta (notificação detalhada falhou): "
+                f"{signal.direction.value} {signal.asset} | Margem ${_margin_fb:.2f} | "
+                f"Nocional ${trade.size_usdt:.2f} | {trade.leverage}x | Entry ${signal.entry}"
+            )
+
         print(f"[TRADE]{paper_tag} Aberto {signal.direction.value} {signal.asset} | {origin} | sessao={_session_trades}/{TRADES_PER_SESSION}")
         await log_event("TRADE_OPEN", f"{signal.direction.value} {signal.asset}", trade_dict)
     else:
@@ -3001,7 +3021,17 @@ async def _execute_grid_trade(signal_dict: dict):
             await save_trade(trade_dict)
             _active_trades_cache[trade.id] = trade_dict
             paper_tag = " [PAPER]" if trade_dict["paper"] else ""
-            await send_trade_opened(trade_dict, OPERATION_MODE)
+            # GARANTIA DE NOTIFICAÇÃO (FIX 2026-07-07): mesmo fallback do fluxo
+            # AUTÔNOMO — a ordem já é real neste ponto; qualquer falha na
+            # notificação "rica" não pode deixar o usuário sem saber.
+            try:
+                await send_trade_opened(trade_dict, OPERATION_MODE)
+            except Exception as _notify_ex:
+                print(f"[TELEGRAM] send_trade_opened (GRID) falhou ({_notify_ex}); enviando alerta de fallback")
+                await send_alert(
+                    f"[GRID] Entrada aberta (notificação detalhada falhou): "
+                    f"{signal.direction.value} {signal.asset} | Margem ${margin:.2f} | Nocional ${notional:.2f}"
+                )
             print(f"[GRID] ABERTO{paper_tag} {signal.direction.value} {signal.asset} | margem=${margin:.2f} nocional=${notional:.2f} alvo=+${GRID_PROFIT_TARGET_USDT}")
         else:
             print(f"[GRID] FALHA ao abrir {signal.asset}: {result.get('msg','?')}")
@@ -5178,7 +5208,17 @@ async def _process_webhook_signal(symbol: str, direction: Direction, timeframe: 
         }
         await save_trade(trade_dict)
         _active_trades_cache[trade.id] = trade.model_dump()
-        await send_trade_opened(trade_dict, "WEBHOOK")
+        # GARANTIA DE NOTIFICAÇÃO (FIX 2026-07-07): mesmo fallback dos demais
+        # fluxos de execução real — ver comentário em _execute_trade_inner.
+        try:
+            await send_trade_opened(trade_dict, "WEBHOOK")
+        except Exception as _notify_ex:
+            print(f"[TELEGRAM] send_trade_opened (WEBHOOK) falhou ({_notify_ex}); enviando alerta de fallback")
+            _margin_fb = round(trade.size_usdt / trade.leverage, 2) if trade.leverage else 0
+            await send_alert(
+                f"[WEBHOOK] Entrada aberta (notificação detalhada falhou): "
+                f"{direction} {symbol} | Margem ${_margin_fb:.2f} | Nocional ${trade.size_usdt:.2f}"
+            )
         print(f"[WEBHOOK] Trade opened: {trade.id} {symbol} {direction}")
     else:
         print(f"[WEBHOOK] Trade failed: {result}")
