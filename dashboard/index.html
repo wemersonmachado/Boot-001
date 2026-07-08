@@ -30,104 +30,131 @@
   --wz-w:      440px;
   --r:         12px;
 }
+/* ── Tema claro — paleta calma, "fintech premium": fundo off-white azulado,
+   cartões brancos com sombra suave (profundidade sem peso), texto forte e
+   nítido, acentos âmbar/verde/vermelho com saturação equilibrada (vívido o
+   suficiente para ler rápido, sem cansar a vista). Toda cor deste bloco usa
+   variável — nada de hex solto repetido pelos seletores abaixo. ── */
 body.light-theme {
-  --bg:        #f3f4f6;
+  --bg:        #f4f6f9;
   --card:      #ffffff;
-  --card2:     #f9fafb;
-  --border:    #e5e7eb;
-  --border2:   #d1d5db;
-  --gold:      #d97706;
-  --gold2:     #b45309;
-  --gold-dim:  rgba(217,119,6,.08);
-  --text:      #111827;
-  --muted:     #4b5563;
-  --dim:       #e5e7eb;
-  --up:        #047857;
-  --up-bg:     rgba(4,120,87,.08);
-  --down:      #b91c1c;
-  --down-bg:   rgba(185,28,28,.08);
-  --blue:      #1d4ed8;
-  --purple:    #6d28d9;
-  background: #ffffff;
+  --card2:     #f8fafc;
+  --border:    #e7eaf0;
+  --border2:   #d7dce5;
+  --gold:      #c8860d;
+  --gold2:     #a5690a;
+  --gold-dim:  rgba(200,134,13,.09);
+  --text:      #161b26;
+  --text2:     #3a4353;
+  --muted:     #667085;
+  --dim:       #e7eaf0;
+  --up:        #059669;
+  --up-bg:     rgba(5,150,105,.08);
+  --down:      #dc2626;
+  --down-bg:   rgba(220,38,38,.08);
+  --blue:      #2563eb;
+  --purple:    #7c3aed;
+  --shadow-sm: 0 1px 2px rgba(22,27,38,.04), 0 1px 3px rgba(22,27,38,.05);
+  --shadow-md: 0 2px 6px rgba(22,27,38,.05), 0 4px 12px rgba(22,27,38,.06);
 }
 body.light-theme .wizard {
-  background: #f9fafb;
-  border-right-color: #e5e7eb;
+  background: var(--card2);
+  border-right-color: var(--border);
 }
 body.light-theme .wz-hdr, body.light-theme .bsb {
-  background: #ffffff;
-  border-color: #e5e7eb;
+  background: var(--card);
+  border-color: var(--border);
 }
 body.light-theme .step {
-  border-color: #e5e7eb;
+  border-color: var(--border);
+  box-shadow: var(--shadow-sm);
 }
 body.light-theme .step-hdr {
-  background: #ffffff;
-  color: #111827;
+  background: var(--card);
+  color: var(--text);
 }
 body.light-theme .step-body {
-  background: #f3f4f6;
+  background: var(--card2);
 }
 body.light-theme .card, body.light-theme .mc, body.light-theme .sc {
-  background: #ffffff;
-  border-color: #e5e7eb;
-  color: #111827;
+  background: var(--card);
+  border-color: var(--border);
+  color: var(--text);
+  box-shadow: var(--shadow-sm);
 }
 body.light-theme .ob, body.light-theme .qb {
-  background: #ffffff;
-  border-color: #e5e7eb;
-  color: #374151;
+  background: var(--card);
+  border-color: var(--border);
+  color: var(--text2);
+}
+body.light-theme .ob:hover, body.light-theme .qb:hover {
+  box-shadow: var(--shadow-sm);
 }
 body.light-theme input, body.light-theme select {
-  background: #ffffff;
-  border-color: #d1d5db;
-  color: #111827;
+  background: var(--card);
+  border-color: var(--border2);
+  color: var(--text);
 }
 body.light-theme .tbl tbody tr:hover {
-  background: rgba(0, 0, 0, 0.02);
+  background: var(--card2);
 }
 body.light-theme .tbl th {
-  border-bottom-color: #e5e7eb;
+  border-bottom-color: var(--border);
+  color: var(--text2);
 }
 body.light-theme .tbl td {
-  border-bottom-color: #f3f4f6;
-  color: #374151;
+  border-bottom-color: var(--card2);
+  color: var(--text2);
 }
 body.light-theme .cc {
-  background: #ffffff;
-  border-color: #e5e7eb;
+  background: var(--card);
+  border-color: var(--border);
+  box-shadow: var(--shadow-sm);
 }
 body.light-theme .cc-name {
-  color: #111827;
+  color: var(--text);
 }
 body.light-theme .cc-price {
-  color: #111827;
+  color: var(--text);
+  font-weight: 800;
 }
 body.light-theme .sr {
-  border-bottom-color: #f3f4f6;
+  border-bottom-color: var(--card2);
 }
 body.light-theme .sr-sym {
-  color: #111827;
+  color: var(--text);
 }
 body.light-theme .hdr {
-  background: #ffffff;
-  border-bottom-color: #e5e7eb;
+  background: var(--card);
+  border-bottom-color: var(--border);
 }
 body.light-theme .hdr-btn {
-  background: #f9fafb;
-  border-color: #e5e7eb;
-  color: #4b5563;
+  background: var(--card2);
+  border-color: var(--border);
+  color: var(--text2);
 }
 body.light-theme .scan-chip {
-  background: #f3f4f6;
-  border-color: #e5e7eb;
-  color: #4b5563;
+  background: var(--card2);
+  border-color: var(--border);
+  color: var(--text2);
 }
 body.light-theme .bal-val {
-  color: #111827;
+  color: var(--text);
 }
 body.light-theme .pd-val.nt {
-  color: #6b7280;
+  color: var(--muted);
+}
+/* Cartões de KPI (sinais/shadow book) e valores grandes — texto forte e nítido */
+body.light-theme .sig-kpi, body.light-theme .cfg-card {
+  background: var(--card);
+  border-color: var(--border);
+  box-shadow: var(--shadow-sm);
+}
+body.light-theme .sig-kpi-val, body.light-theme .cfg-card-ttl {
+  color: var(--text);
+}
+body.light-theme .sig-kpi-lbl, body.light-theme .cfg-sub {
+  color: var(--muted);
 }
 *{box-sizing:border-box;margin:0;padding:0}
 html,body{height:100%;overflow:hidden}
