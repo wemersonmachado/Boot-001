@@ -1389,12 +1389,29 @@ def _trades_today_blocked() -> bool:
 
 
 async def _exposure_blocked() -> bool:
-    """True se a exposição agregada (notional_total / banca) excede o teto."""
+    """True se a exposição agregada (margem_total / banca) excede o teto.
+
+    FIX 2026-07-08: comparava notional_total (JÁ multiplicado pela alavancagem)
+    contra a banca CRUA. Com o sizing correto (margem por trade = banca/n,
+    ver _execute_trade_inner), o notional de UM ÚNICO trade já é
+    (banca/n) × leverage — ex.: banca $22, n=2, leverage 15x → notional $165,
+    proporção 165/22 = 7.5x. Isso estourava o teto de 1.5x na 1ª entrada
+    SEMPRE que leverage > ~1.5×n, travando toda entrada seguinte por horas
+    mesmo com sinais bons aparecendo (o usuário pedia N entradas na banca e
+    só recebia 1). Correto é medir quanto do CAPITAL (margem, não notional
+    alavancado) já está comprometido: com todas as n entradas abertas e
+    margem = banca/n cada, margem_total = banca exatamente (proporção 1.0),
+    e o teto de 1.5x sobra como folga real (ex.: reforços de DCA) em vez de
+    bloquear a operação normal já na 1ª entrada.
+    """
     try:
         open_trades = await get_open_trades()
-        notional = sum(float(t.get("size_usdt", 0) or 0) for t in open_trades)
+        margin_total = sum(
+            float(t.get("size_usdt", 0) or 0) / float(t.get("leverage", 1) or 1)
+            for t in open_trades
+        )
         banca = BANCA_USDT if BANCA_USDT > 0 else max(float(_balance_cache.get("wallet_balance", 0) or 0), 1.0)
-        return banca > 0 and (notional / banca) > MAX_TOTAL_EXPOSURE_RATIO
+        return banca > 0 and (margin_total / banca) > MAX_TOTAL_EXPOSURE_RATIO
     except Exception:
         return False
 
@@ -1789,13 +1806,22 @@ async def _execute_trade_inner(signal_dict: dict):
         user_leverage = min(user_leverage, int(_lev_cap))
 
     # Redução de alavancagem adaptativa baseada na exposição total da carteira (Recomendação C2 da Auditoria)
+    # FIX 2026-07-08: usava notional_open (JÁ alavancado) / banca crua — mesmo
+    # problema de _exposure_blocked() acima. Com margem = banca/n, o notional
+    # de 1 trade já é (banca/n)×leverage, inflando exposure_ratio muito acima
+    # de 1.0 e derrubando a alavancagem pro piso (20%) já no 2º trade, mesmo
+    # com a exposição de CAPITAL (margem) ainda saudável. Compara margem
+    # comprometida (não notional) contra a banca, igual ao gate acima.
     try:
         open_trades = await get_open_trades()
-        notional_open = sum(float(t.get("size_usdt", 0)) for t in open_trades)
+        margin_open = sum(
+            float(t.get("size_usdt", 0) or 0) / float(t.get("leverage", 1) or 1)
+            for t in open_trades
+        )
         effective_banca = BANCA_USDT if BANCA_USDT > 0 else (await _get_balance() or 10)
-        
+
         if effective_banca > 0:
-            exposure_ratio = notional_open / effective_banca
+            exposure_ratio = margin_open / effective_banca
             reduction_factor = max(0.2, min(1.0, 1.0 - exposure_ratio))
             if reduction_factor < 1.0:
                 old_lev = user_leverage
