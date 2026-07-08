@@ -792,6 +792,18 @@ _cb_pending: bool               = False  # True = aguardando /continuar ou /paus
 _cb_deadline: float             = 0.0    # prazo (epoch) para autorizar antes de pausar
 _cb_loss_ack_streak: int        = 0      # baseline de perdas já reconhecido (evita re-alertar
                                          # a cada nova perda após o usuário dar /continuar)
+
+# Fluxo contínuo por LOTE (2026-07-08): as TRADES_PER_SESSION entradas
+# concorrentes do modo AUTÔNOMO são tratadas como um lote. O gate de entrada
+# passa a checar _round_trade_ids (vagas realmente OCUPADAS agora) em vez de
+# um contador cumulativo que nunca esvaziava — permite reabrir vaga assim que
+# uma entrada do lote fecha, sem esperar reativação manual do modo. Ver
+# _on_autonomous_trade_closed() para a avaliação do lote completo (todas
+# negativas → pede permissão; misto → avisa e continua; todas positivas →
+# continua direto).
+_round_trade_ids: set            = set()   # IDs dos trades abertos no lote atual
+_round_was_full: bool            = False   # True quando o lote já ocupou as N vagas concorrentes
+_round_outcomes: list            = []      # True=win / False=loss de cada trade do lote, na ordem de fechamento
 # Auto-tune do score: deslocamento aplicado ao min_score conforme a taxa de acerto.
 _score_offset: int              = 0
 # Auto-tune e rastreio de acerto ESPECÍFICOS do canal SINAIS (não tocam o autônomo).
@@ -1440,6 +1452,54 @@ async def _cb_arm(reason: str):
     )
 
 
+async def _on_autonomous_trade_closed(trade_id: str, mode: str, pnl_usdt: float):
+    """Fluxo contínuo por LOTE do modo AUTÔNOMO (2026-07-08).
+
+    As TRADES_PER_SESSION entradas concorrentes são um "lote". Só decide o
+    próximo passo quando TODAS as entradas do lote atual já fecharam (vagas
+    de round nunca preenchidas — ex.: só 1 sinal apareceu — não contam,
+    _round_was_full só vira True quando o lote de fato encheu):
+      • lote 100% negativo → arma o circuit breaker existente (pede
+        `/continuar` ou `/pausar` no Telegram antes do próximo lote).
+      • lote misto (≥1 vitória e ≥1 derrota) → avisa o resultado agregado e
+        libera o próximo lote imediatamente (nova(s) entrada(s) já saem
+        dividindo a banca por TRADES_PER_SESSION, como sempre).
+      • lote 100% positivo → libera o próximo lote direto, sem aviso extra
+        (cada trade individual já foi notificado no fechamento).
+
+    Chamada nos dois pontos onde job_update_trades fecha um trade (saída
+    normal SL/TP/TIME_STOP e saída via DCA) — ambos compartilham este hook
+    em vez de duplicar a lógica de avaliação do lote.
+    """
+    global _round_trade_ids, _round_was_full, _round_outcomes
+    if mode != "AUTONOMOUS" or TRADES_PER_SESSION <= 0:
+        return
+    if trade_id not in _round_trade_ids:
+        return  # trade de fora do lote rastreado (ex.: aberto antes deste fix ou sessão anterior)
+
+    _round_trade_ids.discard(trade_id)
+    _round_outcomes.append(pnl_usdt > 0)
+
+    if _round_trade_ids or not _round_was_full:
+        return  # lote ainda tem vaga aberta, ou nunca chegou a encher — nada a avaliar ainda
+
+    n_win  = sum(1 for w in _round_outcomes if w)
+    n_loss = len(_round_outcomes) - n_win
+    print(f"[AUTO-LOTE] Lote de {len(_round_outcomes)} entradas concluído: {n_win} positiva(s), {n_loss} negativa(s).")
+
+    if n_win == 0:  # todas negativas
+        await _cb_arm(f"lote de `{len(_round_outcomes)}` entradas fechou com *todas negativas*.")
+    elif n_loss > 0:  # misto
+        await send_alert(
+            f"📊 Lote concluído: `{n_win}` positiva(s) e `{n_loss}` negativa(s). "
+            f"Continuando — próxima(s) entrada(s) dividindo a banca por `{TRADES_PER_SESSION}`."
+        )
+    # 100% positivo: sem aviso extra, cada trade já notificou seu fechamento individualmente.
+
+    _round_outcomes = []
+    _round_was_full = False
+
+
 async def _maybe_trip_loss_breaker():
     """GATILHO PRINCIPAL: dispara o circuit breaker após CB_LOSS_THRESHOLD trades
     PERDEDORES seguidos. Usa _cb_loss_ack_streak como baseline para só re-alertar a
@@ -1784,6 +1844,7 @@ async def _execute_trade(signal_dict: dict):
 
 async def _execute_trade_inner(signal_dict: dict):
     global BANCA_USDT, OPERATION_MODE, _session_trades, _consecutive_losses
+    global _round_trade_ids, _round_was_full
 
     signal = _build_signal_from_dict(signal_dict)
     from risk_manager import get_leverage as _get_lev
@@ -1977,6 +2038,13 @@ async def _execute_trade_inner(signal_dict: dict):
         _session_trades += 1  # conta trades abertos (funciona em todos os modos)
         paper_tag = " [PAPER]" if trade_dict["paper"] else ""
 
+        # Fluxo contínuo por LOTE (2026-07-08): marca esta vaga como ocupada no
+        # lote atual do modo AUTÔNOMO. Ver _on_autonomous_trade_closed().
+        if OPERATION_MODE == "AUTONOMOUS" and TRADES_PER_SESSION > 0:
+            _round_trade_ids.add(trade.id)
+            if len(_round_trade_ids) >= TRADES_PER_SESSION:
+                _round_was_full = True
+
         # GARANTIA DE NOTIFICAÇÃO (FIX 2026-07-07): a ordem já foi executada de
         # verdade na Binance (ou simulada) e salva no banco NESTE ponto — o
         # usuário tem exposição real a partir daqui. send_trade_opened() monta
@@ -2111,9 +2179,12 @@ async def job_auto_trade(signals: list):
         print(f"[AUTO] 🎯 Objetivo diário atingido! ${_daily_pnl:.2f} >= ${DAILY_TARGET_USDT:.2f}")
         return
 
-    # Trades por sessão
-    if TRADES_PER_SESSION > 0 and _session_trades >= TRADES_PER_SESSION:
-        print(f"[AUTO] Limite de trades/sessão atingido ({TRADES_PER_SESSION}). Aguardando próxima sessão.")
+    # Vagas do lote atual (FIX 2026-07-08: fluxo contínuo — checa vagas
+    # OCUPADAS agora, não um contador cumulativo que nunca esvaziava. Assim
+    # que uma entrada do lote fecha, a vaga libera sozinha; ver
+    # _on_autonomous_trade_closed() para a avaliação de fim de lote).
+    if TRADES_PER_SESSION > 0 and len(_round_trade_ids) >= TRADES_PER_SESSION:
+        print(f"[AUTO] Lote cheio ({len(_round_trade_ids)}/{TRADES_PER_SESSION}) — aguardando fechar alguma entrada.")
         return
 
     if not await can_open_trade(_active_max_open()):
@@ -2173,9 +2244,9 @@ async def job_auto_trade(signals: list):
         _blocks[reason] = _blocks.get(reason, 0) + 1
 
     for signal in signals:
-        # Revalida limites a cada iteração
-        if TRADES_PER_SESSION > 0 and _session_trades >= TRADES_PER_SESSION:
-            _blk(f"limite_trades_sessao({TRADES_PER_SESSION})")
+        # Revalida vagas do lote a cada iteração (FIX 2026-07-08 — ver gate acima)
+        if TRADES_PER_SESSION > 0 and len(_round_trade_ids) >= TRADES_PER_SESSION:
+            _blk(f"lote_cheio({TRADES_PER_SESSION})")
             break
         if not await can_open_trade(mode_cfg.get("max_open_trades", 5)):
             _blk("max_trades_abertos")
@@ -3910,6 +3981,8 @@ async def job_update_trades():
                         if _consecutive_wins >= _ANTI_MARTINGALE_WINS_TO_RESET:
                             _consecutive_losses = 0
                             _consecutive_wins = 0
+                    # Fluxo contínuo por LOTE (FIX 2026-07-08) — ver _on_autonomous_trade_closed()
+                    await _on_autonomous_trade_closed(trade.id, trade_data.get("mode", ""), dca_res["pnl_usdt"])
                     _daily_pnl += dca_res["pnl_usdt"]
                     _register_auto_pnl(dca_res["pnl_usdt"])  # alimenta kill-switch -20%
                     _check_daily_target_notify()
@@ -4073,6 +4146,10 @@ async def job_update_trades():
                         if _consecutive_wins >= _ANTI_MARTINGALE_WINS_TO_RESET:
                             _consecutive_losses = 0
                             _consecutive_wins   = 0
+                    # Fluxo contínuo por LOTE (FIX 2026-07-08) — ver _on_autonomous_trade_closed()
+                    # (await direto, não create_task: precisa liberar a vaga do
+                    # lote ANTES do próximo ciclo de scan checar _round_trade_ids)
+                    await _on_autonomous_trade_closed(trade.id, trade_data.get("mode", ""), _pnl_close)
                     # Meta diária: atualiza PnL
                     _daily_pnl += _pnl_close
                     _register_auto_pnl(_pnl_close)  # alimenta kill-switch -20%
@@ -4886,6 +4963,7 @@ async def _job_universe_builder():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global OPERATION_MODE, EXEC_MODE, DUAL_MODE_ENABLED, SINAIS_ENABLED, PAPER_TRADING, BOT_PAUSED
+    global _round_trade_ids, _round_was_full
     _acquire_instance_lock()
     await init_db()
     print("[TRADER 001] Database initialized")
@@ -4955,6 +5033,24 @@ async def lifespan(app: FastAPI):
             print(f"[STARTUP] Boot ocioso — nenhum modo estava ativo antes do restart. Banca: {BANCA_USDT} | Perfil: {CURRENT_MODE}")
     except Exception as e:
         print(f"[STARTUP] Erro ao carregar/sincronizar configurações do DB: {e}")
+
+    # Fluxo contínuo por LOTE (FIX 2026-07-08): reconstrói o lote em andamento
+    # a partir dos trades REALMENTE abertos no modo AUTÔNOMO. Sem isto, todo
+    # restart/deploy zerava _round_trade_ids mesmo com posições reais abertas
+    # — o gate de vagas "esqueceria" delas e deixaria abrir trades além do
+    # limite configurado até essas posições antigas fecharem.
+    try:
+        if TRADES_PER_SESSION > 0:
+            _open_now = await get_open_trades()
+            for _t in _open_now:
+                if _t.get("mode") == "AUTONOMOUS":
+                    _round_trade_ids.add(_t["id"])
+            if len(_round_trade_ids) >= TRADES_PER_SESSION:
+                _round_was_full = True
+            if _round_trade_ids:
+                print(f"[STARTUP] Lote reconstruído: {len(_round_trade_ids)}/{TRADES_PER_SESSION} vaga(s) ocupada(s) por trades já abertos.")
+    except Exception as _round_boot_ex:
+        print(f"[STARTUP] Erro ao reconstruir lote do modo Autônomo: {_round_boot_ex}")
 
     # TRAVA DE SEGURANÇA: valida a estrutura de MODE_SETTINGS/GRID_SETTINGS antes
     # de operar. Ver _check_structural_integrity().
