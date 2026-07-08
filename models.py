@@ -91,6 +91,13 @@ class ActiveTrade(BaseModel):
     status: Literal["OPEN", "CLOSED", "CANCELLED"] = "OPEN"
     reason: str
     confidence: float
+    # id da linha em `signals` que originou este trade (FIX 2026-07-08) —
+    # sem isto, record_signal_outcome() no fechamento sempre recebia 0 e o
+    # resultado (ganho/perda) nunca linkava de volta ao sinal original fora
+    # do canal Sinais, deixando o card "Positivos/Negativos" do dashboard
+    # restrito a esse canal. 0 = sem sinal de origem rastreado (ex.: trade
+    # aberto antes deste fix).
+    signal_db_id: int = 0
     opened_at: datetime = Field(default_factory=datetime.utcnow)
     closed_at: Optional[datetime] = None
 

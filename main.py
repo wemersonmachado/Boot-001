@@ -1091,7 +1091,7 @@ async def job_scan_market():
 
         # ── AUTO-EXECUÇÃO ─────────────────────────────────────────────────────
         if signals:
-            await job_auto_trade(signals)
+            await job_auto_trade(signals, id_map=_id_map)
 
     except Exception as e:
         print(f"[SCHEDULER] Erro: {e}")
@@ -1970,6 +1970,7 @@ async def _execute_trade_inner(signal_dict: dict):
             size_usdt=notional,
             reason=signal.reason,
             confidence=signal.confidence,
+            signal_db_id=int(signal_dict.get("db_signal_id") or 0),
         )
         origin = (
             f"Banca ${BANCA_USDT:.2f} / {n} trades = ${margin:.2f} margem"
@@ -1987,6 +1988,7 @@ async def _execute_trade_inner(signal_dict: dict):
             
         trade = create_trade(signal, balance, risk_pct=_profile_risk)
         trade.leverage = user_leverage
+        trade.signal_db_id = int(signal_dict.get("db_signal_id") or 0)
         origin = f"Risk-based ${trade.size_usdt:.2f} nocional | {user_leverage}x"
 
     # Ajuste de tamanho se DCA estiver ativo
@@ -2117,14 +2119,21 @@ async def _telegram_close_trade(trade_id: str, msg_id: int = None, chat_id: int 
     print(f"[TELEGRAM] Trade {trade_id} fechado via botao Telegram")
 
 
-async def job_auto_trade(signals: list):
+async def job_auto_trade(signals: list, id_map: dict = None):
     """
     Filtra sinais e age conforme OPERATION_MODE.
     SUPERVISED  → envia ao Telegram aguardando aprovação
     AUTONOMOUS  → executa + notifica Telegram com mesmo formato do supervisionado
     Respeita: limite de trades/sessão, objetivo diário, cooldown de 5min.
+
+    id_map (FIX 2026-07-08): asset -> id da linha em `signals` (banco), criado
+    por job_scan_market ao salvar os sinais do ciclo. Usado para marcar
+    executed=1 + registrar telegram_sent quando o Autônomo abre um trade ou o
+    Supervisionado manda aprovação — sem isso, o card "Sinais Enviados (24h)"
+    só contava o canal Sinais (destino 'vip'), nunca os outros modos.
     """
     global _daily_pnl, _session_trades, _last_auto_entry_ts, _auto_killswitch_notified, _trades_today
+    id_map = id_map or {}
 
     _effective_mode = _resolve_effective_mode()
     if _effective_mode in ("SINAIS", "GRID"):
@@ -2242,6 +2251,12 @@ async def job_auto_trade(signals: list):
     _blocks: dict = {}
     def _blk(reason: str):
         _blocks[reason] = _blocks.get(reason, 0) + 1
+        # Shadow Book (FIX 2026-07-08): antes só o modo SINAIS alimentava o
+        # shadow book — Autônomo/Supervisionado bloqueavam sinais em silêncio,
+        # sem aparecer no card "Descartados (24h)" do dashboard. Reusa o mesmo
+        # registro do canal Sinais para os dois modos que passam por aqui
+        # (job_auto_trade cobre AUTONOMOUS e SUPERVISED).
+        _record_shadow(signal.model_dump(), reason)
 
     for signal in signals:
         # Revalida vagas do lote a cada iteração (FIX 2026-07-08 — ver gate acima)
@@ -2359,6 +2374,11 @@ async def job_auto_trade(signals: list):
         signal_dict["direction"]  = signal.direction.value
         signal_dict["score"]      = signal.score.model_dump()
         signal_dict["leverage"]   = signal.suggested_leverage if getattr(signal, "suggested_leverage", 0) > 0 else get_leverage(signal.asset)
+        # Propaga o id da linha em `signals` (FIX 2026-07-08) — sem isto, o
+        # trade aberto por este sinal nunca conseguia linkar seu resultado
+        # (ganho/perda) de volta ao sinal original, e o card "Positivos/
+        # Negativos" do dashboard ficava restrito ao canal Sinais.
+        signal_dict["db_signal_id"] = id_map.get(signal.asset)
 
         # Aplica ajuste de vies do Market Intelligence Engine (max +/-10pts)
         bias_adj = market_engine.get_bias_score_adjustment(signal.direction.value)
@@ -2588,6 +2608,12 @@ async def job_auto_trade(signals: list):
                 # Normal/Agressivo: 1 entrada por janela de cadência → encerra o ciclo.
                 if _cadence_s > 0:
                     _cadence_break = True
+                # KPI "Sinais Enviados" (FIX 2026-07-08): marca o sinal como
+                # executado — sem isto o card do dashboard só contava o canal
+                # Sinais (destino 'vip'), nunca as entradas reais do Autônomo.
+                _db_sig_id = id_map.get(signal.asset)
+                if _db_sig_id:
+                    asyncio.create_task(mark_signal_executed(_db_sig_id, signal.asset, "autonomous"))
         elif _effective_mode == "GRID":
             # GRID usa job_grid_scan dedicado, não o fluxo normal
             pass
@@ -2609,6 +2635,10 @@ async def job_auto_trade(signals: list):
             await send_signal_alert(signal_dict, _execute_trade, _reject_trade)
             _asset_last_entry_ts[signal.asset] = now_ts
             print(f"[SUPERVISIONADO] 📲 {signal.asset} {signal.direction.value} score={signal.confidence:.0f}")
+            # KPI "Sinais Enviados" (FIX 2026-07-08) — ver comentário no bloco AUTÔNOMO acima.
+            _db_sig_id = id_map.get(signal.asset)
+            if _db_sig_id:
+                asyncio.create_task(mark_signal_executed(_db_sig_id, signal.asset, "supervised"))
 
         open_assets.add(signal.asset)
         _signal_cooldown[cooldown_key] = now_ts  # marca cooldown SÓ após qualificar/enviar

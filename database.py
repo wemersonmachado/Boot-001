@@ -37,7 +37,8 @@ CREATE TABLE IF NOT EXISTS trades (
     mode        TEXT,
     paper       INTEGER DEFAULT 1,
     execution_status TEXT,
-    order_id    TEXT
+    order_id    TEXT,
+    signal_db_id INTEGER DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS signals (
@@ -247,6 +248,10 @@ async def init_db():
             "ALTER TABLE trades ADD COLUMN paper INTEGER DEFAULT 1",
             "ALTER TABLE trades ADD COLUMN execution_status TEXT",
             "ALTER TABLE trades ADD COLUMN order_id TEXT",
+            # FIX 2026-07-08: liga o trade de volta ao sinal que o originou —
+            # sem isto, o resultado (ganho/perda) de trades Autônomo/Supervisionado
+            # nunca linkava ao sinal original (só o canal Sinais linkava).
+            "ALTER TABLE trades ADD COLUMN signal_db_id INTEGER DEFAULT 0",
         ):
             try:
                 await db.execute(stmt)
@@ -265,8 +270,9 @@ async def save_trade(trade: dict):
             """INSERT OR REPLACE INTO trades
                (id, asset, direction, entry_price, exit_price, stop_loss, tp1, tp2, tp3,
                 rr, leverage, size_usdt, pnl_pct, pnl_usdt, status, reason, confidence,
-                timeframe, score_json, opened_at, closed_at, mode, paper, execution_status, order_id)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                timeframe, score_json, opened_at, closed_at, mode, paper, execution_status, order_id,
+                signal_db_id)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 trade["id"], trade["asset"], trade["direction"],
                 trade["entry_price"], trade.get("exit_price"),
@@ -279,6 +285,7 @@ async def save_trade(trade: dict):
                 1 if trade.get("paper", True) else 0,
                 trade.get("execution_status"),
                 str(trade.get("order_id")) if trade.get("order_id") is not None else None,
+                int(trade.get("signal_db_id") or 0),
             ),
         )
         await db.commit()
@@ -460,18 +467,24 @@ async def get_strategy_registry(status: str | None = None) -> list[dict]:
 
 
 async def get_signal_kpi_summary(window_h: float = 24.0) -> dict:
-    """KPIs do canal SINAIS para o dashboard, recortados nas últimas `window_h`
-    horas: total enviado (signals + telegram_sent destino 'vip') e
+    """KPIs de sinais para o dashboard, recortados nas últimas `window_h`
+    horas: total enviado (signals + telegram_sent, qualquer destino) e
     positivos/negativos/% acerto resolvidos (signal_outcomes), ambos filtrados
     pelo horário ORIGINAL do sinal (não pelo horário em que foi resolvido).
-    Atualiza sozinho conforme job_sinais_outcome_watch resolve cada sinal por
-    TP1/TP2/SL."""
+    Atualiza sozinho conforme os sinais são resolvidos por TP1/TP2/SL.
+
+    FIX 2026-07-08: antes só contava destino='vip' (canal Sinais) — agora
+    mark_signal_executed() é chamado por TODOS os modos (Autônomo grava
+    destino 'autonomous', Supervisionado 'supervised', Sinais 'vip'), então
+    o card "Sinais Enviados (24h)" passa a refletir qualquer modo ativo, não
+    só o canal Sinais. COUNT(DISTINCT s.id) já evita contar duas vezes um
+    sinal que por acaso tenha mais de um registro em telegram_sent."""
     cutoff = (datetime.utcnow() - timedelta(hours=window_h)).isoformat()
     async with aiosqlite.connect(DB_PATH) as db:
         await _configure_db(db)
         cur = await db.execute(
             """SELECT COUNT(DISTINCT s.id) FROM signals s
-               JOIN telegram_sent t ON t.signal_db_id = s.id AND t.destination = 'vip'
+               JOIN telegram_sent t ON t.signal_db_id = s.id
                WHERE s.timestamp >= ?""",
             (cutoff,),
         )
