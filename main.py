@@ -2195,6 +2195,21 @@ async def job_auto_trade(signals: list, id_map: dict = None):
         print(f"[AUTO] 🎯 Objetivo diário atingido! ${_daily_pnl:.2f} >= ${DAILY_TARGET_USDT:.2f}")
         return
 
+    # Reconciliação do lote (FIX 2026-07-09): _round_trade_ids só é liberado
+    # nos 2 pontos onde job_update_trades fecha um trade (SL/TP normal e
+    # DCA) — se um trade fechar por QUALQUER outro caminho (reconciliação
+    # com a Binance, fechamento manual, botão do Telegram), a vaga ficava
+    # PRESA para sempre, bloqueando toda entrada nova em silêncio (caso real:
+    # bot ficou 9h+ parado sem nenhum registro explicando o motivo). Agora,
+    # a cada ciclo, remove do lote qualquer ID que não esteja mais
+    # REALMENTE aberto — a vaga nunca fica presa além de 1 ciclo de scan.
+    if TRADES_PER_SESSION > 0 and _round_trade_ids:
+        _real_open_ids = {t["id"] for t in await get_open_trades() if t.get("mode") == "AUTONOMOUS"}
+        _stale_ids = _round_trade_ids - _real_open_ids
+        if _stale_ids:
+            print(f"[AUTO-LOTE] Reconciliação: {len(_stale_ids)} vaga(s) presa(s) liberada(s) (fechou por outro caminho).")
+            _round_trade_ids -= _stale_ids
+
     # Vagas do lote atual (FIX 2026-07-08: fluxo contínuo — checa vagas
     # OCUPADAS agora, não um contador cumulativo que nunca esvaziava. Assim
     # que uma entrada do lote fecha, a vaga libera sozinha; ver
@@ -6632,6 +6647,29 @@ async def force_scan_endpoint():
     existiu no backend — o botão retornava 404 e mostrava 'Erro ao forcar scan'."""
     asyncio.create_task(job_scan_market())
     return {"status": "started", "started_at": datetime.utcnow().strftime("%H:%M:%S")}
+
+
+@app.get("/auto/debug_gates")
+async def auto_debug_gates():
+    """Diagnóstico (2026-07-09): expõe os gates internos que podem travar
+    silenciosamente o modo AUTÔNOMO sem nenhum rastro no shadow book (só
+    aparecem em print() no console do Railway hoje). Criado depois de um
+    caso real: bot ficou 9h+ sem abrir entradas, sem nenhum registro
+    explicando o motivo — nenhum endpoint permitia inspecionar isso de fora."""
+    open_trades = await get_open_trades()
+    auto_open = [t for t in open_trades if t.get("mode") == "AUTONOMOUS"]
+    return {
+        "bot_paused": BOT_PAUSED,
+        "cb_pending": _cb_pending,
+        "cb_deadline_in_s": round(_cb_deadline - time.time(), 1) if _cb_pending else None,
+        "consecutive_losses": _consecutive_losses,
+        "round_trade_ids": list(_round_trade_ids),
+        "round_was_full": _round_was_full,
+        "round_outcomes_pending": _round_outcomes,
+        "trades_per_session": TRADES_PER_SESSION,
+        "autonomous_open_trades_real": [t["id"] for t in auto_open],
+        "stale_round_ids": list(_round_trade_ids - {t["id"] for t in auto_open}),
+    }
 
 
 @app.get("/auto/status")
