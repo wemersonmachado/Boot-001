@@ -2256,6 +2256,15 @@ async def job_auto_trade(signals: list, id_map: dict = None):
     """
     global _daily_pnl, _session_trades, _last_auto_entry_ts, _auto_killswitch_notified, _trades_today
     global _last_auto_cycle_ts, _last_auto_action_ts
+    # FIX 2026-07-09 (bug crítico): a reconciliação do lote abaixo faz
+    # `_round_trade_ids -= _stale_ids`, uma REATRIBUIÇÃO — sem este `global`,
+    # o Python trata _round_trade_ids como variável LOCAL na função INTEIRA
+    # (decisão é por função, não por linha), e todo acesso ANTERIOR a essa
+    # reatribuição (os gates de "lote cheio" logo depois) explode com
+    # UnboundLocalError. Isso travava o ciclo INTEIRO em erro a cada 60s,
+    # silenciosamente até o fix de isolamento em job_scan_market começar a
+    # reportar o erro no Telegram (foi assim que apareceu).
+    global _round_trade_ids
     id_map = id_map or {}
     # PROVA de que o ciclo está rodando (FIX 2026-07-09) — ver /auto/debug_gates.
     # Sem isto, era impossível distinguir "job_auto_trade nunca é chamado neste
