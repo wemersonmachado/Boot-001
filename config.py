@@ -141,6 +141,11 @@ AUTOTUNE_SCORE_ENABLED = True
 AUTOTUNE_LOOKBACK      = 30        # nº de trades fechados considerados
 AUTOTUNE_MAX_TIGHTEN   = 8         # quanto pode SUBIR o corte (mais seletivo)
 AUTOTUNE_MAX_LOOSEN    = 3         # quanto pode BAIXAR o corte (quando ganha muito)
+# FIX 2026-07-09: amostra mínima subiu de 8 para 15 — com poucos trades a
+# taxa de acerto é ruidosa demais (1 trade perdedor já muda >10pp) e o
+# auto-tune ficava "grudado" no aperto máximo por causa de ruído estatístico,
+# não de performance real. Só decide algo com uma amostra mais estável.
+AUTOTUNE_MIN_SAMPLE    = 15
 
 # (E) Alavancagem por volatilidade (ATR%): reduz a alavancagem em ativos mais voláteis.
 LEVERAGE_BY_VOLATILITY = True

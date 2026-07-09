@@ -315,7 +315,17 @@ async def prune_old_rows(days: int = 30) -> dict:
 
 
 async def get_recent_trade_stats(limit: int = 30) -> dict:
-    """Estatística dos últimos N trades fechados (base do auto-tune do score)."""
+    """Estatística dos últimos N trades fechados (base do auto-tune do score).
+
+    FIX 2026-07-09: trades fechados praticamente no zero a zero (ex.: SL
+    movido pro entry) antes contavam no denominador SEM contar como vitória
+    — isso diluía a taxa de acerto artificialmente (ex.: 57% -> 44% só por
+    dois trades de $0.00 entrarem na amostra) e empurrava o auto-tune de
+    volta pro aperto máximo mesmo com performance real estável. Breakeven
+    (|pnl| < BREAKEVEN_EPS) agora é excluído tanto do numerador quanto do
+    denominador — só entram na conta os trades que de fato ganharam ou
+    perderam dinheiro."""
+    BREAKEVEN_EPS = 0.01  # USDT — abaixo disso é considerado "zero a zero"
     async with aiosqlite.connect(DB_PATH) as db:
         await _configure_db(db)
         cur = await db.execute(
@@ -323,8 +333,9 @@ async def get_recent_trade_stats(limit: int = 30) -> dict:
             "ORDER BY closed_at DESC LIMIT ?", (int(limit),)
         )
         rows = await cur.fetchall()
-    n    = len(rows)
-    wins = sum(1 for r in rows if float(r[0] or 0) > 0)
+    decisive = [float(r[0] or 0) for r in rows if abs(float(r[0] or 0)) >= BREAKEVEN_EPS]
+    n    = len(decisive)
+    wins = sum(1 for pnl in decisive if pnl > 0)
     wr   = (wins / n * 100.0) if n > 0 else 0.0
     return {"n": n, "wins": wins, "win_rate": round(wr, 1)}
 

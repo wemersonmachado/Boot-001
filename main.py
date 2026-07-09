@@ -68,7 +68,7 @@ from config import (WEBHOOK_SECRET, HOST, PORT, WATCHLIST, MAX_DAILY_LOSS_PCT,
                     CB_LOSS_THRESHOLD, CB_ERROR_TRIGGER_ENABLED,
                     MAX_TOTAL_EXPOSURE_RATIO, MAX_TRADES_PER_DAY,
                     AUTOTUNE_SCORE_ENABLED, AUTOTUNE_LOOKBACK, AUTOTUNE_MAX_TIGHTEN,
-                    AUTOTUNE_MAX_LOOSEN, LEVERAGE_BY_VOLATILITY, ATR_PCT_REF, LEVERAGE_VOL_FLOOR,
+                    AUTOTUNE_MAX_LOOSEN, AUTOTUNE_MIN_SAMPLE, LEVERAGE_BY_VOLATILITY, ATR_PCT_REF, LEVERAGE_VOL_FLOOR,
                     SINAIS_BRAIN_MIN_SCORE, SINAIS_OUTCOME_TRACKING, SINAIS_OUTCOME_MAX_AGE_H,
                     SINAIS_OUTCOME_MAX_AGE_H_BY_TF,
                     SINAIS_AUTOTUNE_ENABLED, SINAIS_AUTOTUNE_LOOKBACK,
@@ -1568,13 +1568,20 @@ def _eff_min_score(mode_cfg: dict) -> int:
 async def job_autotune_score():
     """Ajusta _score_offset conforme a taxa de acerto dos últimos N trades fechados:
     win-rate baixa → corte MAIS alto (seletivo); win-rate alta → corte mais baixo.
-    Conservador e com limites (AUTOTUNE_MAX_TIGHTEN / AUTOTUNE_MAX_LOOSEN)."""
+    Conservador e com limites (AUTOTUNE_MAX_TIGHTEN / AUTOTUNE_MAX_LOOSEN).
+
+    FIX 2026-07-09: amostra mínima subiu de 8 para AUTOTUNE_MIN_SAMPLE (15) —
+    com poucos trades fechados a taxa de acerto é ruidosa demais (1 trade
+    perdedor/zerado já muda >10pp) e o offset ficava "grudado" no aperto
+    máximo por ruído estatístico, mesmo com performance real estável (visto
+    em produção: 11 trades, wr real ~46%, offset preso em +8/+8 = score
+    mínimo 80 em vez de 72 do perfil Normal)."""
     global _score_offset
     if not AUTOTUNE_SCORE_ENABLED:
         return
     try:
         stats = await get_recent_trade_stats(AUTOTUNE_LOOKBACK)
-        if stats["n"] < 8:           # amostra pequena → não mexe
+        if stats["n"] < AUTOTUNE_MIN_SAMPLE:   # amostra pequena/ruidosa → não mexe
             return
         wr  = stats["win_rate"]
         old = _score_offset
