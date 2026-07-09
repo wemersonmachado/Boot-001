@@ -2054,6 +2054,23 @@ function syncModeUI(d) {
     bg.textContent = off ? 'Desligado' : (MODE_LBL[active] || active);
     bg.classList.toggle('off', off);
   }
+
+  _applyModeVisibility(op);
+}
+
+// Mostra/esconde os cards de execução (Capital/Limite/Alavancagem/DCA) —
+// esses parâmetros só fazem sentido para modos que abrem ordem de verdade
+// (Autônomo/Supervisionado/Grid). No modo Sinais (só transmite alertas, sem
+// executar nada) eles são irrelevantes e ficam escondidos — só o Perfil de
+// Risco (Conservador/Normal/Agressivo) continua disponível, pois ele também
+// rege os thresholds do canal Sinais.
+const _EXEC_ONLY_CARD_IDS = ['cfg-cap', 'cfg-div', 'cfg-lev', 'cfg-dca'];
+function _applyModeVisibility(op) {
+  const showExecCards = (op !== 'SINAIS');
+  _EXEC_ONLY_CARD_IDS.forEach(id => {
+    const el = $id(id);
+    if (el) el.style.display = showExecCards ? '' : 'none';
+  });
 }
 
 // Seletor de modo ÚNICO — clicar ativa só aquele modo; clicar no ativo desliga (ocioso)

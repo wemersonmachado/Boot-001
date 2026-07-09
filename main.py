@@ -720,7 +720,7 @@ _sinais_empty_cycles: int   = 0      # ciclos consecutivos sem sinais (alerta em
 # todos os filtros. O heartbeat manda ao chat pessoal um resumo curto (recebidos/
 # enviados/maior bloqueio) para o usuário VER que está vivo e por que não operou.
 _exec_heartbeat_ts: dict       = {}    # modo → timestamp do último heartbeat enviado
-_EXEC_HEARTBEAT_INTERVAL_S: int = 900  # throttle: no máximo 1 heartbeat a cada 15 min
+_EXEC_HEARTBEAT_INTERVAL_S: int = 600  # throttle: no máximo 1 heartbeat a cada 10 min (pedido do usuário)
 
 async def _send_exec_heartbeat(mode: str, recv: int, sent: int, brk: str,
                                min_score, min_rr) -> None:
@@ -817,6 +817,28 @@ _session_returns: list  = []      # pnl_pct de cada trade fechado nesta sessao
 _sortino_pause:   bool  = False   # True = bot pausado por Sortino baixo
 SORTINO_PAUSE_THRESHOLD = 0.8     # pausa se Sortino cair abaixo disto
 SORTINO_MIN_TRADES      = 8       # minimo de trades para calcular (evita falso positivo)
+
+# ── Instrumentação do ciclo Autônomo/Supervisionado (FIX 2026-07-09) ────────
+# Caso real: bot ficou 1h+ com sinais BONS no cache (score 100, 84.6 — bem
+# acima do min_score) e NENHUM chegou a ser avaliado no loop de sinais — sem
+# isto, era impossível saber SE job_auto_trade sequer rodou naquele ciclo, ou
+# em qual gate anterior ao loop ele parou (retornos antigos só tinham print(),
+# invisíveis fora do console do Railway). Atualizado em TODO ponto de saída
+# (early return E fim normal do loop) — ver _note_auto_gate().
+_last_auto_cycle_ts:      float = 0.0   # todo INÍCIO de job_auto_trade (prova que está sendo chamado)
+_last_auto_gate_reason:   str   = ""    # último motivo de parada (gate ou "ok")
+_last_auto_gate_ts:       float = 0.0   # quando esse motivo foi registrado
+_last_auto_action_ts:     float = 0.0   # última vez que abriu trade OU mandou aprovação de verdade
+_last_auto_alert_ts:      float = 0.0   # debounce do alerta de "parado há muito tempo" (a cada 10min)
+
+
+def _note_auto_gate(reason: str):
+    """Registra o motivo da última parada do ciclo Autônomo/Supervisionado —
+    substitui os antigos print()-só, que morriam no console do Railway sem
+    nenhum jeito de inspecionar de fora (ver /auto/debug_gates)."""
+    global _last_auto_gate_reason, _last_auto_gate_ts
+    _last_auto_gate_reason = reason
+    _last_auto_gate_ts = time.time()
 
 # ── Macro Event Guard — PERGUNTA ao usuário (não pausa sozinho) ─────────────
 # Comportamento: ao entrar na janela de um evento HIGH, o bot AVISA no Telegram
@@ -1087,15 +1109,50 @@ async def job_scan_market():
         _last_scan_ts = time.time()
         _last_scan_count = len(signals)
         print(f"[SCHEDULER] {len(signals)} sinais encontrados")
-        await log_event("SCAN", f"{len(signals)} sinais encontrados", {"mode": CURRENT_MODE})
-
-        # ── AUTO-EXECUÇÃO ─────────────────────────────────────────────────────
-        if signals:
-            await job_auto_trade(signals, id_map=_id_map)
+        # Isolado (FIX 2026-07-09): log_event é só telemetria — uma falha aqui
+        # (ex.: banco ocupado) NÃO pode impedir a auto-execução de rodar logo
+        # abaixo. Antes, uma exceção neste log derrubava o try/except inteiro
+        # e pulava job_auto_trade em silêncio, sem nenhum aviso.
+        try:
+            await log_event("SCAN", f"{len(signals)} sinais encontrados", {"mode": CURRENT_MODE})
+        except Exception as _log_ex:
+            print(f"[SCHEDULER] log_event falhou (ignorado, não afeta execução): {_log_ex}")
 
     except Exception as e:
         print(f"[SCHEDULER] Erro: {e}")
-        await log_event("ERROR", f"Scan error: {e}")
+        try:
+            await log_event("ERROR", f"Scan error: {e}")
+        except Exception:
+            pass
+        try:
+            await send_alert(f"⚠️ Erro no scan de mercado: `{type(e).__name__}: {e}`. Próximo ciclo em ~60s.")
+        except Exception:
+            pass
+        return
+
+    # ── AUTO-EXECUÇÃO (FIX 2026-07-09: fora do try/except do scan) ───────────
+    # Isolado do bloco de scan acima — uma falha ao buscar/salvar sinais não
+    # pode silenciar a execução de trades para os sinais que JÁ foram obtidos
+    # com sucesso. E uma falha AQUI DENTRO nunca mais passa em silêncio: vira
+    # um alerta explícito no Telegram, não só um print() perdido no Railway.
+    if signals:
+        try:
+            await job_auto_trade(signals, id_map=_id_map)
+        except Exception as _auto_ex:
+            print(f"[SCHEDULER] job_auto_trade falhou: {_auto_ex}")
+            _note_auto_gate(f"ERRO no ciclo: {type(_auto_ex).__name__}: {_auto_ex}")
+            try:
+                await log_event("ERROR", f"job_auto_trade error: {_auto_ex}")
+            except Exception:
+                pass
+            try:
+                await send_alert(
+                    f"🛑 *Erro no ciclo de execução automática*\n"
+                    f"`{type(_auto_ex).__name__}: {_auto_ex}`\n"
+                    f"O bot tenta de novo no próximo ciclo (~60s) — se persistir, avisa de novo."
+                )
+            except Exception:
+                pass
 
 
 # ── Health Monitor ────────────────────────────────────────────────────────────
@@ -1202,6 +1259,64 @@ async def job_health_watch():
         print(f"[HEALTH] Problema contínuo: {problems}")
     else:
         _health_last_ok_ts = time.time()
+
+
+AUTO_STALL_ALERT_MIN = 20    # a partir de quanto tempo sem ação real considera "parado"
+AUTO_STALL_REPEAT_S  = 600   # repete o aviso no máx a cada 10 min (pedido do usuário)
+
+
+async def job_auto_stall_watch():
+    """Watchdog dedicado (FIX 2026-07-09) — cobre exatamente o buraco que
+    causou incidentes reais: bot em AUTÔNOMO/SUPERVISIONADO, tecnicamente
+    'saudável' (scan rodando, Binance ok — job_health_watch não pega isso)
+    e sem NENHUMA entrada por horas, sem nenhum aviso explicando o motivo.
+
+    job_idle_watch só cobre bot PAUSADO ou canal Sinais desligado — não
+    cobre "modo ativo mas travado num gate" (kill-switch, circuit breaker,
+    exposição, Sortino, lote cheio, ou simplesmente sem sinal qualificado).
+
+    Roda a cada 2 min; só ENVIA a cada 10 min (AUTO_STALL_REPEAT_S) e só se
+    ficou parado por mais de AUTO_STALL_ALERT_MIN — sempre com o motivo mais
+    recente registrado por _note_auto_gate(), e prova se o próprio ciclo
+    ainda está rodando (distingue 'sem sinal bom' de 'o ciclo parou')."""
+    global _last_auto_alert_ts
+    _effective_mode = _resolve_effective_mode()
+    if _effective_mode not in ("AUTONOMOUS", "SUPERVISED"):
+        return
+    if BOT_PAUSED:
+        return  # já coberto por job_idle_watch
+
+    now = time.time()
+    if _last_auto_action_ts == 0.0:
+        return  # ainda não passou pelo 1º ciclo desde o boot — nada a avaliar ainda
+
+    stall_min = (now - _last_auto_action_ts) / 60.0
+    if stall_min < AUTO_STALL_ALERT_MIN:
+        return
+    if now - _last_auto_alert_ts < AUTO_STALL_REPEAT_S:
+        return
+    _last_auto_alert_ts = now
+
+    cycle_age_s = (now - _last_auto_cycle_ts) if _last_auto_cycle_ts else None
+    if cycle_age_s is None:
+        cycle_status = "⚠️ ciclo NUNCA rodou nesta instância"
+    elif cycle_age_s > 180:
+        cycle_status = f"⚠️ CICLO PARADO — job_auto_trade não roda há {int(cycle_age_s)}s (scan travado? ver job_health_watch)"
+    else:
+        cycle_status = f"ciclo rodando normalmente (última vez há {int(cycle_age_s)}s)"
+
+    gate_age_min = (now - _last_auto_gate_ts) / 60.0 if _last_auto_gate_ts else None
+    gate_txt = (f"{_last_auto_gate_reason} (há {gate_age_min:.0f}min)"
+                if _last_auto_gate_reason else "nenhum motivo registrado ainda")
+
+    _mode_cfg = MODE_SETTINGS.get(CURRENT_MODE, MODE_SETTINGS["NORMAL"])
+    await send_alert(
+        f"⏱️ *{_effective_mode} sem entradas há {stall_min:.0f} min*\n"
+        f"Motivo mais recente: `{gate_txt}`\n"
+        f"Status do ciclo: {cycle_status}\n"
+        f"Perfil `{CURRENT_MODE}` | score mínimo efetivo: `{_eff_min_score(_mode_cfg)}` | RR mínimo: `{_mode_cfg['min_rr']}`\n"
+        f"_Próximo aviso em até 10min se continuar parado._"
+    )
 
 
 
@@ -2140,35 +2255,50 @@ async def job_auto_trade(signals: list, id_map: dict = None):
     só contava o canal Sinais (destino 'vip'), nunca os outros modos.
     """
     global _daily_pnl, _session_trades, _last_auto_entry_ts, _auto_killswitch_notified, _trades_today
+    global _last_auto_cycle_ts, _last_auto_action_ts
     id_map = id_map or {}
+    # PROVA de que o ciclo está rodando (FIX 2026-07-09) — ver /auto/debug_gates.
+    # Sem isto, era impossível distinguir "job_auto_trade nunca é chamado neste
+    # ciclo" de "é chamado e para num gate qualquer" olhando só de fora.
+    _last_auto_cycle_ts = time.time()
+    if _last_auto_action_ts == 0.0:
+        # Baseline no 1º ciclo após restart/ativação — evita falso alarme
+        # imediato do watchdog achando que "está parado desde o epoch".
+        _last_auto_action_ts = time.time()
 
     _effective_mode = _resolve_effective_mode()
     if _effective_mode in ("SINAIS", "GRID"):
+        _note_auto_gate(f"modo {_effective_mode} não usa este fluxo")
         return
 
     # Bot pausado (BOT_PAUSED via /bot/pause): nao abre novos trades.
     # OBS: PAPER_TRADING NÃO pausa mais — em paper o fluxo segue e abre trades SIMULADOS.
     if BOT_PAUSED:
+        _note_auto_gate("bot pausado (BOT_PAUSED)")
         print("[AUTO] Bot pausado — sem novos trades.")
         return
 
     # Pausa automatica por Sortino baixo
     if _sortino_pause:
+        _note_auto_gate("pausado por Sortino baixo (/risk/unpause para liberar)")
         print("[AUTO] Bot pausado por Sortino baixo — aguardando recuperacao.")
         return
 
     # Pausa por DECISÃO do usuário durante evento macro (botão Pausar no Telegram)
     if _macro_pause_active():
+        _note_auto_gate("pausado manualmente por evento macro")
         print("[AUTO] Trades pausados pelo usuário durante evento macro.")
         return
 
     # ── Verificações de limites ───────────────────────────────────────────────
     if not _check_daily_loss():
+        _note_auto_gate(f"limite de perda diária atingido ({MAX_DAILY_LOSS_PCT}%)")
         await send_alert(f"🛑 Limite de perda diária atingido ({MAX_DAILY_LOSS_PCT}%). Pausado.")
         return
 
     # Kill-switch -20% da banca (modo AUTÔNOMO): para de abrir até reset manual
     if _effective_mode == "AUTONOMOUS" and not _check_auto_killswitch():
+        _note_auto_gate(f"kill-switch -{AUTO_KILLSWITCH_PCT:.0f}% ativo (/killswitch reset para liberar)")
         if not _auto_killswitch_notified:
             _auto_killswitch_notified = True
             _ref = _auto_killswitch_ref_banca()
@@ -2182,16 +2312,19 @@ async def job_auto_trade(signals: list, id_map: dict = None):
 
     # Circuit breaker pendente: aguardando /continuar ou /pausar — não abre nada.
     if _cb_pending:
+        _note_auto_gate("circuit breaker pendente (/continuar ou /pausar no Telegram)")
         print("[AUTO] Circuit breaker pendente — aguardando autorização, sem novas entradas.")
         return
 
     # Teto de exposição agregada (notional_total / banca).
     if _effective_mode == "AUTONOMOUS" and await _exposure_blocked():
+        _note_auto_gate(f"exposição agregada > {MAX_TOTAL_EXPOSURE_RATIO:.1f}x banca")
         print(f"[AUTO] Exposição agregada > {MAX_TOTAL_EXPOSURE_RATIO:.1f}x banca — sem novas entradas.")
         return
 
     # Objetivo diário atingido?
     if DAILY_TARGET_USDT > 0 and _daily_pnl >= DAILY_TARGET_USDT:
+        _note_auto_gate(f"objetivo diário atingido (${_daily_pnl:.2f} >= ${DAILY_TARGET_USDT:.2f})")
         print(f"[AUTO] 🎯 Objetivo diário atingido! ${_daily_pnl:.2f} >= ${DAILY_TARGET_USDT:.2f}")
         return
 
@@ -2215,16 +2348,19 @@ async def job_auto_trade(signals: list, id_map: dict = None):
     # que uma entrada do lote fecha, a vaga libera sozinha; ver
     # _on_autonomous_trade_closed() para a avaliação de fim de lote).
     if TRADES_PER_SESSION > 0 and len(_round_trade_ids) >= TRADES_PER_SESSION:
+        _note_auto_gate(f"lote cheio ({len(_round_trade_ids)}/{TRADES_PER_SESSION})")
         print(f"[AUTO] Lote cheio ({len(_round_trade_ids)}/{TRADES_PER_SESSION}) — aguardando fechar alguma entrada.")
         return
 
     if not await can_open_trade(_active_max_open()):
+        _note_auto_gate("máximo de trades abertos atingido (MAX_OPEN_TRADES)")
         print("[AUTO] Máximo de trades abertos atingido.")
         return
 
     balance = await _get_balance()
     effective_banca = BANCA_USDT if BANCA_USDT > 0 else balance
     if effective_banca < 5:
+        _note_auto_gate(f"banca insuficiente (${effective_banca:.2f})")
         print(f"[AUTO] Banca insuficiente: ${effective_banca:.2f}")
         return
 
@@ -2625,6 +2761,7 @@ async def job_auto_trade(signals: list, id_map: dict = None):
             # _session_trades é incrementado dentro de _execute_trade_inner após sucesso
             if _session_trades > _before_open:
                 _last_auto_entry_ts = now_ts
+                _last_auto_action_ts = now_ts  # watchdog: prova de vida (ver job_auto_stall_watch)
                 _asset_last_entry_ts[signal.asset] = now_ts  # arma cooldown anti-overtrading
                 _trades_today += 1                            # conta no teto diário
                 # Normal/Agressivo: 1 entrada por janela de cadência → encerra o ciclo.
@@ -2656,6 +2793,7 @@ async def job_auto_trade(signals: list, id_map: dict = None):
                 continue
             await send_signal_alert(signal_dict, _execute_trade, _reject_trade)
             _asset_last_entry_ts[signal.asset] = now_ts
+            _last_auto_action_ts = now_ts  # watchdog: prova de vida (ver job_auto_stall_watch)
             print(f"[SUPERVISIONADO] 📲 {signal.asset} {signal.direction.value} score={signal.confidence:.0f}")
             # KPI "Sinais Enviados" (FIX 2026-07-08) — ver comentário no bloco AUTÔNOMO acima.
             _db_sig_id = id_map.get(signal.asset)
@@ -2676,11 +2814,14 @@ async def job_auto_trade(signals: list, id_map: dict = None):
     _ctx = f"{_effective_mode}/{CURRENT_MODE}"
     print(f"[EXEC-RESUMO {_ctx}] recebidos={_recv} enviados={sent} | bloqueios: {_brk}")
     if sent == 0:
+        _note_auto_gate(f"{_recv} sinal(is) avaliado(s), nenhum qualificou — {_brk}" if _recv else "nenhum sinal recebido neste ciclo")
         print(f"[{_ctx}] Execução viva — 0 enviados de {_recv} sinais "
               f"(score>={mode_cfg['min_score']}, RR>={mode_cfg['min_rr']}). Maior bloqueio acima.")
         # Heartbeat ao Telegram pessoal — mostra que o modo está vivo (com throttle)
         await _send_exec_heartbeat(_effective_mode, _recv, sent, _brk,
                                    mode_cfg["min_score"], mode_cfg["min_rr"])
+    else:
+        _note_auto_gate(f"ok — {sent} entrada(s) enviada(s) neste ciclo")
 
 
 async def job_grid_monitor():
@@ -5168,6 +5309,7 @@ async def lifespan(app: FastAPI):
     scheduler.add_job(job_pairs_arbitrage,           "interval", minutes=15, id="pairs_arbitrage",      max_instances=1, coalesce=True, jitter=30)
     scheduler.add_job(job_health_watch,              "interval", minutes=5,  id="health_watch",       max_instances=1, coalesce=True, jitter=15)
     scheduler.add_job(job_idle_watch,                "interval", minutes=2,  id="idle_watch",         max_instances=1, coalesce=True, jitter=10)
+    scheduler.add_job(job_auto_stall_watch,          "interval", minutes=2,  id="auto_stall_watch",   max_instances=1, coalesce=True, jitter=10)
     scheduler.add_job(job_settings_integrity_watch,  "interval", minutes=10, id="settings_integrity",  max_instances=1, coalesce=True, jitter=20)
     scheduler.add_job(job_db_prune,                  "cron", hour=4, minute=10, id="db_prune",        max_instances=1, coalesce=True)
     scheduler.start()
@@ -6243,6 +6385,9 @@ async def set_trades_per_session(count: int):
     _session_trades = 0
     _sinais_session_count = 0
     print(f"[SETTINGS] Trades/sessão: {value or 'ilimitado'}")
+    # FIX 2026-07-09: notifica Telegram (mesmo padrão de leverage_override) —
+    # o bot continua operando com o valor novo no próximo ciclo.
+    await send_alert(f"📊 Trades por sessão: {value if value else 'ilimitado'}. Aplicado — o bot já opera com o valor novo.")
     return {"trades_per_session": value, "session_trades": _session_trades}
 
 
@@ -6386,6 +6531,10 @@ async def set_banca(banca: float):
     pct = round(100.0 / n, 1)
     print(f"[SETTINGS] Banca: ${value:.2f} ÷ {n} trades = ${trade_size:.2f}/trade ({pct}%)")
     await log_event("SETTINGS", f"Banca atualizada: ${value:.2f}")
+    # FIX 2026-07-09: notifica Telegram como leverage_override já fazia — o
+    # bot continua operando com o valor novo no próximo ciclo, sem precisar
+    # reativar nada.
+    await send_alert(f"💰 Banca alocada: ${value:.2f} ÷ {n} trades = ${trade_size:.2f}/trade. Aplicado — o bot já opera com o valor novo.")
     return {
         "banca_usdt": value,
         "trade_size_usdt": trade_size,
@@ -6658,8 +6807,13 @@ async def auto_debug_gates():
     explicando o motivo — nenhum endpoint permitia inspecionar isso de fora."""
     open_trades = await get_open_trades()
     auto_open = [t for t in open_trades if t.get("mode") == "AUTONOMOUS"]
+    now = time.time()
+    _mode_cfg = MODE_SETTINGS.get(CURRENT_MODE, MODE_SETTINGS["NORMAL"])
     return {
         "bot_paused": BOT_PAUSED,
+        "sortino_pause": _sortino_pause,
+        "macro_pause": _macro_pause_active(),
+        "killswitch_tripped": _auto_killswitch_tripped,
         "cb_pending": _cb_pending,
         "cb_deadline_in_s": round(_cb_deadline - time.time(), 1) if _cb_pending else None,
         "consecutive_losses": _consecutive_losses,
@@ -6669,6 +6823,16 @@ async def auto_debug_gates():
         "trades_per_session": TRADES_PER_SESSION,
         "autonomous_open_trades_real": [t["id"] for t in auto_open],
         "stale_round_ids": list(_round_trade_ids - {t["id"] for t in auto_open}),
+        # Instrumentação do ciclo (FIX 2026-07-09) — prova se job_auto_trade
+        # está rodando e qual foi o último motivo de parada, sem depender de
+        # log do Railway (ver _note_auto_gate).
+        "effective_min_score": _eff_min_score(_mode_cfg),
+        "base_min_score": _mode_cfg["min_score"],
+        "score_offset": _score_offset,
+        "last_cycle_age_s": round(now - _last_auto_cycle_ts, 1) if _last_auto_cycle_ts else None,
+        "last_gate_reason": _last_auto_gate_reason,
+        "last_gate_age_s": round(now - _last_auto_gate_ts, 1) if _last_auto_gate_ts else None,
+        "last_action_age_min": round((now - _last_auto_action_ts) / 60, 1) if _last_auto_action_ts else None,
     }
 
 
