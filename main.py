@@ -767,6 +767,7 @@ _ANTI_MARTINGALE_WINS_TO_RESET = 3  # wins consecutivos necessários para restau
 
 # Meta diária — flag para evitar notificacao duplicada
 _daily_target_notified: bool = False
+_daily_loss_notified:   bool = False  # FIX 2026-07-10: evita spam do alerta a cada ciclo (60s)
 
 # SINAIS — estatisticas semanais
 _sinais_weekly: dict = {"total": 0, "alta": 0, "media": 0, "baixa": 0, "reset_date": None}
@@ -1376,11 +1377,12 @@ def _calc_risk_metrics() -> dict:
 
 def _check_daily_loss() -> bool:
     """Retorna False se limite de perda diária foi atingido."""
-    global _daily_pnl, _daily_reset_date, _daily_target_notified
+    global _daily_pnl, _daily_reset_date, _daily_target_notified, _daily_loss_notified
     today = datetime.utcnow().date()
     if today != _daily_reset_date:
         _daily_pnl = 0.0
         _daily_target_notified = False
+        _daily_loss_notified = False
         _daily_reset_date = today
     # FIX: comparar perda em USDT (não %) contra MAX_DAILY_LOSS_PCT × banca
     _banca_ref = BANCA_USDT if BANCA_USDT > 0 else max(_balance_cache.get("wallet_balance", 100), 100)
@@ -2264,7 +2266,7 @@ async def job_auto_trade(signals: list, id_map: dict = None):
     # UnboundLocalError. Isso travava o ciclo INTEIRO em erro a cada 60s,
     # silenciosamente até o fix de isolamento em job_scan_market começar a
     # reportar o erro no Telegram (foi assim que apareceu).
-    global _round_trade_ids
+    global _round_trade_ids, _daily_loss_notified
     id_map = id_map or {}
     # PROVA de que o ciclo está rodando (FIX 2026-07-09) — ver /auto/debug_gates.
     # Sem isto, era impossível distinguir "job_auto_trade nunca é chamado neste
@@ -2302,7 +2304,11 @@ async def job_auto_trade(signals: list, id_map: dict = None):
     # ── Verificações de limites ───────────────────────────────────────────────
     if not _check_daily_loss():
         _note_auto_gate(f"limite de perda diária atingido ({MAX_DAILY_LOSS_PCT}%)")
-        await send_alert(f"🛑 Limite de perda diária atingido ({MAX_DAILY_LOSS_PCT}%). Pausado.")
+        # FIX 2026-07-10: só avisa 1x (igual ao kill-switch) — antes mandava
+        # a cada ciclo (60s), spammando o Telegram enquanto o limite durasse.
+        if not _daily_loss_notified:
+            _daily_loss_notified = True
+            await send_alert(f"🛑 Limite de perda diária atingido ({MAX_DAILY_LOSS_PCT}%). Pausado até meia-noite UTC ou reset diário.")
         return
 
     # Kill-switch -20% da banca (modo AUTÔNOMO): para de abrir até reset manual
