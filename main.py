@@ -1426,6 +1426,68 @@ def _check_structural_integrity() -> list[str]:
     return problems
 
 
+def _check_global_scoping_integrity() -> list[str]:
+    """TRAVA DE SEGURANÇA (boot, 2026-07-11): detecta a MESMA classe de bug
+    que já causou 3 incidentes reais em produção (commits ec81324, 6baebb6,
+    09d637a) — uma função que reatribui uma variável global do módulo (via
+    `=` ou `+=`/`-=`) sem declarar `global` no topo. Em Python, isso faz o
+    interpretador tratar a variável como LOCAL na função INTEIRA (a decisão
+    é por função, não por linha) — todo acesso a ela ANTES da reatribuição
+    explode com `UnboundLocalError`, geralmente em silêncio (só um print()
+    perdido no Railway) até um mecanismo de alerta acidentalmente revelar o
+    erro, como aconteceu aqui.
+
+    Roda uma varredura com o parser REAL do Python (módulo `ast`, não regex
+    — regex já deixou passar 1 dos 3 casos numa auditoria manual anterior)
+    no próprio arquivo-fonte a cada boot. Fail-open: erro na varredura em si
+    não impede o boot, só deixa de alertar."""
+    import ast
+    problems: list[str] = []
+    try:
+        with open(__file__, encoding="utf-8") as _f:
+            _src = _f.read()
+        _tree = ast.parse(_src)
+    except Exception as _e:
+        return [f"não foi possível rodar a auto-checagem de escopo global: {_e}"]
+
+    _module_globals: set = set()
+    for _node in _tree.body:
+        if isinstance(_node, ast.Assign):
+            for _t in _node.targets:
+                if isinstance(_t, ast.Name):
+                    _module_globals.add(_t.id)
+        elif isinstance(_node, ast.AnnAssign) and isinstance(_node.target, ast.Name):
+            _module_globals.add(_node.target.id)
+
+    def _check_fn(fn):
+        _declared = set()
+        for _n in ast.walk(fn):
+            if isinstance(_n, ast.Global):
+                _declared.update(_n.names)
+
+        class _V(ast.NodeVisitor):
+            def visit_FunctionDef(self, node):   pass  # não desce em função aninhada (escopo próprio)
+            def visit_AsyncFunctionDef(self, node): pass
+            def visit_Assign(self, node):
+                for t in node.targets:
+                    if isinstance(t, ast.Name) and t.id in _module_globals and t.id not in _declared:
+                        problems.append(f"{fn.name}() linha {node.lineno}: '{t.id}' reatribuída sem 'global' declarado")
+                self.generic_visit(node)
+            def visit_AugAssign(self, node):
+                if isinstance(node.target, ast.Name) and node.target.id in _module_globals and node.target.id not in _declared:
+                    problems.append(f"{fn.name}() linha {node.lineno}: '{node.target.id}' reatribuída (+=/-=) sem 'global' declarado")
+                self.generic_visit(node)
+
+        _v = _V()
+        for _stmt in fn.body:
+            _v.visit(_stmt)
+
+    for _node in ast.walk(_tree):
+        if isinstance(_node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            _check_fn(_node)
+    return problems
+
+
 def _effective_mode_label() -> str:
     """Rótulo de modo exibido ao usuário — espelha EXATAMENTE a lógica do
     dashboard (dashboard/index.html:syncModeUI): SINAIS só conta como ativo se
@@ -3281,6 +3343,11 @@ async def _execute_grid_trade(signal_dict: dict):
     """Executa trade em modo GRID — guards: race condition, duplicata, limite de trades."""
     import uuid
     from models import ActiveTrade
+    # FIX 2026-07-11: função separada de job_grid_scan (que já declara este
+    # global) — cada função em Python precisa da SUA PRÓPRIA declaração
+    # `global`, não herda da função que a chama. Sem isto, a mesma classe de
+    # UnboundLocalError dos fixes anteriores (ec81324, 6baebb6) se repetiria.
+    global _last_auto_action_ts
 
     asset     = signal_dict.get("asset", "")
     direction = str(signal_dict.get("direction", "")).upper()
@@ -5310,6 +5377,23 @@ async def lifespan(app: FastAPI):
         ))
     else:
         print("[STARTUP] ✅ Integridade estrutural de MODE_SETTINGS/GRID_SETTINGS OK")
+
+    # TRAVA DE SEGURANÇA (2026-07-11): detecta em tempo de boot a classe de
+    # bug UnboundLocalError (variável global reatribuída sem `global`) que já
+    # causou 3 incidentes reais em produção. Ver _check_global_scoping_integrity().
+    _scope_problems = _check_global_scoping_integrity()
+    if _scope_problems:
+        for _p in _scope_problems:
+            print(f"[STARTUP] 🛑 ESCOPO GLOBAL: {_p}")
+        asyncio.create_task(log_event("STARTUP_INTEGRITY", "escopo global: " + "; ".join(_scope_problems)))
+        asyncio.create_task(send_alert(
+            "🛑 *ALERTA DE INTEGRIDADE — ESCOPO GLOBAL*\n"
+            "Variável(is) global(is) reatribuída(s) sem `global` declarado — "
+            "vai quebrar com `UnboundLocalError` em produção:\n"
+            + "\n".join(f"• `{p}`" for p in _scope_problems)
+        ))
+    else:
+        print("[STARTUP] ✅ Auto-checagem de escopo global OK (nenhum UnboundLocalError latente)")
 
     # Autenticação opcional (2026-07-04: senha desativada a pedido do usuário —
     # define DASHBOARD_PASSWORD nas Variables do Railway para religar; aviso
@@ -7476,6 +7560,18 @@ async def selftest_settings():
             "structural": structural_problems,
         },
     }
+
+
+@app.get("/selftest/global_scoping")
+async def selftest_global_scoping():
+    """Checagem sob demanda (2026-07-11) da trava contra UnboundLocalError
+    por variável global reatribuída sem `global` declarado — a mesma classe
+    de bug que já derrubou o ciclo de execução 3x em produção (ec81324,
+    6baebb6, 09d637a). Roda automaticamente no boot também (ver lifespan);
+    isto aqui é pra checar manualmente depois de editar main.py sem precisar
+    esperar um deploy inteiro."""
+    problems = _check_global_scoping_integrity()
+    return {"ok": not problems, "problems": problems}
 
 
 @app.get("/shadow/stats")
