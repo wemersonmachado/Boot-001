@@ -252,6 +252,10 @@ async def init_db():
             # sem isto, o resultado (ganho/perda) de trades Autônomo/Supervisionado
             # nunca linkava ao sinal original (só o canal Sinais linkava).
             "ALTER TABLE trades ADD COLUMN signal_db_id INTEGER DEFAULT 0",
+            # 2026-07-11: ATR gravado na abertura — habilita trailing por ATR
+            # em risk_manager.check_trailing_stop (trades antigos ficam com 0 =
+            # trailing por ATR desligado pra eles, só a tabela de milestones).
+            "ALTER TABLE trades ADD COLUMN atr REAL DEFAULT 0",
         ):
             try:
                 await db.execute(stmt)
@@ -271,8 +275,8 @@ async def save_trade(trade: dict):
                (id, asset, direction, entry_price, exit_price, stop_loss, tp1, tp2, tp3,
                 rr, leverage, size_usdt, pnl_pct, pnl_usdt, status, reason, confidence,
                 timeframe, score_json, opened_at, closed_at, mode, paper, execution_status, order_id,
-                signal_db_id)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                signal_db_id, atr)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 trade["id"], trade["asset"], trade["direction"],
                 trade["entry_price"], trade.get("exit_price"),
@@ -286,6 +290,7 @@ async def save_trade(trade: dict):
                 trade.get("execution_status"),
                 str(trade.get("order_id")) if trade.get("order_id") is not None else None,
                 int(trade.get("signal_db_id") or 0),
+                float(trade.get("atr") or 0.0),
             ),
         )
         await db.commit()

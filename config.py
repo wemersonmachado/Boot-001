@@ -370,6 +370,35 @@ TRAILING_MILESTONES = [
     (15.00, 12.00),
 ]
 
+# ── Proteção de lucro avançada (2026-07-11) ───────────────────────────────────
+# Três mecanismos que trabalham JUNTOS com a tabela de milestones acima, dentro
+# de risk_manager.check_trailing_stop(). Objetivo pedido pelo usuário: "assim
+# que o preço anda na direção esperada, mover o stop pro lucro — não sair mais
+# no prejuízo". Todos só MELHORAM o stop (nunca pioram) — o guard monotônico
+# em check_trailing_stop garante isso.
+
+# (1) Breakeven ANTECIPADO (antes de bater o TP1): quando o preço já percorreu
+#     EARLY_BREAKEVEN_PROGRESS do caminho entre a entrada e o TP1, o stop sobe
+#     para breakeven + uma folga que cobre as taxas de ida/volta (~0.08%). Isso
+#     protege trades que avançam bem mas revertem ANTES de tocar o TP1 — antes
+#     só o próprio TP1 movia o stop pro breakeven.
+EARLY_BREAKEVEN_PROGRESS   = 0.50   # 50% do caminho até o TP1
+EARLY_BREAKEVEN_MARGIN_PCT = 0.08   # trava em entry ± 0.08% (cobre taxa, lucro real)
+
+# (2) Trailing por ATR (adaptativo à volatilidade do momento, em vez de % fixo):
+#     uma vez em lucro mínimo, o stop persegue o preço a ATR_TRAIL_MULT×ATR de
+#     distância. Em mercado calmo trava cedo; em mercado volátil dá espaço pra
+#     não sair no ruído. Só funciona se o trade tiver ATR gravado (trades novos).
+ATR_TRAIL_MULT            = 1.5    # distância do stop = 1.5×ATR atrás do preço
+ATR_TRAIL_MIN_PROFIT_PCT  = 0.30   # só começa a perseguir após +0.30% bruto
+
+# (3) Alerta de "lucro devolvido" (item de auditoria, não mexe no trade): se um
+#     trade chegou a ≥ REVERSAL_ALERT_PEAK_PCT bruto de lucro e depois voltou pra
+#     baixo de REVERSAL_ALERT_DROP_PCT, manda UMA mensagem no Telegram avisando
+#     que o trailing não segurou aquele ativo — dado pra recalibrar os degraus.
+REVERSAL_ALERT_PEAK_PCT   = 1.0    # precisa ter atingido +1.0% bruto de pico
+REVERSAL_ALERT_DROP_PCT   = 0.15   # e ter caído pra baixo de +0.15% bruto
+
 # ── Watchlist principal — signal_engine padrão ────────────────────────────────
 WATCHLIST = [
     # Tier 1 — Alta liquidez (15x–20x alavancagem)

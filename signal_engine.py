@@ -1155,10 +1155,18 @@ def calculate_levels(df: pd.DataFrame, direction: Direction, symbol: str,
     # Agora: o stop fica do lado de FORA da estrutura (com folga de ATR) e usa o
     # mais distante entre ATR e estrutura, respeitando piso (anti-ruído) e teto
     # (protege o RR). O sizing por risco ajusta o tamanho da posição.
-    struct_buffer = atr_val * 0.35                       # folga além do swing S/R
-    _tf_floor = {"1m": 0.6, "3m": 0.8, "5m": 1.0, "15m": 1.3}.get(timeframe, 1.0)
+    # FIX 2026-07-11: SL ficava curto demais — o preço tocava o stop no pavio e
+    # DEPOIS ia pro lado vencedor. Causa: a folga além do swing (struct_buffer)
+    # era só 0.35×ATR, menor que o pavio típico de rejeição de um topo/fundo.
+    # Agora a folga é 0.60×ATR (o stop fica genuinamente do lado de FORA do
+    # último topo/fundo, com espaço pro ativo respirar) e o teto sobe pra
+    # 3.5×ATR pra não "puxar de volta" pra dentro do ruído um stop estrutural
+    # legitimamente mais distante. O sizing por risco compensa o SL mais largo
+    # reduzindo o tamanho da posição — RR preservado, menos stop-out no ruído.
+    struct_buffer = atr_val * 0.60                       # folga além do swing S/R
+    _tf_floor = {"1m": 0.7, "3m": 0.9, "5m": 1.1, "15m": 1.4}.get(timeframe, 1.1)
     min_sl_dist = price * _tf_floor / 100                # distância mínima (anti-ruído)
-    max_sl_dist = max(atr_val * 3.0, min_sl_dist * 1.5)  # teto (preserva RR)
+    max_sl_dist = max(atr_val * 3.5, min_sl_dist * 1.5)  # teto (preserva RR)
 
     if direction == Direction.LONG:
         atr_stop    = price - atr_val * sl_multiplier
@@ -2269,6 +2277,7 @@ async def _score_direction(
         leverage_reason=_lev_reason,
         patterns_detected=_sig_pats_dict,
         patterns_mtf=_mtf_pats_dict,
+        atr=levels.get("atr", 0.0),
     )
 
 

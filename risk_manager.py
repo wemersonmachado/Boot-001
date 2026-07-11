@@ -8,6 +8,8 @@ from typing import Optional
 from config import (
     LEVERAGE_MAP, LEVERAGE_MAX, DEFAULT_RISK_PCT,
     MAX_OPEN_TRADES, TRAILING_MILESTONES, SCALE_OUT_MILESTONES,
+    EARLY_BREAKEVEN_PROGRESS, EARLY_BREAKEVEN_MARGIN_PCT,
+    ATR_TRAIL_MULT, ATR_TRAIL_MIN_PROFIT_PCT,
 )
 from models import ActiveTrade, Direction, TradeSignal
 from database import save_trade, get_open_trades
@@ -234,6 +236,7 @@ def create_trade(signal: TradeSignal, balance_usdt: float, risk_pct: float = Non
         size_usdt=sizing["notional"],
         reason=signal.reason,
         confidence=signal.confidence,
+        atr=getattr(signal, "atr", 0.0) or 0.0,
     )
 
 
@@ -251,31 +254,64 @@ def update_pnl(trade: ActiveTrade, current_price: float) -> ActiveTrade:
 
 def check_trailing_stop(trade: ActiveTrade) -> Optional[float]:
     """
-    Returns new stop_loss price if a trailing milestone is reached, otherwise None.
-    Uses stop_loss comparison instead of trailing_level (which is not persisted to DB).
-    Only fires when the new stop is genuinely better than the current one.
+    Returns new stop_loss price if a better (profit-protecting) stop is found,
+    otherwise None. Combina TRÊS fontes de candidato ao novo stop, sempre
+    escolhendo o mais favorável e nunca piorando o stop atual:
+
+      1. Tabela de milestones (TRAILING_MILESTONES) — trava % crescente do lucro.
+      2. Trailing por ATR — persegue o preço a ATR_TRAIL_MULT×ATR de distância,
+         adaptando à volatilidade (só se o trade tiver ATR gravado, trades novos).
+      3. Breakeven ANTECIPADO — assim que o preço percorre EARLY_BREAKEVEN_PROGRESS
+         do caminho até o TP1 (antes de bater o TP1), sobe o stop pra breakeven +
+         folga de taxa. Protege trades que avançam e revertem antes do TP1.
+
+    Direção-aware: para LONG o "melhor" stop é o MAIOR; para SHORT, o MENOR.
+    O guard final só aceita se for estritamente melhor que o stop atual — isso
+    também evita re-disparar o mesmo nível repetidamente.
     """
     raw_pnl_pct = trade.pnl_pct / trade.leverage if trade.leverage else 0
+    is_long = trade.direction == Direction.LONG
+    entry = trade.entry_price
 
-    best_stop = None
+    candidates = []
+
+    # ── 1. Milestones de lucro bruto ──────────────────────────────────────────
     for profit_trigger, stop_lock_pct in TRAILING_MILESTONES:
         if raw_pnl_pct >= profit_trigger:
-            if trade.direction == Direction.LONG:
-                candidate = round(trade.entry_price * (1 + stop_lock_pct / 100), 6)
-                if best_stop is None or candidate > best_stop:
-                    best_stop = candidate
+            if is_long:
+                candidates.append(round(entry * (1 + stop_lock_pct / 100), 6))
             else:
-                candidate = round(trade.entry_price * (1 - stop_lock_pct / 100), 6)
-                if best_stop is None or candidate < best_stop:
-                    best_stop = candidate
+                candidates.append(round(entry * (1 - stop_lock_pct / 100), 6))
 
-    if best_stop is None:
+    # ── 2. Trailing por ATR (adaptativo) ──────────────────────────────────────
+    atr_val = getattr(trade, "atr", 0.0) or 0.0
+    if atr_val > 0 and raw_pnl_pct >= ATR_TRAIL_MIN_PROFIT_PCT and trade.current_price:
+        if is_long:
+            candidates.append(round(trade.current_price - atr_val * ATR_TRAIL_MULT, 6))
+        else:
+            candidates.append(round(trade.current_price + atr_val * ATR_TRAIL_MULT, 6))
+
+    # ── 3. Breakeven antecipado (antes do TP1) ────────────────────────────────
+    if not trade.tp1_hit and trade.tp1 and entry:
+        dist_tp1 = abs(trade.tp1 - entry)
+        if dist_tp1 > 0:
+            moved = (trade.current_price - entry) if is_long else (entry - trade.current_price)
+            progress = moved / dist_tp1
+            if progress >= EARLY_BREAKEVEN_PROGRESS:
+                if is_long:
+                    candidates.append(round(entry * (1 + EARLY_BREAKEVEN_MARGIN_PCT / 100), 6))
+                else:
+                    candidates.append(round(entry * (1 - EARLY_BREAKEVEN_MARGIN_PCT / 100), 6))
+
+    if not candidates:
         return None
 
-    # Only update if the new stop is strictly better than current (prevents re-firing same level)
-    if trade.direction == Direction.LONG and best_stop <= trade.stop_loss:
+    best_stop = max(candidates) if is_long else min(candidates)
+
+    # Só atualiza se for estritamente melhor que o stop atual (evita re-disparo).
+    if is_long and best_stop <= trade.stop_loss:
         return None
-    if trade.direction == Direction.SHORT and best_stop >= trade.stop_loss:
+    if not is_long and best_stop >= trade.stop_loss:
         return None
 
     trade.stop_loss = best_stop

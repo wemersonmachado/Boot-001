@@ -643,6 +643,37 @@ async def send_long_running_profit_alert(trade: dict, hours_open: float) -> bool
     return bool(res.get("ok"))
 
 
+async def send_profit_reversal_alert(trade: dict, peak_pct: float, now_pct: float) -> bool:
+    """2026-07-11 (item 3 da proteção de lucro): avisa UMA vez quando um trade
+    que já esteve em lucro relevante (pico >= REVERSAL_ALERT_PEAK_PCT) devolveu
+    esse lucro (caiu abaixo de REVERSAL_ALERT_DROP_PCT). NÃO fecha nada — é um
+    sinal de auditoria de que o trailing não segurou aquele ativo, útil pra
+    recalibrar os degraus. Traz o botão de fechar caso o usuário queira agir."""
+    if not _is_configured():
+        return False
+    asset     = trade.get("asset", "?")
+    direction = _clean_direction(trade.get("direction", ""))
+    entry     = float(trade.get("entry_price", 0) or 0)
+    current   = float(trade.get("current_price", 0) or entry)
+    sl        = float(trade.get("stop_loss", 0) or 0)
+    lev       = int(trade.get("leverage", 1) or 1)
+    trade_id  = trade.get("id", "")
+
+    msg = (
+        f"↩️ *Lucro devolvido — atenção*\n"
+        f"⚪ *{direction} — {asset}*\n\n"
+        f"📈 Chegou a `+{peak_pct:.2f}%` bruto de lucro e voltou pra `+{now_pct:.2f}%`.\n"
+        f"📍 Entrada `${entry:,.4f}` → Atual `${current:,.4f}` | 🛑 Stop `${sl:,.4f}` | `{lev}x`\n\n"
+        f"_O trailing não travou o lucro desse ativo — o trade segue aberto e o SL/TP "
+        f"na corretora continuam valendo. Aviso de auditoria pra recalibrar os degraus._"
+    )
+    res = await _post("sendMessage", {
+        "chat_id": TELEGRAM_CHAT_ID, "text": msg, "parse_mode": "Markdown",
+        "reply_markup": _build_trade_keyboard(trade_id),
+    })
+    return bool(res.get("ok"))
+
+
 async def send_daily_summary(stats: dict):
     if not _is_configured():
         return

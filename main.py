@@ -113,6 +113,7 @@ from notifier import (
     send_social_proof,
     set_alerts_paused, is_alerts_paused,
     send_long_running_profit_alert,
+    send_profit_reversal_alert,
 )
 
 # ── State (in-memory cache) ───────────────────────────────────────────────────
@@ -1343,6 +1344,14 @@ LONG_RUNNING_PROFIT_HOURS  = 5.0     # a partir de quanto tempo aberto EM LUCRO 
 LONG_RUNNING_PROFIT_REPEAT_S = 3 * 3600  # reenvia no máx a cada 3h enquanto continuar em lucro e aberto
 _long_profit_alerted: dict = {}      # trade_id -> timestamp do último aviso
 
+# ── Alerta de "lucro devolvido" (2026-07-11, item 3 da proteção de lucro) ─────
+# Rastreia o PICO de lucro bruto de cada trade aberto. Se um trade chegou a
+# REVERSAL_ALERT_PEAK_PCT de lucro e depois caiu pra baixo de
+# REVERSAL_ALERT_DROP_PCT, manda UMA mensagem avisando que o trailing não
+# segurou aquele ativo — dado real pra recalibrar os degraus do trailing.
+_peak_raw_pnl: dict   = {}   # trade_id -> maior pnl bruto % já visto
+_reversal_alerted: set = set()  # trade_ids que já dispararam o aviso (não repete)
+
 
 async def job_long_running_profit_watch():
     """FIX 2026-07-11 (pedido do usuário): trade REAL aberto há mais de
@@ -2234,6 +2243,7 @@ async def _execute_trade_inner(signal_dict: dict):
             reason=signal.reason,
             confidence=signal.confidence,
             signal_db_id=int(signal_dict.get("db_signal_id") or 0),
+            atr=float(signal_dict.get("atr") or getattr(signal, "atr", 0.0) or 0.0),
         )
         origin = (
             f"Banca ${BANCA_USDT:.2f} / {n} trades = ${margin:.2f} margem"
@@ -4283,7 +4293,14 @@ async def job_update_trades():
     # _on_autonomous_trade_closed (vaga do lote nunca liberava — evidência
     # real: "stale_round_ids" aparecendo em /auto/debug_gates).
     global _active_trades_cache, _consecutive_losses, _consecutive_wins, _daily_pnl
+    global _peak_raw_pnl, _reversal_alerted
     open_trades = await get_open_trades()
+    # Limpa rastreio de picos/avisos de trades que já fecharam (evita vazamento).
+    _open_ids_now = {t["id"] for t in open_trades}
+    for _pid in list(_peak_raw_pnl.keys()):
+        if _pid not in _open_ids_now:
+            _peak_raw_pnl.pop(_pid, None)
+    _reversal_alerted.intersection_update(_open_ids_now)
     for trade_data in open_trades:
         try:
             price = ws_feed.get_price(trade_data["asset"])
@@ -4400,6 +4417,27 @@ async def job_update_trades():
 
             result = await process_trade_update(trade, price)
             trade = result["trade"]
+
+            # ── Alerta de "lucro devolvido" (2026-07-11, item 3) ─────────────
+            # Se o trade AINDA está aberto, rastreia o pico de lucro bruto e
+            # avisa uma única vez se ele chegou a ter lucro relevante e devolveu.
+            if trade.status == "OPEN":
+                try:
+                    from config import REVERSAL_ALERT_PEAK_PCT, REVERSAL_ALERT_DROP_PCT
+                    _raw_pnl = trade.pnl_pct / trade.leverage if trade.leverage else 0.0
+                    _prev_peak = _peak_raw_pnl.get(trade.id, 0.0)
+                    if _raw_pnl > _prev_peak:
+                        _peak_raw_pnl[trade.id] = _raw_pnl
+                        _prev_peak = _raw_pnl
+                    if (_prev_peak >= REVERSAL_ALERT_PEAK_PCT
+                            and _raw_pnl < REVERSAL_ALERT_DROP_PCT
+                            and trade.id not in _reversal_alerted):
+                        _reversal_alerted.add(trade.id)
+                        asyncio.create_task(send_profit_reversal_alert(
+                            trade.model_dump(), _prev_peak, _raw_pnl
+                        ))
+                except Exception as _rev_e:
+                    print(f"[REVERSAL-ALERT] erro (ignorado): {_rev_e}")
 
             # ── TIME-STOP (2026-07-05): trade que não anda é capital preso ────
             # Se já passou TIME_STOP_MAX_CANDLES do TF e o preço não avançou nem

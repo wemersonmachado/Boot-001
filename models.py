@@ -65,6 +65,7 @@ class TradeSignal(BaseModel):
     recommendation: str = ""        # recomendação textual
     suggested_leverage: int = 0     # alavancagem sugerida pelo risk manager
     leverage_reason: str = ""       # motivo da alavancagem sugerida
+    atr: float = 0.0                # ATR no momento do sinal — usado no trailing por ATR (risk_manager)
     # Padrões de candlestick detectados pelo CandlePatternEngine
     patterns_detected: list = []    # padrões no TF do sinal [{name_pt, signal, strength}]
     patterns_mtf: dict  = {}        # padrões em TFs maiores {tf: [{name_pt, signal, strength}]}
@@ -88,6 +89,7 @@ class ActiveTrade(BaseModel):
     trailing_level: int = 0  # which milestone reached
     tp1_hit: bool = False     # TP1 ja foi atingido (scale-out 35% feito)
     tp2_hit: bool = False     # TP2 ja foi atingido (scale-out 70% feito)
+    atr: float = 0.0          # ATR gravado na abertura — trailing adaptativo por ATR (check_trailing_stop)
     status: Literal["OPEN", "CLOSED", "CANCELLED"] = "OPEN"
     reason: str
     confidence: float
