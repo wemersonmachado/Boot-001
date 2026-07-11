@@ -3995,13 +3995,21 @@ async def _fetch_realized_pnl(symbol: str, opened_at) -> float:
 
         def _inc():
             client = _get_binance_client_synced()
-            kw = {"symbol": symbol, "incomeType": "REALIZED_PNL", "limit": 1000}
+            # FIX 2026-07-11: antes buscava SÓ REALIZED_PNL — a Binance separa
+            # COMMISSION (taxa de corretagem, ~0.05% por lado) e FUNDING_FEE em
+            # incomeTypes próprios. Com stops de 0.1-0.5% (scalp), a taxa é da
+            # MESMA ordem de grandeza do stop — ignorá-la inflava o PnL de todo
+            # trade e alimentava auto-tune/kill-switch/limite diário com números
+            # otimistas. Agora soma o income COMPLETO do símbolo na janela.
+            kw = {"symbol": symbol, "limit": 1000}
             if start_ms > 0:
                 kw["startTime"] = start_ms
             return client.futures_income_history(**kw)
 
         rows = await asyncio.to_thread(_inc)
-        return round(sum(float(r.get("income", 0) or 0) for r in rows), 6)
+        _INCLUDED = {"REALIZED_PNL", "COMMISSION", "FUNDING_FEE"}
+        return round(sum(float(r.get("income", 0) or 0) for r in rows
+                         if str(r.get("incomeType", "")).upper() in _INCLUDED), 6)
     except Exception as e:
         print(f"[SYNC-PNL] {symbol} falha ao buscar realized PnL: {e}")
         return 0.0
@@ -4042,10 +4050,27 @@ async def _job_sync_binance():
                 _lev      = float(t.get("leverage", 1) or 1)
                 _margin   = (float(t.get("size_usdt", 0) or 0) / _lev) if _lev else 0.0
                 _pnl_pct  = (_pnl_real / _margin * 100.0) if _margin > 0 else 0.0
+                # FIX 2026-07-11: ws_feed.get_price retornava None SEMPRE
+                # (mark price stream sem dados — ver /ws/status) e o fallback
+                # ia direto pro preço de ENTRADA — os 26 trades do histórico
+                # ficaram com exit_price == entry_price, corrompendo qualquer
+                # análise de saída (pnl_pct por preço, distância percorrida,
+                # slippage). Agora tenta o ticker REST antes; entrada é só o
+                # último recurso absoluto.
+                _exit_px = 0.0
                 try:
-                    _exit_px = ws_feed.get_price(symbol) or float(t.get("entry_price", 0) or 0)
+                    _exit_px = float(ws_feed.get_price(symbol) or 0)
                 except Exception:
+                    pass
+                if _exit_px <= 0:
+                    try:
+                        _tk = await get_ticker(symbol)
+                        _exit_px = float(_tk.get("price", 0) or 0)
+                    except Exception:
+                        pass
+                if _exit_px <= 0:
                     _exit_px = float(t.get("entry_price", 0) or 0)
+                    print(f"[SYNC] {symbol}: sem preço de saída (ws+ticker falharam) — gravando entry como aproximação")
 
                 t["status"]    = "CLOSED"
                 t["closed_at"] = datetime.utcnow().isoformat()
