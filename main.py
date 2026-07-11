@@ -767,7 +767,6 @@ _ANTI_MARTINGALE_WINS_TO_RESET = 3  # wins consecutivos necessários para restau
 
 # Meta diária — flag para evitar notificacao duplicada
 _daily_target_notified: bool = False
-_daily_loss_notified:   bool = False  # FIX 2026-07-10: evita spam do alerta a cada ciclo (60s)
 
 # SINAIS — estatisticas semanais
 _sinais_weekly: dict = {"total": 0, "alta": 0, "media": 0, "baixa": 0, "reset_date": None}
@@ -791,6 +790,7 @@ _trades_today_date              = None
 _binance_error_streak: int      = 0
 _cb_pending: bool               = False  # True = aguardando /continuar ou /pausar
 _cb_deadline: float             = 0.0    # prazo (epoch) para autorizar antes de pausar
+_cb_timeout_s_used: float       = 0.0    # prazo (segundos) usado no armamento atual — ver _cb_arm(timeout_s=)
 _cb_loss_ack_streak: int        = 0      # baseline de perdas já reconhecido (evita re-alertar
                                          # a cada nova perda após o usuário dar /continuar)
 
@@ -1263,7 +1263,7 @@ async def job_health_watch():
 
 
 AUTO_STALL_ALERT_MIN = 20    # a partir de quanto tempo sem ação real considera "parado"
-AUTO_STALL_REPEAT_S  = 600   # repete o aviso no máx a cada 10 min (pedido do usuário)
+AUTO_STALL_REPEAT_S  = 3600  # repete o aviso "sem entradas" no máx a cada 1h (pedido do usuário 2026-07-10)
 
 
 async def job_auto_stall_watch():
@@ -1377,12 +1377,11 @@ def _calc_risk_metrics() -> dict:
 
 def _check_daily_loss() -> bool:
     """Retorna False se limite de perda diária foi atingido."""
-    global _daily_pnl, _daily_reset_date, _daily_target_notified, _daily_loss_notified
+    global _daily_pnl, _daily_reset_date, _daily_target_notified
     today = datetime.utcnow().date()
     if today != _daily_reset_date:
         _daily_pnl = 0.0
         _daily_target_notified = False
-        _daily_loss_notified = False
         _daily_reset_date = today
     # FIX: comparar perda em USDT (não %) contra MAX_DAILY_LOSS_PCT × banca
     _banca_ref = BANCA_USDT if BANCA_USDT > 0 else max(_balance_cache.get("wallet_balance", 100), 100)
@@ -1552,17 +1551,24 @@ def _register_binance_ok():
     _binance_error_streak = 0
 
 
-async def _cb_arm(reason: str):
+async def _cb_arm(reason: str, timeout_s: float = None):
     """Arma o circuit breaker: pede autorização no Telegram e inicia o prazo de pausa.
-    Não re-arma se já está pendente ou o bot já está pausado."""
-    global _cb_pending, _cb_deadline
+    Não re-arma se já está pendente ou o bot já está pausado (idempotente —
+    seguro chamar todo ciclo sem spammar, ver uso no gate de perda diária).
+
+    timeout_s (FIX 2026-07-10): permite um prazo diferente do padrão
+    (CB_AUTH_TIMEOUT_S, 5min) para casos que merecem mais tempo pro usuário
+    responder — ex.: limite de perda diária usa 3h em vez de 5min."""
+    global _cb_pending, _cb_deadline, _cb_timeout_s_used
     if _cb_pending or BOT_PAUSED:
         return
     _cb_pending  = True
-    _cb_deadline = time.time() + CB_AUTH_TIMEOUT_S
+    _cb_timeout_s_used = timeout_s if timeout_s else CB_AUTH_TIMEOUT_S
+    _cb_deadline = time.time() + _cb_timeout_s_used
+    _wait_txt = f"{int(_cb_timeout_s_used // 3600)}h" if _cb_timeout_s_used >= 3600 else f"{int(_cb_timeout_s_used // 60)} min"
     await send_alert(
         f"⚠️ *CIRCUIT BREAKER* — {reason}\n"
-        f"Responda em até *{CB_AUTH_TIMEOUT_S // 60} min*:\n"
+        f"Responda em até *{_wait_txt}*:\n"
         f"`/continuar` — segue operando\n"
         f"`/pausar` — para agora\n\n"
         f"_Sem resposta → o bot PAUSA TUDO automaticamente._"
@@ -1668,10 +1674,12 @@ async def job_circuit_breaker_watch():
     if time.time() >= _cb_deadline:
         BOT_PAUSED  = True
         _cb_pending = False
-        print("[CIRCUIT-BREAKER] Timeout sem resposta → BOT_PAUSED=True")
+        _wait_s = _cb_timeout_s_used or CB_AUTH_TIMEOUT_S
+        _wait_txt = f"{_wait_s/3600:.0f}h" if _wait_s >= 3600 else f"{_wait_s/60:.0f} min"
+        print(f"[CIRCUIT-BREAKER] Timeout sem resposta ({_wait_txt}) → BOT_PAUSED=True")
         await send_alert(
-            "🛑 *BOT PAUSADO* — sem resposta ao circuit breaker em "
-            f"{CB_AUTH_TIMEOUT_S // 60} min.\nUse `/continuar` (ou `/bot/resume`) para retomar."
+            f"🛑 *BOT PAUSADO* — sem resposta ao circuit breaker em "
+            f"{_wait_txt}.\nUse `/continuar` (ou `/bot/resume`) para retomar."
         )
 
 
@@ -2266,7 +2274,7 @@ async def job_auto_trade(signals: list, id_map: dict = None):
     # UnboundLocalError. Isso travava o ciclo INTEIRO em erro a cada 60s,
     # silenciosamente até o fix de isolamento em job_scan_market começar a
     # reportar o erro no Telegram (foi assim que apareceu).
-    global _round_trade_ids, _daily_loss_notified
+    global _round_trade_ids
     id_map = id_map or {}
     # PROVA de que o ciclo está rodando (FIX 2026-07-09) — ver /auto/debug_gates.
     # Sem isto, era impossível distinguir "job_auto_trade nunca é chamado neste
@@ -2303,12 +2311,16 @@ async def job_auto_trade(signals: list, id_map: dict = None):
 
     # ── Verificações de limites ───────────────────────────────────────────────
     if not _check_daily_loss():
-        _note_auto_gate(f"limite de perda diária atingido ({MAX_DAILY_LOSS_PCT}%)")
-        # FIX 2026-07-10: só avisa 1x (igual ao kill-switch) — antes mandava
-        # a cada ciclo (60s), spammando o Telegram enquanto o limite durasse.
-        if not _daily_loss_notified:
-            _daily_loss_notified = True
-            await send_alert(f"🛑 Limite de perda diária atingido ({MAX_DAILY_LOSS_PCT}%). Pausado até meia-noite UTC ou reset diário.")
+        _note_auto_gate(f"limite de perda diária atingido ({MAX_DAILY_LOSS_PCT}%) — aguardando resposta do usuário")
+        # FIX 2026-07-10: pergunta se para ou continua (em vez de só pausar
+        # sozinho) — reusa o circuit breaker existente (/continuar /pausar),
+        # com prazo de 3h (em vez do padrão de 5min) por ser uma decisão mais
+        # importante. _cb_arm já é idempotente — seguro chamar todo ciclo,
+        # não manda a mensagem de novo enquanto já estiver pendente.
+        await _cb_arm(
+            f"limite de perda diária atingido ({MAX_DAILY_LOSS_PCT}%, PnL hoje ${_daily_pnl:.2f}). Parar ou continuar operando?",
+            timeout_s=3 * 3600,
+        )
         return
 
     # Kill-switch -20% da banca (modo AUTÔNOMO): para de abrir até reset manual
