@@ -4098,7 +4098,16 @@ async def job_open_positions_report():
 
 async def job_update_trades():
     """Update PnL and trailing stops for all open trades."""
-    global _active_trades_cache, _consecutive_losses, _daily_pnl
+    # FIX 2026-07-11 (bug crítico, mesma classe do _round_trade_ids em
+    # job_auto_trade): _consecutive_wins é reatribuído 2x nesta função
+    # (fechamento via DCA e fechamento normal SL/TP) sem estar na lista de
+    # `global` — o Python tratava como variável LOCAL na função INTEIRA,
+    # explodindo com UnboundLocalError logo após CADA fechamento de trade
+    # (win ou loss), ANTES de rodar _daily_pnl += (PnL diário nunca
+    # atualizava), _register_auto_pnl (kill-switch nunca alimentava) e
+    # _on_autonomous_trade_closed (vaga do lote nunca liberava — evidência
+    # real: "stale_round_ids" aparecendo em /auto/debug_gates).
+    global _active_trades_cache, _consecutive_losses, _consecutive_wins, _daily_pnl
     open_trades = await get_open_trades()
     for trade_data in open_trades:
         try:
