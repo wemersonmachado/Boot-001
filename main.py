@@ -1282,7 +1282,7 @@ async def job_auto_stall_watch():
     ainda está rodando (distingue 'sem sinal bom' de 'o ciclo parou')."""
     global _last_auto_alert_ts
     _effective_mode = _resolve_effective_mode()
-    if _effective_mode not in ("AUTONOMOUS", "SUPERVISED"):
+    if _effective_mode not in ("AUTONOMOUS", "SUPERVISED", "GRID"):
         return
     if BOT_PAUSED:
         return  # já coberto por job_idle_watch
@@ -1310,13 +1310,21 @@ async def job_auto_stall_watch():
     gate_txt = (f"{_last_auto_gate_reason} (há {gate_age_min:.0f}min)"
                 if _last_auto_gate_reason else "nenhum motivo registrado ainda")
 
-    _mode_cfg = MODE_SETTINGS.get(CURRENT_MODE, MODE_SETTINGS["NORMAL"])
+    # FIX 2026-07-11: GRID usa GRID_SETTINGS (campo min_confidence, sem
+    # auto-tune de score) — usar MODE_SETTINGS/_eff_min_score aqui dava um
+    # número errado (ou quebrava) para esse modo.
+    if _effective_mode == "GRID":
+        _grid_cfg = GRID_SETTINGS.get(CURRENT_MODE, GRID_SETTINGS["NORMAL"])
+        _score_txt = f"confiança mínima: `{_grid_cfg['min_confidence']}` | RR mínimo: `{_grid_cfg['min_rr']}`"
+    else:
+        _mode_cfg = MODE_SETTINGS.get(CURRENT_MODE, MODE_SETTINGS["NORMAL"])
+        _score_txt = f"score mínimo efetivo: `{_eff_min_score(_mode_cfg)}` | RR mínimo: `{_mode_cfg['min_rr']}`"
     await send_alert(
         f"⏱️ *{_effective_mode} sem entradas há {stall_min:.0f} min*\n"
         f"Motivo mais recente: `{gate_txt}`\n"
         f"Status do ciclo: {cycle_status}\n"
-        f"Perfil `{CURRENT_MODE}` | score mínimo efetivo: `{_eff_min_score(_mode_cfg)}` | RR mínimo: `{_mode_cfg['min_rr']}`\n"
-        f"_Próximo aviso em até 10min se continuar parado._"
+        f"Perfil `{CURRENT_MODE}` | {_score_txt}\n"
+        f"_Próximo aviso em até {AUTO_STALL_REPEAT_S // 3600}h se continuar parado._"
     )
 
 
@@ -2949,10 +2957,15 @@ async def job_grid_scan(pairs: list = None):
     Inclui: session filter, BTC veto, funding window, VRA, ML, Claude Brain,
             portfolio risk, pump/dump awareness, market bias.
     """
-    global _grid_cycles
+    global _grid_cycles, _last_auto_action_ts, _last_auto_cycle_ts
     _effective_mode = _resolve_effective_mode()
     if _effective_mode != "GRID" or PAPER_TRADING:
         return
+    # Prova de vida (FIX 2026-07-11) — mesma instrumentação do Autônomo/
+    # Supervisionado, agora cobre GRID também (ver job_auto_stall_watch).
+    _last_auto_cycle_ts = time.time()
+    if _last_auto_action_ts == 0.0:
+        _last_auto_action_ts = time.time()
 
     grid_cfg     = GRID_SETTINGS.get(CURRENT_MODE, GRID_SETTINGS["NORMAL"])
     target_pairs = pairs or GRID_PAIRS
@@ -3350,6 +3363,9 @@ async def _execute_grid_trade(signal_dict: dict):
                     f"{signal.direction.value} {signal.asset} | Margem ${margin:.2f} | Nocional ${notional:.2f}"
                 )
             print(f"[GRID] ABERTO{paper_tag} {signal.direction.value} {signal.asset} | margem=${margin:.2f} nocional=${notional:.2f} alvo=+${GRID_PROFIT_TARGET_USDT}")
+            # Watchdog (FIX 2026-07-11): mesma prova-de-vida do Autônomo/
+            # Supervisionado — ver job_auto_stall_watch, agora também cobre GRID.
+            _last_auto_action_ts = time.time()
         else:
             print(f"[GRID] FALHA ao abrir {signal.asset}: {result.get('msg','?')}")
 
