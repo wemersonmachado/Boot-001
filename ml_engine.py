@@ -23,10 +23,21 @@ import xgboost as xgb
 MODELS_DIR   = Path("ml_models")
 MODELS_DIR.mkdir(exist_ok=True)
 
-RETRAIN_INTERVAL  = 30       # retreina a cada N novos trades fechados
+RETRAIN_INTERVAL  = 15       # FIX 2026-07-11: 30→15 — retreina mais rápido enquanto a amostra é pequena
 MIN_SAMPLES_LOCAL = 25       # mínimo para modelo por ativo (senão usa global)
-MIN_SAMPLES_GLOBAL= 15       # mínimo para modelo global
+MIN_SAMPLES_GLOBAL= 15       # mínimo para SEQUER TREINAR o modelo global (não confundir com MIN_SAMPLES_TO_APPLY)
 GLOBAL_MODEL_KEY  = "__global__"
+
+# FIX 2026-07-11 — trava de confiabilidade do bônus de ML (não do treino):
+# em produção, com 22 amostras (acima do MIN_SAMPLES_GLOBAL de 15, que só
+# controla se treina), o modelo teve AUC 0.30 e 0.38 — PIOR que cara-ou-coroa
+# (0.5) — e mesmo assim aplicava até ±15pts na decisão de abrir ou não um
+# trade. is_model_reliable() exige amostra maior E qualidade mínima (AUC)
+# antes do bônus poder influenciar qualquer decisão real — o modelo continua
+# treinando/aprendendo em background, só não "vota" enquanto não provar que
+# é melhor que chute.
+MIN_SAMPLES_TO_APPLY = 40
+MIN_AUC_TO_APPLY     = 0.55
 
 # Cache em memória
 _models: dict        = {}   # asset → {"clf": ..., "scaler": ..., "trained_at": ..., "n_samples": ...}
@@ -375,4 +386,21 @@ def get_ml_status() -> dict:
         "global_auc_xgb": _models[GLOBAL_MODEL_KEY].get("cv_xgb", 0) if GLOBAL_MODEL_KEY in _models else 0,
         "global_n_samples": _models[GLOBAL_MODEL_KEY].get("n_samples", 0) if GLOBAL_MODEL_KEY in _models else 0,
         "trade_count_at_last_train": _trade_count_at_last_train,
+        "reliable": is_model_reliable(),
     }
+
+
+def is_model_reliable() -> bool:
+    """True se o modelo global tem amostra E qualidade (AUC) suficientes para
+    o bônus de score influenciar decisões reais de entrada (ver MIN_SAMPLES_
+    TO_APPLY / MIN_AUC_TO_APPLY). O modelo continua treinando e acumulando
+    dados normalmente mesmo quando isto retorna False — só não "vota" na
+    decisão de abrir trade enquanto não provar que é melhor que chute."""
+    if GLOBAL_MODEL_KEY not in _models:
+        return False
+    m = _models[GLOBAL_MODEL_KEY]
+    if m.get("n_samples", 0) < MIN_SAMPLES_TO_APPLY:
+        return False
+    if m.get("cv_rf", 0) < MIN_AUC_TO_APPLY or m.get("cv_xgb", 0) < MIN_AUC_TO_APPLY:
+        return False
+    return True

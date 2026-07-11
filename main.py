@@ -91,6 +91,7 @@ from database import (
     upsert_asset_profile, upsert_confluence_pattern,
     record_signal_outcome, upsert_daily_stats, get_score_adjustment,
     get_recent_trade_stats, get_recent_signal_stats, get_signal_kpi_summary,
+    get_performance_window,
     get_score_calibration_ok,
     get_setting, save_setting,
     save_shadow_signal, get_unresolved_shadow_signals,
@@ -111,6 +112,7 @@ from notifier import (
     get_vip_member_count, get_channel_subscriber_count,
     send_social_proof,
     set_alerts_paused, is_alerts_paused,
+    send_long_running_profit_alert,
 )
 
 # ── State (in-memory cache) ───────────────────────────────────────────────────
@@ -1262,6 +1264,15 @@ async def job_health_watch():
         _health_last_ok_ts = time.time()
 
 
+# FIX 2026-07-11: varredura de performance (26 trades reais) — score mínimo
+# extra exigido por timeframe/ativo no modo AUTÔNOMO/SUPERVISIONADO (soma ao
+# _eff_min_score do perfil). Não bloqueia — só encarece a barra, conforme
+# pedido ("monitorar, só operar com score bem alto"). Baseado em:
+# 3m: 16 trades, 28.6% acerto, -$1.38 líquido | 5m: 8 trades, 37.5%, +$0.42
+# XRPUSDT: 4 trades, 1 ganho | LINKUSDT: 2 trades, 0 ganhos (pior par)
+_TF_SCORE_BUMP     = {"3m": 8}
+_WATCH_ASSET_BUMP  = {"XRPUSDT": 10, "LINKUSDT": 10}
+
 AUTO_STALL_ALERT_MIN = 20    # a partir de quanto tempo sem ação real considera "parado"
 AUTO_STALL_REPEAT_S  = 3600  # repete o aviso "sem entradas" no máx a cada 1h (pedido do usuário 2026-07-10)
 
@@ -1326,6 +1337,56 @@ async def job_auto_stall_watch():
         f"Perfil `{CURRENT_MODE}` | {_score_txt}\n"
         f"_Próximo aviso em até {AUTO_STALL_REPEAT_S // 3600}h se continuar parado._"
     )
+
+
+LONG_RUNNING_PROFIT_HOURS  = 5.0     # a partir de quanto tempo aberto EM LUCRO avisa (pedido do usuário)
+LONG_RUNNING_PROFIT_REPEAT_S = 3 * 3600  # reenvia no máx a cada 3h enquanto continuar em lucro e aberto
+_long_profit_alerted: dict = {}      # trade_id -> timestamp do último aviso
+
+
+async def job_long_running_profit_watch():
+    """FIX 2026-07-11 (pedido do usuário): trade REAL aberto há mais de
+    LONG_RUNNING_PROFIT_HOURS e em LUCRO manda mensagem informativa completa
+    ao Telegram com a opção de fechar (botão já existente, reaproveitado —
+    ver send_long_running_profit_alert). O bot NUNCA fecha sozinho aqui, só
+    avisa — decisão fica 100% com o usuário. Roda a cada 15 min; throttle
+    por trade evita reenviar a cada ciclo enquanto a condição persistir."""
+    global _long_profit_alerted
+    try:
+        open_trades = await get_open_trades()
+    except Exception as _e:
+        print(f"[LONG-PROFIT] erro ao buscar trades abertos: {_e}")
+        return
+
+    now = time.time()
+    open_ids = {t["id"] for t in open_trades}
+    # limpa entradas de trades que já fecharam (evita crescer pra sempre)
+    for _tid in list(_long_profit_alerted.keys()):
+        if _tid not in open_ids:
+            _long_profit_alerted.pop(_tid, None)
+
+    for t in open_trades:
+        try:
+            pnl_usdt = float(t.get("pnl_usdt", 0) or 0)
+            if pnl_usdt <= 0:
+                continue  # só avisa se estiver em lucro — pedido explícito do usuário
+            opened_raw = str(t.get("opened_at") or "").replace("Z", "").split("+")[0]
+            if not opened_raw:
+                continue
+            opened_dt = datetime.fromisoformat(opened_raw)
+            hours_open = (datetime.utcnow() - opened_dt).total_seconds() / 3600.0
+            if hours_open < LONG_RUNNING_PROFIT_HOURS:
+                continue
+            trade_id = t.get("id", "")
+            last_alert = _long_profit_alerted.get(trade_id, 0)
+            if now - last_alert < LONG_RUNNING_PROFIT_REPEAT_S:
+                continue
+            _long_profit_alerted[trade_id] = now
+            await send_long_running_profit_alert(t, hours_open)
+            print(f"[LONG-PROFIT] {t.get('asset')} aberto há {hours_open:.1f}h em lucro (${pnl_usdt:.2f}) — aviso enviado")
+        except Exception as _te:
+            print(f"[LONG-PROFIT] erro ao avaliar trade {t.get('id','?')}: {_te}")
+            continue
 
 
 
@@ -2527,7 +2588,14 @@ async def job_auto_trade(signals: list, id_map: dict = None):
         if _mode_wl and signal.asset not in _mode_wl:
             _blk("fora_watchlist_modo")
             continue  # Fora da watchlist do modo atual
-        _min_score_eff = _eff_min_score(mode_cfg)
+        # FIX 2026-07-11: varredura de performance real (26 trades) mostrou o
+        # timeframe 3m consistentemente negativo (-$1,38, 28,6% acerto) contra
+        # o 5m positivo (+$0,42, 37,5% acerto) — e XRPUSDT/LINKUSDT entre os
+        # piores ativos mesmo sendo os mais operados. Em vez de bloquear, exige
+        # score mais alto nesses casos (o usuário pediu "monitorar, só operar
+        # com score bem alto" — não desligar).
+        _min_score_eff = _eff_min_score(mode_cfg) + _TF_SCORE_BUMP.get(signal.timeframe, 0) \
+                         + _WATCH_ASSET_BUMP.get(signal.asset.upper(), 0)
         if signal.confidence < _min_score_eff or signal.rr < mode_cfg["min_rr"]:
             _blk(f"score/rr<min({_min_score_eff}/{mode_cfg['min_rr']})")
             continue
@@ -2665,22 +2733,22 @@ async def job_auto_trade(signals: list, id_map: dict = None):
             pass
 
         # ── ML Engine: ajuste de score ───────────────────────────────────────
-        _ML_MIN_SAMPLES = 25
-        if _ml_ready:
-            _ml_status = ml_engine.get_ml_status()
-            _ml_n = _ml_status.get("global_n_samples", 0)
-            if _ml_n >= _ML_MIN_SAMPLES:
-                ml_bonus = ml_engine.ml_score_bonus(signal.asset, signal_dict)
-                if ml_bonus != 0.0:
-                    prev_conf = signal_dict["confidence"]
-                    signal_dict["confidence"] = round(max(0, min(100, prev_conf + ml_bonus)), 1)
-                    signal_dict["ml_bonus"]   = ml_bonus
-                    print(f"[ML] {signal.asset} score {prev_conf:.1f} → {signal_dict['confidence']:.1f} (bonus {ml_bonus:+.1f})")
-                # Revalida threshold após ajuste ML
-                if signal_dict["confidence"] < _eff_min_score(mode_cfg):
-                    print(f"[ML] {signal.asset} reprovado após ajuste ML ({signal_dict['confidence']:.1f} < {_eff_min_score(mode_cfg)})")
-                    _blk("ml_reprovou")
-                    continue
+        # FIX 2026-07-11: antes exigia só 25 amostras — em produção, com 22
+        # amostras o modelo teve AUC 0.30/0.38 (pior que cara-ou-coroa) e
+        # mesmo assim aplicava até ±15pts na decisão. Agora usa
+        # is_model_reliable() (amostra maior + AUC mínimo) — ver ml_engine.py.
+        if _ml_ready and ml_engine.is_model_reliable():
+            ml_bonus = ml_engine.ml_score_bonus(signal.asset, signal_dict)
+            if ml_bonus != 0.0:
+                prev_conf = signal_dict["confidence"]
+                signal_dict["confidence"] = round(max(0, min(100, prev_conf + ml_bonus)), 1)
+                signal_dict["ml_bonus"]   = ml_bonus
+                print(f"[ML] {signal.asset} score {prev_conf:.1f} → {signal_dict['confidence']:.1f} (bonus {ml_bonus:+.1f})")
+            # Revalida threshold após ajuste ML
+            if signal_dict["confidence"] < _eff_min_score(mode_cfg):
+                print(f"[ML] {signal.asset} reprovado após ajuste ML ({signal_dict['confidence']:.1f} < {_eff_min_score(mode_cfg)})")
+                _blk("ml_reprovou")
+                continue
 
         # ── Filtro Claude Brain (opcional) — só acima de score 65 ────────────
         _brain_active = _claude_brain_enabled
@@ -3210,18 +3278,17 @@ async def job_grid_scan(pairs: list = None):
             except Exception:
                 pass
 
-            # [G7] ML score bonus — aplica com >= 25 amostras
-            if _ml_ready:
-                _gml_n = ml_engine.get_ml_status().get("global_n_samples", 0)
-                if _gml_n >= 25:
-                    ml_bonus = ml_engine.ml_score_bonus(signal.asset, signal_dict)
-                    if ml_bonus != 0.0:
-                        prev = signal_dict["confidence"]
-                        signal_dict["confidence"] = round(max(0, min(100, prev + ml_bonus)), 1)
-                        signal_dict["ml_bonus"]   = ml_bonus
-                        if signal_dict["confidence"] < grid_cfg["min_confidence"]:
-                            print(f"[GRID ML] {symbol} reprovado pos-ML ({signal_dict['confidence']:.0f})")
-                            continue
+            # [G7] ML score bonus — FIX 2026-07-11: agora usa is_model_reliable()
+            # (amostra + AUC mínimo), não só >=25 amostras — ver ml_engine.py.
+            if _ml_ready and ml_engine.is_model_reliable():
+                ml_bonus = ml_engine.ml_score_bonus(signal.asset, signal_dict)
+                if ml_bonus != 0.0:
+                    prev = signal_dict["confidence"]
+                    signal_dict["confidence"] = round(max(0, min(100, prev + ml_bonus)), 1)
+                    signal_dict["ml_bonus"]   = ml_bonus
+                    if signal_dict["confidence"] < grid_cfg["min_confidence"]:
+                        print(f"[GRID ML] {symbol} reprovado pos-ML ({signal_dict['confidence']:.0f})")
+                        continue
 
             # [G8] Portfolio risk (VaR + correlação) — FIX #3: sizing e ATR% corretos
             try:
@@ -5420,6 +5487,17 @@ async def lifespan(app: FastAPI):
     else:
         print("[STARTUP] ✅ Auto-checagem de escopo global OK (nenhum UnboundLocalError latente)")
 
+    # TRAVA DE AUDITORIA (2026-07-11): marca de forma PERSISTENTE (sobrevive a
+    # restart/deploy) o momento em que a rodada de ajustes de estratégia
+    # entrou em vigor (score+8 em 3m, +10 XRP/LINK, ML só com AUC>=0.55,
+    # trailing recalibrado pra scalp). Só grava na PRIMEIRA vez — deploys
+    # seguintes não resetam a marca. Usada por /performance/strategy_audit
+    # pra comparar objetivamente performance antes vs depois, em vez de
+    # depender de impressão.
+    if not await get_setting("strategy_v2_started_at", None):
+        await save_setting("strategy_v2_started_at", datetime.utcnow().isoformat())
+        print("[STARTUP] 📌 Marco de auditoria gravado: strategy_v2_started_at")
+
     # Autenticação opcional (2026-07-04: senha desativada a pedido do usuário —
     # define DASHBOARD_PASSWORD nas Variables do Railway para religar; aviso
     # fica só no log para não spammar o Telegram a cada deploy).
@@ -5471,6 +5549,7 @@ async def lifespan(app: FastAPI):
     scheduler.add_job(job_health_watch,              "interval", minutes=5,  id="health_watch",       max_instances=1, coalesce=True, jitter=15)
     scheduler.add_job(job_idle_watch,                "interval", minutes=2,  id="idle_watch",         max_instances=1, coalesce=True, jitter=10)
     scheduler.add_job(job_auto_stall_watch,          "interval", minutes=2,  id="auto_stall_watch",   max_instances=1, coalesce=True, jitter=10)
+    scheduler.add_job(job_long_running_profit_watch, "interval", minutes=15, id="long_profit_watch",  max_instances=1, coalesce=True, jitter=30)
     scheduler.add_job(job_settings_integrity_watch,  "interval", minutes=10, id="settings_integrity",  max_instances=1, coalesce=True, jitter=20)
     scheduler.add_job(job_db_prune,                  "cron", hour=4, minute=10, id="db_prune",        max_instances=1, coalesce=True)
     scheduler.start()
@@ -6456,6 +6535,34 @@ async def performance():
         "month_pnl":      round(month_pnl, 2),
         "equity_curve":   raw.get("equity_curve", []),
         "data_quality":   raw.get("data_quality", "ok"),
+    }
+
+
+@app.get("/performance/strategy_audit")
+async def performance_strategy_audit():
+    """TRAVA DE AUDITORIA (2026-07-11): compara performance ANTES vs DEPOIS
+    da rodada de ajustes de 2026-07-11 (score+8 em 3m, +10 em XRP/LINK, ML só
+    entra com AUC>=0.55 e amostra>=40, trailing recalibrado pra scalp,
+    exit_price/PnL agora incluem taxas). Marco gravado uma única vez no boot
+    em `strategy_v2_started_at` (bot_state/settings) — não reseta em deploys
+    seguintes. Consulte isto periodicamente para saber OBJETIVAMENTE se as
+    mudanças estão ajudando, em vez de depender de impressão."""
+    marker = await get_setting("strategy_v2_started_at", None)
+    if not marker:
+        return {"ok": False, "message": "marco ainda não gravado — reinicie o bot uma vez"}
+    before = await get_performance_window(end_iso=marker)
+    after  = await get_performance_window(start_iso=marker)
+    return {
+        "strategy_v2_started_at": marker,
+        "antes": before,
+        "depois": after,
+        "veredito": (
+            "amostra insuficiente ainda (precisa de mais trades DEPOIS do marco)"
+            if after["n_decisive"] < 15 else
+            ("MELHOROU" if after["win_rate_pct"] > before["win_rate_pct"] and after["profit_factor"] and before["profit_factor"] and after["profit_factor"] > before["profit_factor"]
+             else "PIOROU" if after["win_rate_pct"] < before["win_rate_pct"] and (not after["profit_factor"] or not before["profit_factor"] or after["profit_factor"] < before["profit_factor"])
+             else "MISTO — olhar os números com atenção")
+        ),
     }
 
 

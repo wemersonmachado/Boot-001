@@ -340,6 +340,43 @@ async def get_recent_trade_stats(limit: int = 30) -> dict:
     return {"n": n, "wins": wins, "win_rate": round(wr, 1)}
 
 
+async def get_performance_window(start_iso: str = None, end_iso: str = None) -> dict:
+    """TRAVA DE AUDITORIA (2026-07-11): estatísticas de trades fechados numa
+    janela de tempo — usada para comparar performance ANTES vs DEPOIS de uma
+    mudança de estratégia (ver /performance/strategy_audit em main.py e o
+    marcador persistido `strategy_v2_started_at`). Sem isto, "a mudança deu
+    resultado?" ficava só na impressão — agora é uma consulta objetiva."""
+    q = "SELECT pnl_usdt, timeframe, asset FROM trades WHERE status='CLOSED' AND pnl_usdt IS NOT NULL"
+    params = []
+    if start_iso:
+        q += " AND closed_at >= ?"
+        params.append(start_iso)
+    if end_iso:
+        q += " AND closed_at < ?"
+        params.append(end_iso)
+    async with aiosqlite.connect(DB_PATH) as db:
+        await _configure_db(db)
+        cur = await db.execute(q, params)
+        rows = await cur.fetchall()
+    BREAKEVEN_EPS = 0.01
+    decisive = [float(r[0] or 0) for r in rows if abs(float(r[0] or 0)) >= BREAKEVEN_EPS]
+    n = len(decisive)
+    wins = [p for p in decisive if p > 0]
+    losses = [p for p in decisive if p < 0]
+    gross_win = sum(wins)
+    gross_loss = abs(sum(losses))
+    return {
+        "n_total": len(rows),
+        "n_decisive": n,
+        "wins": len(wins),
+        "losses": len(losses),
+        "win_rate_pct": round(len(wins) / n * 100.0, 1) if n else 0.0,
+        "net_pnl_usdt": round(sum(decisive), 4),
+        "profit_factor": round(gross_win / gross_loss, 2) if gross_loss > 0 else (None if gross_win == 0 else float("inf")),
+        "avg_trade_usdt": round(sum(decisive) / n, 4) if n else 0.0,
+    }
+
+
 async def get_recent_signal_stats(limit: int = 30) -> dict:
     """Acerto dos últimos N sinais SINAIS resolvidos (base do auto-tune do SINAIS).
     Considera WIN/LOSS (TIMEOUT entra como acerto se pnl_pct>0)."""

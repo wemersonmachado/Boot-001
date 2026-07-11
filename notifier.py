@@ -604,6 +604,45 @@ async def send_trailing_update(asset: str, new_stop: float, profit_pct: float):
     await _post("sendMessage", {"chat_id": TELEGRAM_CHAT_ID, "text": msg, "parse_mode": "Markdown"})
 
 
+async def send_long_running_profit_alert(trade: dict, hours_open: float) -> bool:
+    """FIX 2026-07-11 (pedido do usuário): trade em LUCRO aberto há mais de
+    5h manda esta mensagem informativa completa com o botão de fechar já
+    existente (_build_trade_keyboard/_close_handler) — o bot NÃO fecha
+    sozinho, só avisa e dá a opção. Reenviada periodicamente (throttle fica
+    a cargo do chamador) enquanto o trade continuar aberto e em lucro."""
+    if not _is_configured():
+        return False
+    asset     = trade.get("asset", "?")
+    direction = _clean_direction(trade.get("direction", ""))
+    entry     = float(trade.get("entry_price", 0) or 0)
+    current   = float(trade.get("current_price", 0) or entry)
+    pnl_usdt  = float(trade.get("pnl_usdt", 0) or 0)
+    pnl_pct   = float(trade.get("pnl_pct", 0) or 0)
+    lev       = int(trade.get("leverage", 1) or 1)
+    size      = float(trade.get("size_usdt", 0) or 0)
+    margin    = round(size / lev, 2) if lev else 0
+    sl        = float(trade.get("stop_loss", 0) or 0)
+    tp1       = float(trade.get("tp1", 0) or 0)
+    move_pct  = abs(current - entry) / entry * 100 if entry else 0
+    trade_id  = trade.get("id", "")
+
+    msg = (
+        f"⏳ *Trade em lucro há {hours_open:.1f}h — ainda aberto*\n"
+        f"🟢 *{direction} — {asset}*\n\n"
+        f"💰 PnL atual: `+${pnl_usdt:.2f}` (`+{pnl_pct:.1f}%`)\n"
+        f"📍 Entrada `${entry:,.4f}` → Atual `${current:,.4f}` (`{move_pct:.2f}%` percorrido)\n"
+        f"🛑 Stop atual `${sl:,.4f}` | 🎯 TP1 `${tp1:,.4f}`\n"
+        f"⚡ `{lev}x` | Margem `${margin:.2f}` | Nocional `${size:.2f}`\n\n"
+        f"_O trade continua aberto normalmente (SL/TP na corretora seguem valendo)._\n"
+        f"_Isto é só um aviso — decida se quer travar o lucro agora ou deixar rodar._"
+    )
+    res = await _post("sendMessage", {
+        "chat_id": TELEGRAM_CHAT_ID, "text": msg, "parse_mode": "Markdown",
+        "reply_markup": _build_trade_keyboard(trade_id),
+    })
+    return bool(res.get("ok"))
+
+
 async def send_daily_summary(stats: dict):
     if not _is_configured():
         return

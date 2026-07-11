@@ -345,13 +345,29 @@ SCALE_OUT_MILESTONES = [
     (3, 1.00),   # TP3: fecha os 30% restantes
 ]
 
-# Trailing stop milestones (profit % → move stop to %)
+# Trailing stop milestones (profit % bruto → trava o stop em %)
+# FIX 2026-07-11: a tabela antiga só ativava o 1º degrau em +3% de movimento
+# BRUTO — mas a auditoria de 26 trades reais mostrou que os alvos do motor
+# VDLS (scalp, o mais usado) ficam entre 0,19% e 0,93%, e até o TREND mira só
+# 2,4%. Ou seja: o trailing NUNCA disparava pra maioria dos trades — o preço
+# tinha que ANDAR 3%+ antes de qualquer lucro ser protegido, o que quase
+# nunca acontecia antes do stop ou do TP fixo decidir o trade primeiro. Essa
+# era uma causa direta de "o bot devolve o lucro": o único mecanismo que
+# protegia ganho parcial era o scale-out em TP1 (breakeven), não o trailing.
+# Nova tabela cobre também movimentos pequenos (scalp) mantendo os degraus
+# maiores (swing/1h), sempre travando uma fração crescente do lucro bruto.
 TRAILING_MILESTONES = [
-    (3.0, 0.5),    # at +3% profit → move stop to +0.5%
-    (5.0, 2.0),    # at +5% → stop to +2%
-    (8.0, 4.0),    # at +8% → stop to +4%
-    (10.0, 6.5),   # at +10% → stop to +6.5%
-    (15.0, 10.0),  # at +15% → stop to +10%
+    (0.15, 0.05),   # +0.15% bruto → trava em +0.05% (cobre a taxa, não é mais prejuízo)
+    (0.30, 0.15),
+    (0.50, 0.30),
+    (0.80, 0.55),
+    (1.20, 0.90),
+    (2.00, 1.50),
+    (3.00, 2.30),   # +3% → trava em +2.30% (era só +0.5% antes)
+    (5.00, 3.80),
+    (8.00, 6.20),
+    (10.00, 7.80),
+    (15.00, 12.00),
 ]
 
 # ── Watchlist principal — signal_engine padrão ────────────────────────────────
