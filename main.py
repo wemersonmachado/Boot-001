@@ -6883,6 +6883,18 @@ async def set_operation_mode(mode: str):
     _tps = TRADES_PER_SESSION if TRADES_PER_SESSION > 0 else "ilimitado"
     if mode == "AUTONOMOUS":
         _reset_auto_killswitch()  # sessão autônoma limpa: zera PnL e recaptura banca p/ o kill-switch -20%
+        # FIX 2026-07-12 (pedido do usuário): reativar o modo AUTÔNOMO limpa
+        # qualquer circuit breaker pendente de uma sessão anterior (ex.: pergunta
+        # de "limite de perda diária" que ficou sem resposta enquanto o bot
+        # estava em SINAIS). Sem isto, `_cb_pending` ficava travado e a primeira
+        # entrada do Autônomo era bloqueada silenciosamente por uma pergunta
+        # antiga, sem reenviar nada — parecia "não faz nada" sem explicação.
+        # SEGURO: se a condição de perda diária ainda for verdadeira, o gate em
+        # job_auto_trade (_check_daily_loss) re-arma o circuit breaker sozinho
+        # no ciclo seguinte, com pergunta nova e prazo de 3h do zero — não há
+        # bypass real da trava de perda diária, só descarta a pergunta velha.
+        if _cb_pending:
+            print(f"[CIRCUIT-BREAKER] Limpo por reativação do modo AUTÔNOMO: {_cb_resume()}")
         _exec_kind = "📝 SIMULADAS (PAPER)" if PAPER_TRADING else "🔴 REAIS"
         msg = "[BOT] Modo AUTONOMO ativado — bot executa trades automaticamente"
         aviso = (f"🤖 AUTÔNOMO ATIVADO (perfil {CURRENT_MODE})\n"
