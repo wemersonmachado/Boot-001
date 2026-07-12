@@ -577,7 +577,15 @@ input:checked + .slider:before {
 /* telas bem pequenas (≤430px) — 1 coluna nos cartões principais */
 @media(max-width:430px){
   .coin-grid,.perf-grid,.sg{grid-template-columns:1fr 1fr!important}
-  .sig-kpi-grid{grid-template-columns:1fr 1fr!important}
+  .sig-kpi-grid{grid-template-columns:1fr 1fr!important;align-items:stretch}
+  /* FIX 2026-07-11: em 2 colunas os rótulos têm tamanhos bem diferentes
+     ("% Acerto" vs "Teriam Ganho / Perdido") — com nowrap+ellipsis o rótulo
+     curto deixa o card mais baixo que o vizinho na mesma linha, quebrando o
+     alinhamento visual entre os 2 cards da linha. Trava: permite quebrar em
+     até 2 linhas com altura mínima reservada igual em TODOS os cards, então
+     a altura passa a ser sempre a mesma independente do texto. */
+  .sig-kpi{min-height:58px;display:flex;flex-direction:column;justify-content:center}
+  .sig-kpi-lbl{white-space:normal;overflow:visible;text-overflow:clip;line-height:1.2;min-height:22px;display:flex;align-items:center;justify-content:center}
   .mie-row{grid-template-columns:1fr!important}
   .main{padding:9px}
   .content{padding:9px 2px 16px}
