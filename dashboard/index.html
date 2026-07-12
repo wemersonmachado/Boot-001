@@ -988,6 +988,16 @@ input:checked + .slider:before {
           <div class="sig-kpi-lbl">WR Descartados</div>
           <div class="sig-kpi-val" id="kpiShWr">--%</div>
         </div>
+        <div class="sig-kpi" title="Sinais enviados pelas engines BREAKOUT/FADE (pump/dump) nas últimas 24h — separado para não diluir a % de acerto dos sinais estruturais">
+          <div class="sig-kpi-lbl">Pump/Dump Enviados</div>
+          <div class="sig-kpi-val" id="kpiPdSent">--</div>
+          <div class="sig-kpi-sub" id="kpiPdSentWr" style="color:var(--muted)">WR --%</div>
+        </div>
+        <div class="sig-kpi" title="Sinais pump/dump (BREAKOUT/FADE) descartados pelos filtros — Shadow Book (24h)">
+          <div class="sig-kpi-lbl">Pump/Dump Descartados</div>
+          <div class="sig-kpi-val" id="kpiPdDisc">--</div>
+          <div class="sig-kpi-sub" id="kpiPdDiscWr" style="color:var(--muted)">WR --%</div>
+        </div>
       </div>
       <div class="hdr-right-icons">
         <div class="scan-chip">Scan: <span id="scanDisp">--</span></div>
@@ -1231,8 +1241,8 @@ input:checked + .slider:before {
       </div>
       <div style="overflow-x:auto">
         <table class="tbl">
-          <thead><tr><th>Ativo</th><th>Direção</th><th>TF</th><th>Motivo / Tag</th><th>Resultado</th><th>PnL%</th></tr></thead>
-          <tbody id="sentDetailBody"><tr><td colspan="6" class="empty">Carregando sinais enviados...</td></tr></tbody>
+          <thead><tr><th>Ativo</th><th>Direção</th><th>TF</th><th>Motivo / Tag</th><th>P/D</th><th>Resultado</th><th>PnL%</th></tr></thead>
+          <tbody id="sentDetailBody"><tr><td colspan="7" class="empty">Carregando sinais enviados...</td></tr></tbody>
         </table>
       </div>
     </div>
@@ -1248,8 +1258,8 @@ input:checked + .slider:before {
       </div>
       <div style="overflow-x:auto">
         <table class="tbl">
-          <thead><tr><th>Ativo</th><th>Direção</th><th>TF</th><th>Motivo do Descarte</th><th>Resultado</th><th>PnL%</th></tr></thead>
-          <tbody id="shadowDetailBody"><tr><td colspan="6" class="empty">Carregando sinais descartados...</td></tr></tbody>
+          <thead><tr><th>Ativo</th><th>Direção</th><th>TF</th><th>Motivo do Descarte</th><th>P/D</th><th>Resultado</th><th>PnL%</th></tr></thead>
+          <tbody id="shadowDetailBody"><tr><td colspan="7" class="empty">Carregando sinais descartados...</td></tr></tbody>
         </table>
       </div>
     </div>
@@ -1637,6 +1647,15 @@ async function loadSignalKPI() {
     rate.textContent = fmt(wr, 1) + '%';
     rate.style.color = wr >= 50 ? 'var(--up)' : 'var(--down)';
   }
+  // Pump/Dump enviados (engines BREAKOUT/FADE) — metrificado separado do
+  // resto pra nao diluir a % de acerto dos sinais estruturais (pedido usuario)
+  txt('kpiPdSent', d.pump_dump_sent ?? '--');
+  const pdWr = $id('kpiPdSentWr');
+  if (pdWr) {
+    const v = d.pump_dump_win_rate_pct;
+    pdWr.textContent = 'WR ' + (v != null ? fmt(v, 1) + '%' : '--%');
+    pdWr.style.color = v != null ? (v >= 50 ? 'var(--up)' : 'var(--down)') : 'var(--muted)';
+  }
 }
 
 async function loadPumpDump(force = false) {
@@ -1730,6 +1749,14 @@ async function loadShadow() {
   txt('kpiShWr',      d.would_wr != null ? d.would_wr.toFixed(1) + '%' : '--%');
   const el = document.getElementById('kpiShWr');
   if (el && d.would_wr != null) el.style.color = d.would_wr > 50 ? 'var(--down)' : 'var(--up)';
+  // Pump/Dump descartados (engines BREAKOUT/FADE) — metrificado separado
+  txt('kpiPdDisc', d.pump_dump_total ?? '--');
+  const pdDiscWr = $id('kpiPdDiscWr');
+  if (pdDiscWr) {
+    const v = d.pump_dump_would_wr;
+    pdDiscWr.textContent = 'WR ' + (v != null ? fmt(v, 1) + '%' : '--%');
+    pdDiscWr.style.color = v != null ? (v > 50 ? 'var(--down)' : 'var(--up)') : 'var(--muted)';
+  }
   const rows = (d.by_reason || []).map(r => `<tr>
     <td>${r.reason || '--'}</td>
     <td>${r.total}</td>
@@ -1765,13 +1792,21 @@ function _rowWrSummary(rows) {
   const wr   = (wins / done.length * 100);
   return `WR (últimos ${done.length} resolvidos): <strong style="color:${wr >= 50 ? 'var(--up)' : 'var(--down)'}">${wr.toFixed(1)}%</strong>`;
 }
+// Badge da coluna Pump/Dump — sinal veio de engine BREAKOUT/FADE (ver
+// _classify_pump_dump em main.py) ou de engine estrutural (TREND/RANGE/VDLS).
+function _pdTag(r) {
+  const isPd = r.is_pump_dump === 1 || r.is_pump_dump === true;
+  return isPd
+    ? '<span class="tag" style="background:rgba(245,158,11,.15);color:#f59e0b;border:1px solid rgba(245,158,11,.3)">P/D</span>'
+    : '<span style="color:var(--muted);font-size:10px">--</span>';
+}
 
 async function loadSinaisDetail() {
   const d = await apiFetch('/signals/recent?limit=30');
   if (!d) return;
   const rows = d.rows || [];
   txt('sentDetailWr', _rowWrSummary(rows));
-  if (rows.length === 0) { set('sentDetailBody', '<tr><td colspan="6" class="empty">Nenhum sinal enviado ainda</td></tr>'); return; }
+  if (rows.length === 0) { set('sentDetailBody', '<tr><td colspan="7" class="empty">Nenhum sinal enviado ainda</td></tr>'); return; }
   const html = rows.map(r => {
     const dir   = (r.direction || '').toUpperCase();
     const isL   = dir.includes('LONG') || dir === 'BUY';
@@ -1782,6 +1817,7 @@ async function loadSinaisDetail() {
       <td><span class="tag ${isL ? 'tag-up' : 'tag-down'}">${isL ? 'LONG' : 'SHORT'}</span></td>
       <td>${r.timeframe || '--'}</td>
       <td style="font-size:10px;color:var(--muted);max-width:280px" title="${motivo.replace(/"/g,'&quot;')}">${motivo}</td>
+      <td>${_pdTag(r)}</td>
       <td>${_outcomeTag(r.outcome, pnl)}</td>
       <td class="${pnl != null ? cls(pnl) : ''}" style="font-weight:700">${pnl != null ? sign(pnl) + fmt(pnl) + '%' : '--'}</td>
     </tr>`;
@@ -1794,7 +1830,7 @@ async function loadShadowDetail() {
   if (!d) return;
   const rows = d.rows || [];
   txt('shadowDetailWr', _rowWrSummary(rows));
-  if (rows.length === 0) { set('shadowDetailBody', '<tr><td colspan="6" class="empty">Nenhum sinal descartado ainda</td></tr>'); return; }
+  if (rows.length === 0) { set('shadowDetailBody', '<tr><td colspan="7" class="empty">Nenhum sinal descartado ainda</td></tr>'); return; }
   const html = rows.map(r => {
     const dir   = (r.direction || '').toUpperCase();
     const isL   = dir.includes('LONG') || dir === 'BUY';
@@ -1805,6 +1841,7 @@ async function loadShadowDetail() {
       <td><span class="tag ${isL ? 'tag-up' : 'tag-down'}">${isL ? 'LONG' : 'SHORT'}</span></td>
       <td>${r.timeframe || '--'}</td>
       <td style="font-size:10px;color:var(--muted);max-width:280px" title="${motivo.replace(/"/g,'&quot;')}">${motivo}</td>
+      <td>${_pdTag(r)}</td>
       <td>${_outcomeTag(r.outcome, pnl)}</td>
       <td class="${pnl != null ? cls(pnl) : ''}" style="font-weight:700">${pnl != null ? sign(pnl) + fmt(pnl) + '%' : '--'}</td>
     </tr>`;

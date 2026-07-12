@@ -256,6 +256,14 @@ async def init_db():
             # em risk_manager.check_trailing_stop (trades antigos ficam com 0 =
             # trailing por ATR desligado pra eles, só a tabela de milestones).
             "ALTER TABLE trades ADD COLUMN atr REAL DEFAULT 0",
+            # 2026-07-12 (pedido do usuário): sinais de pump/dump (engines
+            # BREAKOUT/FADE) estavam diluindo a taxa de acerto dos sinais
+            # estruturais — precisa metrificar separado. Coluna gravada em
+            # signals e shadow_signals, calculada a partir do prefixo do
+            # reason ('[BREAKOUT|...]'/'[FADE|...]'/'[CASCADE:BREAKOUT|...]'
+            # etc.) — ver _classify_pump_dump() em main.py.
+            "ALTER TABLE signals ADD COLUMN is_pump_dump INTEGER DEFAULT 0",
+            "ALTER TABLE shadow_signals ADD COLUMN is_pump_dump INTEGER DEFAULT 0",
         ):
             try:
                 await db.execute(stmt)
@@ -542,25 +550,52 @@ async def get_signal_kpi_summary(window_h: float = 24.0) -> dict:
             (cutoff,),
         )
         total_sent = (await cur.fetchone())[0] or 0
+        # 2026-07-12: total enviado SEPARADO por pump/dump (engines BREAKOUT/
+        # FADE) vs "limpo" (demais engines) — usuário reportou que o volume de
+        # sinais pump/dump estava diluindo a % de acerto real dos sinais
+        # estruturais no card do dashboard.
         cur = await db.execute(
-            """SELECT o.outcome, o.pnl_pct FROM signal_outcomes o
+            """SELECT COUNT(DISTINCT s.id) FROM signals s
+               JOIN telegram_sent t ON t.signal_db_id = s.id
+               WHERE s.timestamp >= ? AND s.is_pump_dump = 1""",
+            (cutoff,),
+        )
+        pump_dump_sent = (await cur.fetchone())[0] or 0
+        cur = await db.execute(
+            """SELECT o.outcome, o.pnl_pct, s.is_pump_dump FROM signal_outcomes o
                JOIN signals s ON s.id = o.signal_db_id
                WHERE o.outcome IS NOT NULL AND s.timestamp >= ?""",
             (cutoff,),
         )
         rows = await cur.fetchall()
-    positive = sum(1 for o, p in rows
-                   if str(o).upper() == "WIN" or (str(o).upper() == "TIMEOUT" and float(p or 0) > 0))
-    negative = sum(1 for o, p in rows
-                   if str(o).upper() == "LOSS" or (str(o).upper() == "TIMEOUT" and float(p or 0) <= 0))
+    def _is_pos(o, p): return str(o).upper() == "WIN" or (str(o).upper() == "TIMEOUT" and float(p or 0) > 0)
+    def _is_neg(o, p): return str(o).upper() == "LOSS" or (str(o).upper() == "TIMEOUT" and float(p or 0) <= 0)
+    positive = sum(1 for o, p, _pd in rows if _is_pos(o, p))
+    negative = sum(1 for o, p, _pd in rows if _is_neg(o, p))
     resolved = positive + negative
     win_rate = (positive / resolved * 100.0) if resolved > 0 else 0.0
+    pd_pos = sum(1 for o, p, pd in rows if pd and _is_pos(o, p))
+    pd_neg = sum(1 for o, p, pd in rows if pd and _is_neg(o, p))
+    pd_resolved = pd_pos + pd_neg
+    pd_wr = (pd_pos / pd_resolved * 100.0) if pd_resolved > 0 else 0.0
+    clean_pos = positive - pd_pos
+    clean_neg = negative - pd_neg
+    clean_resolved = clean_pos + clean_neg
+    clean_wr = (clean_pos / clean_resolved * 100.0) if clean_resolved > 0 else 0.0
     return {
         "total_sent": int(total_sent),
         "positive":   positive,
         "negative":   negative,
         "resolved":   resolved,
         "win_rate_pct": round(win_rate, 1),
+        "pump_dump_sent":       int(pump_dump_sent),
+        "pump_dump_positive":   pd_pos,
+        "pump_dump_negative":   pd_neg,
+        "pump_dump_win_rate_pct": round(pd_wr, 1),
+        "clean_sent":           int(total_sent) - int(pump_dump_sent),
+        "clean_positive":       clean_pos,
+        "clean_negative":       clean_neg,
+        "clean_win_rate_pct":   round(clean_wr, 1),
     }
 
 
@@ -588,14 +623,15 @@ async def save_signal(signal: dict) -> int:
         cur = await db.execute(
             """INSERT INTO signals
                (asset, direction, entry, stop_loss, tp1, tp2, tp3, rr, confidence,
-                score_total, reason, timeframe, executed, timestamp)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                score_total, reason, timeframe, executed, timestamp, is_pump_dump)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 signal["asset"], signal["direction"], signal["entry"],
                 signal["stop_loss"], signal["tp1"], signal["tp2"], signal["tp3"],
                 signal["rr"], signal["confidence"], signal["score_total"],
                 signal["reason"], signal["timeframe"], signal.get("executed", 0),
                 datetime.utcnow().isoformat(),
+                1 if signal.get("is_pump_dump") else 0,
             ),
         )
         await db.commit()
@@ -682,7 +718,8 @@ async def record_signal_outcome(signal_db_id: int, asset: str, direction: str,
 
 async def save_shadow_signal(asset: str, direction: str, timeframe: str,
                              entry: float, sl: float, tp: float,
-                             block_reason: str, dedup_min: int = 30) -> bool:
+                             block_reason: str, dedup_min: int = 30,
+                             is_pump_dump: bool = False) -> bool:
     """Registra um sinal bloqueado pelos filtros para rastreio hipotético.
     Dedup: ignora se o MESMO asset+tf+direction já foi registrado (pendente)
     nos últimos dedup_min minutos — o scan roda a cada 60s e re-bloquearia o
@@ -699,9 +736,10 @@ async def save_shadow_signal(asset: str, direction: str, timeframe: str,
                 return False
         await db.execute(
             """INSERT INTO shadow_signals
-               (ts, asset, direction, timeframe, entry, sl, tp, block_reason)
-               VALUES (?,?,?,?,?,?,?,?)""",
-            (now.isoformat(), asset, direction, timeframe, entry, sl, tp, block_reason[:120]),
+               (ts, asset, direction, timeframe, entry, sl, tp, block_reason, is_pump_dump)
+               VALUES (?,?,?,?,?,?,?,?,?)""",
+            (now.isoformat(), asset, direction, timeframe, entry, sl, tp, block_reason[:120],
+             1 if is_pump_dump else 0),
         )
         await db.commit()
     return True
@@ -736,7 +774,7 @@ async def get_recent_shadow_detail(limit: int = 30) -> list:
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
-            """SELECT asset, direction, timeframe, block_reason, outcome, pnl_pct, ts
+            """SELECT asset, direction, timeframe, block_reason, outcome, pnl_pct, ts, is_pump_dump
                FROM shadow_signals ORDER BY id DESC LIMIT ?""",
             (int(limit),),
         ) as cur:
@@ -751,7 +789,7 @@ async def get_recent_sinais_detail(limit: int = 30) -> list:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             """SELECT s.asset, s.direction, s.timeframe, s.confidence, s.reason,
-                      o.outcome, o.pnl_pct, s.timestamp
+                      o.outcome, o.pnl_pct, s.timestamp, s.is_pump_dump
                FROM signals s
                JOIN telegram_sent t ON t.signal_db_id = s.id AND t.destination = 'vip'
                LEFT JOIN signal_outcomes o ON o.signal_db_id = s.id
@@ -775,6 +813,18 @@ async def get_shadow_stats(hours: float = 24.0) -> dict:
         ) as cur:
             by_outcome = {(r["outcome"] or "PENDENTE"): {"n": r["n"], "avg_pnl": round(r["avg_pnl"], 2)}
                           for r in await cur.fetchall()}
+        # 2026-07-12: mesmo recorte pump/dump (engines BREAKOUT/FADE) aplicado
+        # ao shadow book — quantos DESCARTES eram pump/dump e o que teriam feito.
+        async with db.execute(
+            """SELECT outcome, COUNT(*) n
+               FROM shadow_signals WHERE ts>=? AND is_pump_dump=1 GROUP BY outcome""",
+            (cutoff,),
+        ) as cur:
+            pd_by_outcome = {(r["outcome"] or "PENDENTE"): r["n"] for r in await cur.fetchall()}
+        pd_total  = sum(pd_by_outcome.values())
+        pd_wins   = pd_by_outcome.get("WIN", 0)
+        pd_losses = pd_by_outcome.get("LOSS", 0)
+        pd_resolved = pd_wins + pd_losses
         async with db.execute(
             """SELECT block_reason,
                       COUNT(*) total,
@@ -808,6 +858,11 @@ async def get_shadow_stats(hours: float = 24.0) -> dict:
         "timeout":     by_outcome.get("TIMEOUT", {}).get("n", 0),
         "would_wr":    round(wins / resolved * 100, 1) if resolved else None,
         "by_reason":   reasons,
+        "pump_dump_total":    pd_total,
+        "pump_dump_wins":     pd_wins,
+        "pump_dump_losses":   pd_losses,
+        "pump_dump_would_wr": round(pd_wins / pd_resolved * 100, 1) if pd_resolved else None,
+        "clean_total":        total - pd_total,
     }
 
 

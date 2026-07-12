@@ -1100,6 +1100,7 @@ async def job_scan_market():
                 "score_total": s.score.total,
                 "reason": s.reason,
                 "timeframe": s.timeframe,
+                "is_pump_dump": _classify_pump_dump(s.reason),
             })
             _id_map[s.asset] = _db_id
 
@@ -1860,6 +1861,26 @@ async def job_autotune_score():
         print(f"[AUTOTUNE] Erro: {e}")
 
 
+def _classify_pump_dump(reason: str) -> bool:
+    """2026-07-12 (pedido do usuário): sinais gerados pelas engines BREAKOUT
+    (volatile_engine — chase de volume-spike) e FADE (contrarian de pump/dump
+    exausto, ver engine_router._fade_signal) são estruturalmente ligados a
+    movimentos de pump/dump — o usuário reportou que o volume desses sinais
+    estava diluindo a taxa de acerto real dos sinais estruturais (TREND/
+    RANGE/VDLS) nos cards do dashboard. O engine já vem taggeado no prefixo
+    do reason por engine_router.route()/cascade(): '[ENGINE|regime|ADX..]' ou
+    '[CASCADE:ENGINE|regime|ADX..]' — reaproveita esse dado em vez de
+    recalcular RSI/volume (evita duplicar lógica e ficar dessincronizado)."""
+    r = (reason or "").upper()
+    if not r.startswith("["):
+        return False
+    tag = r.split("]", 1)[0][1:]
+    if tag.startswith("CASCADE:"):
+        tag = tag.split(":", 1)[1]
+    engine = tag.split("|", 1)[0]
+    return engine in ("BREAKOUT", "FADE")
+
+
 # ── Shadow book — registra sinais bloqueados e resolve seus outcomes ─────────
 def _record_shadow(s: dict, block_reason: str):
     """Agenda o registro de um sinal bloqueado no shadow book (fail-open:
@@ -1878,6 +1899,7 @@ def _record_shadow(s: dict, block_reason: str):
             str(s.get("direction", "")).split(".")[-1].strip().upper(),
             str(s.get("timeframe", "")),
             entry, sl, tp, block_reason,
+            is_pump_dump=_classify_pump_dump(str(s.get("reason", ""))),
         ))
     except Exception as e:
         print(f"[SHADOW] erro ao registrar (ignorado): {e}")
