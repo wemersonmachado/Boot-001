@@ -71,7 +71,7 @@ async def get_spread_stats(asset_a: str, asset_b: str) -> Optional[dict]:
 
 async def run_pairs_trading_cycle(banca_total_usdt: float, paper_trading: bool = False):
     """Varre todos os pares configurados, gerencia posições de arbitragem abertas e executa novas ordens."""
-    from main import _active_trades_cache, _executing_assets, OPERATION_MODE
+    from main import _active_trades_cache, _executing_assets, OPERATION_MODE, TRADES_PER_SESSION
     if OPERATION_MODE != "GRID" and OPERATION_MODE != "AUTONOMOUS":
         # Arbitragem ativa apenas em GRID ou AUTONOMOUS
         return
@@ -116,6 +116,12 @@ async def run_pairs_trading_cycle(banca_total_usdt: float, paper_trading: bool =
     # como defesa em profundidade caso outro bug de chave apareça no futuro.
     _MAX_CONCURRENT_PAIRS = len(PAIRS_CONFIG)  # 1 posição (2 pernas) por par configurado
     _active_pair_count = len(active_pairs_map)
+    # TRAVA UNIVERSAL 2026-07-13 (pedido explícito do usuário após o incidente):
+    # o bot NUNCA pode ter mais trades reais abertos, de QUALQUER motor, do que
+    # o configurado no painel (TRADES_PER_SESSION). Reconciliado contra o banco
+    # a cada ciclo — não confia em contador em memória. TRADES_PER_SESSION==0
+    # significa "ilimitado" (escolha explícita do usuário no painel).
+    _real_open_now = len(open_trades_db)
 
     for asset_a, asset_b in PAIRS_CONFIG:
         pair = tuple(sorted([asset_a, asset_b]))
@@ -124,16 +130,23 @@ async def run_pairs_trading_cycle(banca_total_usdt: float, paper_trading: bool =
         stats = await get_spread_stats(asset_a, asset_b)
         if not stats:
             continue
-            
+
         z = stats["z_score"]
         # print(f"[PAIRS SCAN] {asset_a}/{asset_b} Z-Score: {z:+.2f} | A=${stats['price_a']:.4f} B=${stats['price_b']:.4f}")
-        
+
         # 1. Gerenciar posições abertas para este par
         if pair in active_pairs_map:
             trades = active_pairs_map[pair]
-            if len(trades) < 2:
-                # Caso ocorra falha e apenas um lado esteja aberto, encerra por segurança
-                print(f"[PAIRS] Erro de paridade para {pair}: apenas uma perna aberta. Fechando...")
+            present_assets = {t["asset"] for t in trades}
+            # FIX 2026-07-13: antes só checava len(trades) < 2 — mas o incidente
+            # real mostrou um grupo com 5 pernas do MESMO ativo (AVAXUSDT),
+            # sem nenhuma perna do outro lado (SOLUSDT) — len==5 passava direto
+            # pela checagem de paridade e ficava esperando reversão de Z-score
+            # numa posição que NUNCA foi hedge de verdade. Agora também fecha
+            # por segurança se faltar qualquer um dos dois ativos do par.
+            if len(trades) < 2 or asset_a not in present_assets or asset_b not in present_assets:
+                # Caso ocorra falha e a perna esteja desemparelhada, encerra por segurança
+                print(f"[PAIRS] Erro de paridade para {pair}: pernas desemparelhadas ({present_assets}). Fechando...")
                 for t in trades:
                     await _close_perna(t, stats["price_a"] if t["asset"] == asset_a else stats["price_b"], paper_trading)
                 continue
@@ -163,26 +176,31 @@ async def run_pairs_trading_cycle(banca_total_usdt: float, paper_trading: bool =
             signal = "LONG_A_SHORT_B"
             
         if signal:
+            if TRADES_PER_SESSION > 0 and _real_open_now + 2 > TRADES_PER_SESSION:
+                print(f"[PAIRS] {asset_a}/{asset_b}: limite do painel atingido "
+                      f"({_real_open_now}/{TRADES_PER_SESSION} trades abertos) — não abre novo par.")
+                continue
             print(f"[PAIRS ENTRY] {asset_a}/{asset_b} Z-Score={z:+.2f} -> Iniciando {signal}")
-            
+
             # Sizing: Aloca 15% da banca disponível por perna
             leverage = 5 # arbitragem usa alavancagem menor por segurança
             margin_per_leg = round(banca_total_usdt * 0.15, 2)
             if margin_per_leg < 5.0:
                 continue # banca insuficiente
-                
+
             notional = margin_per_leg * leverage
-            
+
             # Prepara ordens
             if signal == "SHORT_A_LONG_B":
                 dir_a, dir_b = "SHORT", "LONG"
             else:
                 dir_a, dir_b = "LONG", "SHORT"
-                
+
             # Executa trade Perna A
             await _open_perna(asset_a, dir_a, stats["price_a"], notional, leverage, f"PAIR:{asset_b}", paper_trading)
             # Executa trade Perna B
             await _open_perna(asset_b, dir_b, stats["price_b"], notional, leverage, f"PAIR:{asset_a}", paper_trading)
+            _real_open_now += 2  # atualiza o contador local para os próximos pares avaliados neste mesmo ciclo
             
             await send_alert(
                 f"⚖️ *Arbitragem Estatística Iniciada* ({asset_a}/{asset_b})\n"
