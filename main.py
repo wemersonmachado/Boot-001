@@ -5744,9 +5744,21 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+# FIX 2026-07-13 (auditoria de segurança): CORS estava aberto para QUALQUER
+# origem (allow_origins=["*"]). O dashboard é servido pelo PRÓPRIO app (rota
+# "/", mesma origem) — não existe uso legítimo que precise de origem cruzada
+# irrestrita aqui, só superfície de ataque. Restringe à URL de produção +
+# localhost (dev) + qualquer origem extra definida via env var
+# CORS_EXTRA_ORIGINS (separadas por vírgula), para não travar integrações
+# futuras sem precisar editar código.
+_CORS_ORIGINS = [
+    "https://fulfilling-wisdom-production-61f8.up.railway.app",
+    "http://localhost:8000", "http://127.0.0.1:8000",
+] + [o.strip() for o in os.environ.get("CORS_EXTRA_ORIGINS", "").split(",") if o.strip()]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=_CORS_ORIGINS,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -7643,9 +7655,12 @@ async def resume_bot():
 
 # IDs fixos do projeto/serviço no Railway (não são segredo, aparecem na própria URL
 # do painel) — só o RAILWAY_PROJECT_TOKEN (env var) é sensível.
-_RAILWAY_PROJECT_ID     = "cba184f2-5988-46c5-977f-4af22e443014"
-_RAILWAY_SERVICE_ID     = "58815b1d-9515-460a-816c-f22d4aa21d27"
-_RAILWAY_ENVIRONMENT_ID = "7d91ba84-8e1b-41ee-a45f-971c7ac65474"
+# FIX 2026-07-13 (auditoria): movidos para env vars com fallback nos valores
+# atuais — não são segredo (aparecem na URL do painel Railway), mas evitam
+# precisar editar código se o projeto for movido/recriado no futuro.
+_RAILWAY_PROJECT_ID     = os.environ.get("RAILWAY_PROJECT_ID_REF", "cba184f2-5988-46c5-977f-4af22e443014")
+_RAILWAY_SERVICE_ID     = os.environ.get("RAILWAY_SERVICE_ID_REF", "58815b1d-9515-460a-816c-f22d4aa21d27")
+_RAILWAY_ENVIRONMENT_ID = os.environ.get("RAILWAY_ENVIRONMENT_ID_REF", "7d91ba84-8e1b-41ee-a45f-971c7ac65474")
 _RAILWAY_GRAPHQL_URL    = "https://backboard.railway.com/graphql/v2"
 
 
@@ -7810,6 +7825,58 @@ async def health():
         "time": datetime.utcnow().isoformat(),
         "bot": "TRADER 001",
         "autonomous": OPERATION_MODE == "AUTONOMOUS",
+    }
+
+
+def _resolve_git_commit() -> dict:
+    """2026-07-13 (pedido do usuário, após auditoria confundir uma cópia local
+    desatualizada com o que estava realmente em produção): resolve o commit
+    real que está rodando, sem depender de nenhuma cópia local. Prioridade:
+    (1) env vars que o Railway já injeta automaticamente no build (não exige
+    configuração nova), (2) `git rev-parse` se houver um .git disponível
+    (dev local), (3) 'unknown' — nunca inventa um valor."""
+    sha    = os.environ.get("RAILWAY_GIT_COMMIT_SHA", "")
+    branch = os.environ.get("RAILWAY_GIT_BRANCH", "")
+    if not sha:
+        try:
+            import subprocess
+            sha = subprocess.check_output(
+                ["git", "rev-parse", "HEAD"], cwd=os.path.dirname(__file__),
+                stderr=subprocess.DEVNULL, timeout=3,
+            ).decode().strip()
+        except Exception:
+            sha = "unknown"
+    if not branch:
+        try:
+            import subprocess
+            branch = subprocess.check_output(
+                ["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=os.path.dirname(__file__),
+                stderr=subprocess.DEVNULL, timeout=3,
+            ).decode().strip()
+        except Exception:
+            branch = "unknown"
+    return {"commit_sha": sha, "commit_short": sha[:7] if sha and sha != "unknown" else sha, "branch": branch}
+
+
+# Resolvido uma vez no boot (não muda em runtime) — evita rodar subprocess a cada request.
+_GIT_INFO = _resolve_git_commit()
+
+
+@app.get("/version")
+async def version():
+    """Identifica de forma inequívoca qual código está rodando AGORA neste
+    processo — resolve a classe de confusão vista na auditoria de 2026-07-13,
+    onde uma cópia local 34 commits desatualizada foi analisada como se fosse
+    o estado real de produção. Sempre confira este endpoint antes de tirar
+    conclusões sobre "o que o código faz hoje" a partir de uma cópia local."""
+    from config import DB_PATH as _db_path
+    return {
+        **_GIT_INFO,
+        "operation_mode": OPERATION_MODE,
+        "paper_trading": PAPER_TRADING,
+        "db_path": _db_path,
+        "mode_started_at": _mode_started_at,
+        "server_time": datetime.utcnow().isoformat(),
     }
 
 
