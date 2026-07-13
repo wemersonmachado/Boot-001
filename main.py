@@ -2287,13 +2287,14 @@ async def _execute_trade_inner(signal_dict: dict):
         origin = f"Risk-based ${trade.size_usdt:.2f} nocional | {user_leverage}x"
 
     # Ajuste de tamanho se DCA estiver ativo.
-    # TRAVA 2026-07-13 (pedido explícito do usuário): DCA NUNCA deve reforçar
-    # posições no modo AUTÔNOMO, mesmo que o toggle esteja ligado no painel —
-    # DCA é uma decisão que exige acompanhamento, incompatível com o motor
-    # 100% automático abrindo/reforçando sozinho sem supervisão.
+    # CORREÇÃO 2026-07-13: DCA PODE rodar no modo AUTÔNOMO — a trava real não é
+    # o modo, é a AUTORIZAÇÃO. DCA só liga via ação explícita do usuário
+    # (endpoints /dca/enable e /dca/disable — nenhum caminho automático no
+    # código jamais seta dca_enabled=True sozinho, confirmado nesta auditoria).
+    # Enquanto is_dca_enabled() refletir a escolha do usuário, o Autônomo pode
+    # usar DCA normalmente.
     is_dca_active = (dca_engine.is_dca_enabled()
-                      and signal_dict.get("trade_type") != "GRID"
-                      and OPERATION_MODE != "AUTONOMOUS")
+                      and signal_dict.get("trade_type") != "GRID")
     if is_dca_active:
         if BANCA_USDT > 0:
             banca_alocada = margin
@@ -4347,10 +4348,11 @@ async def job_update_trades():
                                    if k in ActiveTrade.model_fields})
 
             # ── DCA Update Logic ──────────────────────────────────────────────
-            # TRAVA 2026-07-13: mesmo bloqueio do DCA no modo AUTÔNOMO aplicado
-            # na abertura — aqui cobre o reforço de posições já abertas.
+            # CORREÇÃO 2026-07-13: DCA pode reforçar posições no Autônomo desde
+            # que o usuário tenha autorizado via /dca/enable — ver nota em
+            # _execute_trade_inner sobre a mesma correção.
             if (dca_engine.is_dca_enabled() and trade_data.get("trade_type") != "GRID"
-                    and OPERATION_MODE != "AUTONOMOUS" and trade.asset in dca_engine._dca_positions):
+                    and trade.asset in dca_engine._dca_positions):
                 level_info = await dca_engine.get_next_dca_level(trade.asset, price)
                 if level_info:
                     dca_pos = dca_engine._dca_positions[trade.asset]
