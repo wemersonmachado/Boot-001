@@ -76,9 +76,18 @@ async def run_pairs_trading_cycle(banca_total_usdt: float, paper_trading: bool =
         # Arbitragem ativa apenas em GRID ou AUTONOMOUS
         return
 
-    # Busca posições ativas de arbitragem de pares
+    # Busca posições ativas de arbitragem de pares.
+    # FIX 2026-07-13: além de trade_type=="PAIRS_ARB" (coluna que só passou a
+    # ser persistida agora — ver migração em database.init_db), também aceita
+    # pelo prefixo "PAIR:" no reason como segunda camada de detecção — defesa
+    # em profundidade caso trade_type volte a ficar vazio por qualquer motivo
+    # futuro (foi exatamente essa lacuna que causou o incidente real de
+    # posições duplicadas sem limite).
     open_trades_db = await get_open_trades()
-    pairs_trades_active = [t for t in open_trades_db if t.get("trade_type") == "PAIRS_ARB"]
+    pairs_trades_active = [
+        t for t in open_trades_db
+        if t.get("trade_type") == "PAIRS_ARB" or str(t.get("reason", "")).startswith("PAIR:")
+    ]
 
     # Agrupa posições abertas por par
     active_pairs_map = {}

@@ -264,11 +264,38 @@ async def init_db():
             # etc.) — ver _classify_pump_dump() em main.py.
             "ALTER TABLE signals ADD COLUMN is_pump_dump INTEGER DEFAULT 0",
             "ALTER TABLE shadow_signals ADD COLUMN is_pump_dump INTEGER DEFAULT 0",
+            # FIX 2026-07-13 (INCIDENTE CRÍTICO — dinheiro real): `trade_type`
+            # era escrito em trade_dict (main.py, pairs_trading_engine.py,
+            # job_update_trades) e usado para decidir lógica real (ex.:
+            # pairs_trading_engine filtrava open_trades_db por
+            # trade_type=="PAIRS_ARB" para saber se um par JÁ estava aberto),
+            # mas a coluna NUNCA existiu na tabela `trades` e NUNCA foi
+            # inserida em save_trade() — toda leitura de volta do banco
+            # (get_open_trades) retornava trade_type ausente. Resultado: o
+            # motor de arbitragem de pares SEMPRE via a lista de posições
+            # ativas como vazia, nunca reconhecia pares já abertos, e abria
+            # posições novas a cada ciclo de 15min indefinidamente — o bug de
+            # ordenação de chave (ver pairs_trading_engine.py) era secundário;
+            # esta é a causa raiz real e mais profunda do mesmo incidente.
+            "ALTER TABLE trades ADD COLUMN trade_type TEXT DEFAULT ''",
         ):
             try:
                 await db.execute(stmt)
             except Exception:
                 pass
+        # Backfill (2026-07-13, mesmo incidente): trades PAIRS_ARB abertos ANTES
+        # deste fix foram gravados com trade_type vazio (a coluna não existia).
+        # Sem isto, mesmo com a coluna e o dedup corrigidos, essas posições já
+        # abertas continuariam invisíveis para run_pairs_trading_cycle() e o
+        # bot abriria pares NOVOS por cima delas de novo. Idempotente e seguro
+        # (só corrige metadado no banco — nenhuma posição real é tocada).
+        try:
+            await db.execute(
+                "UPDATE trades SET trade_type='PAIRS_ARB' "
+                "WHERE (trade_type IS NULL OR trade_type='') AND reason LIKE 'PAIR:%'"
+            )
+        except Exception:
+            pass
         await db.commit()
 
 
@@ -283,8 +310,8 @@ async def save_trade(trade: dict):
                (id, asset, direction, entry_price, exit_price, stop_loss, tp1, tp2, tp3,
                 rr, leverage, size_usdt, pnl_pct, pnl_usdt, status, reason, confidence,
                 timeframe, score_json, opened_at, closed_at, mode, paper, execution_status, order_id,
-                signal_db_id, atr)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                signal_db_id, atr, trade_type)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 trade["id"], trade["asset"], trade["direction"],
                 trade["entry_price"], trade.get("exit_price"),
@@ -299,6 +326,7 @@ async def save_trade(trade: dict):
                 str(trade.get("order_id")) if trade.get("order_id") is not None else None,
                 int(trade.get("signal_db_id") or 0),
                 float(trade.get("atr") or 0.0),
+                str(trade.get("trade_type") or ""),
             ),
         )
         await db.commit()

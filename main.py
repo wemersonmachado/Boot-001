@@ -7146,7 +7146,10 @@ async def pairs_status():
     pairs_trading_engine.run_pairs_trading_cycle). Mostra o estado real
     reconciliado contra o banco, não a memória do processo."""
     open_trades = await get_open_trades()
-    pairs_trades = [t for t in open_trades if t.get("trade_type") == "PAIRS_ARB"]
+    pairs_trades = [
+        t for t in open_trades
+        if t.get("trade_type") == "PAIRS_ARB" or str(t.get("reason", "")).startswith("PAIR:")
+    ]
     grouped: dict = {}
     total_margin = 0.0
     for t in pairs_trades:
