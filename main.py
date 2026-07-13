@@ -7138,6 +7138,38 @@ async def force_scan_endpoint():
     return {"status": "started", "started_at": datetime.utcnow().strftime("%H:%M:%S")}
 
 
+@app.get("/pairs/status")
+async def pairs_status():
+    """Diagnóstico do motor de arbitragem de pares (2026-07-13, criado após
+    incidente real: bug de chave duplicava posições do MESMO par a cada ciclo
+    de 15min sem nenhum rastro visível de fora — ver FIX em
+    pairs_trading_engine.run_pairs_trading_cycle). Mostra o estado real
+    reconciliado contra o banco, não a memória do processo."""
+    open_trades = await get_open_trades()
+    pairs_trades = [t for t in open_trades if t.get("trade_type") == "PAIRS_ARB"]
+    grouped: dict = {}
+    total_margin = 0.0
+    for t in pairs_trades:
+        extra = t.get("reason", "")
+        other = extra.replace("PAIR:", "").strip() if "PAIR:" in extra else "?"
+        key = "/".join(sorted([t["asset"], other]))
+        grouped.setdefault(key, []).append({
+            "id": t["id"], "asset": t["asset"], "direction": t["direction"],
+            "entry_price": t["entry_price"], "size_usdt": t["size_usdt"],
+            "leverage": t["leverage"], "opened_at": t["opened_at"],
+        })
+        lev = t.get("leverage") or 1
+        total_margin += float(t.get("size_usdt") or 0) / lev
+    return {
+        "configured_pairs": [f"{a}/{b}" for a, b in pairs_trading_engine.PAIRS_CONFIG],
+        "max_concurrent_pairs": len(pairs_trading_engine.PAIRS_CONFIG),
+        "open_pair_legs": len(pairs_trades),
+        "open_pair_groups": len(grouped),
+        "total_margin_usdt": round(total_margin, 2),
+        "groups": grouped,
+    }
+
+
 @app.get("/auto/debug_gates")
 async def auto_debug_gates():
     """Diagnóstico (2026-07-09): expõe os gates internos que podem travar

@@ -79,7 +79,7 @@ async def run_pairs_trading_cycle(banca_total_usdt: float, paper_trading: bool =
     # Busca posições ativas de arbitragem de pares
     open_trades_db = await get_open_trades()
     pairs_trades_active = [t for t in open_trades_db if t.get("trade_type") == "PAIRS_ARB"]
-    
+
     # Agrupa posições abertas por par
     active_pairs_map = {}
     for t in pairs_trades_active:
@@ -90,8 +90,28 @@ async def run_pairs_trading_cycle(banca_total_usdt: float, paper_trading: bool =
             pair = tuple(sorted([t["asset"], other_asset]))
             active_pairs_map.setdefault(pair, []).append(t)
 
+    # FIX 2026-07-13 (INCIDENTE REAL — dinheiro real perdido): `pair` abaixo era
+    # (asset_a, asset_b) NA ORDEM DO CONFIG, mas `active_pairs_map` é chaveado
+    # por tuple(sorted(...)). Para o par ("SOLUSDT","AVAXUSDT") do config, a
+    # chave ordenada é ("AVAXUSDT","SOLUSDT") — NUNCA batia com a chave não
+    # ordenada, então `pair in active_pairs_map` era SEMPRE False mesmo com a
+    # posição já aberta. Resultado: a cada ciclo de 15min (job_pairs_arbitrage)
+    # em que o Z-score continuasse além do gatilho, o bot abria UM PAR NOVO em
+    # cima do anterior, sem limite — confirmado em produção: par SOL/AVAX
+    # aberto 2x seguidas (03:47 e 04:02, exatos 15min de intervalo), turbinando
+    # o número de trades abertos e o capital usado muito além do configurado.
+    #
+    # TRAVA: (1) chave de lookup agora usa a MESMA ordenação (sorted) da chave
+    # de registro — dedup real. (2) teto explícito de posições simultâneas de
+    # arbitragem, reconciliado contra o banco (fonte de verdade) a cada ciclo,
+    # como defesa em profundidade caso outro bug de chave apareça no futuro.
+    _MAX_CONCURRENT_PAIRS = len(PAIRS_CONFIG)  # 1 posição (2 pernas) por par configurado
+    _active_pair_count = len(active_pairs_map)
+
     for asset_a, asset_b in PAIRS_CONFIG:
-        pair = (asset_a, asset_b)
+        pair = tuple(sorted([asset_a, asset_b]))
+        if _active_pair_count >= _MAX_CONCURRENT_PAIRS and pair not in active_pairs_map:
+            continue  # teto de segurança: não abre par novo além do limite configurado
         stats = await get_spread_stats(asset_a, asset_b)
         if not stats:
             continue
