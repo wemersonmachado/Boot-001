@@ -4022,6 +4022,15 @@ async def job_pd_monitor():
 async def job_pairs_arbitrage():
     """Varre e executa o motor de arbitragem estatística de pares."""
     global BANCA_USDT
+    # TRAVA 2026-07-13 (INCIDENTE REAL — dinheiro real usado além do
+    # solicitado): este motor rodava sempre que o modo fosse AUTÔNOMO/GRID,
+    # sem NENHUM controle do usuário — abria posições de 15% da banca por
+    # perna completamente à parte do trades_per_session configurado no
+    # painel. Agora exige opt-in explícito (mesmo padrão do DCA): default
+    # desligado, só liga via POST /pairs/enable.
+    from state import state as _bs
+    if not _bs.pairs_trading_enabled:
+        return
     try:
         balance = await _get_balance()
         effective_banca = BANCA_USDT if BANCA_USDT > 0 else (balance or 100)
@@ -6718,6 +6727,7 @@ async def get_settings():
         "claude_brain_enabled":  _claude_brain_enabled,
         "sinais_enabled":        SINAIS_ENABLED,
         "dca_enabled":           dca_engine.is_dca_enabled(),
+        "pairs_trading_enabled": bot_state.pairs_trading_enabled,
     }
 
 
@@ -7898,6 +7908,35 @@ async def disable_dca_mode():
     dca_engine.enable_dca(False)
     await bot_state.save_key("dca_enabled", False)
     return {"ok": True, "dca_enabled": False}
+
+
+# ── Pairs Trading (arbitragem) endpoints ────────────────────────────────────────
+# TRAVA 2026-07-13: motor separado que só opera com autorização explícita do
+# usuário (default desligado) — ver nota em job_pairs_arbitrage.
+
+@app.get("/pairs/enabled")
+async def get_pairs_trading_enabled():
+    return {"pairs_trading_enabled": bot_state.pairs_trading_enabled}
+
+
+@app.post("/pairs/enable")
+async def enable_pairs_trading():
+    """Ativa o motor de arbitragem de pares (persiste no estado). Desligado
+    por padrão — precisa desta chamada explícita para operar dinheiro real."""
+    await bot_state.save_key("pairs_trading_enabled", True)
+    await send_alert(
+        "⚖️ *Motor de arbitragem de pares ATIVADO* pelo usuário.\n"
+        "Vai abrir posições de 15% da banca por perna quando o Z-Score dos "
+        "pares configurados passar do gatilho, à parte do lote normal."
+    )
+    return {"ok": True, "pairs_trading_enabled": True}
+
+
+@app.post("/pairs/disable")
+async def disable_pairs_trading():
+    """Desativa o motor de arbitragem de pares (persiste no estado)."""
+    await bot_state.save_key("pairs_trading_enabled", False)
+    return {"ok": True, "pairs_trading_enabled": False}
 
 
 # ── Monte Carlo endpoint ───────────────────────────────────────────────────────

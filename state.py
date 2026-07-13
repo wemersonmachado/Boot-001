@@ -65,6 +65,17 @@ class BotState:
         # sobreviver a restart. Consumido por dca_engine via main.sync.
         self.dca_enabled = False
 
+        # Motor de arbitragem de pares (2026-07-13, INCIDENTE REAL): antes
+        # rodava SEMPRE que o modo fosse AUTÔNOMO/GRID, sem nenhum toggle no
+        # painel — o usuário configurava banca/trades_per_session pensando
+        # que isso controlava TODAS as entradas, mas o motor de pares abria
+        # posições extras (15% da banca por perna) completamente à parte,
+        # gerando entradas de tamanho e quantidade que o usuário nunca pediu.
+        # Default False: só liga com ação explícita do usuário (/pairs/enable),
+        # igual ao DCA — nenhum motor "extra" pode operar dinheiro real sem
+        # opt-in explícito.
+        self.pairs_trading_enabled = False
+
         # Grid + watchlists por modo (AUDITORIA 2026-07-04: estes 7 campos
         # nunca persistiam — /settings/grid e /settings/watchlist só mudavam
         # a variável em memória, igual ao bug da alavancagem. Corrigido.)
@@ -111,6 +122,7 @@ class BotState:
                 pass  # mantém o default já definido em __init__ se o JSON salvo estiver corrompido
             self.paper_trading = (await get_setting("paper_trading", "False")) == "True"
             self.dca_enabled = (await get_setting("dca_enabled", "False")) == "True"
+            self.pairs_trading_enabled = (await get_setting("pairs_trading_enabled", "False")) == "True"
 
             # Grid + watchlists (json — listas)
             for _attr, _key in (
