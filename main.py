@@ -2913,7 +2913,12 @@ async def job_auto_trade(signals: list, id_map: dict = None):
                 signal.direction.value,
                 _notional_est,
                 _atr_pct_est,
-                [{"asset": t["asset"], "direction": t.get("direction",""), "notional_usdt": float(t.get("notional_usdt", 10)), "atr_pct": 2.0} for t in open_trades],
+                # FIX 2026-07-13 (mesma classe do bug trade_type): "notional_usdt"
+                # nunca foi coluna do banco — todo trade já aberto entrava aqui com
+                # $10 fixo em vez do notional real, deixando o gate de concentração/
+                # correlação cego para a exposição de verdade. size_usdt já É o
+                # notional alavancado (ver risk_manager.calculate_position_size).
+                [{"asset": t["asset"], "direction": t.get("direction",""), "notional_usdt": float(t.get("size_usdt", 0) or 0), "atr_pct": 2.0} for t in open_trades],
                 effective_banca,
                 leverage=get_leverage(signal.asset),
                 max_concurrent=_n_trades_ref,
@@ -3333,8 +3338,10 @@ async def job_grid_scan(pairs: list = None):
                 _port_ok, _port_reason = portfolio_risk.can_open_position(
                     signal.asset, signal.direction.value,
                     _notional_est, _atr_pct_est,
+                    # FIX 2026-07-13: notional_usdt nunca existiu no banco — usar
+                    # size_usdt (já é o notional alavancado real).
                     [{"asset": t["asset"], "direction": t.get("direction",""),
-                      "notional_usdt": float(t.get("notional_usdt", 10)), "atr_pct": 2.0}
+                      "notional_usdt": float(t.get("size_usdt", 0) or 0), "atr_pct": 2.0}
                      for t in open_trades],
                     BANCA_USDT if BANCA_USDT > 0 else (await _get_balance() or 10),
                     leverage=GRID_LEVERAGE,
@@ -8022,7 +8029,9 @@ async def get_portfolio_risk_endpoint():
         {
             "asset":         t.get("asset", ""),
             "direction":     t.get("direction", ""),
-            "notional_usdt": float(t.get("notional_usdt", 10) or 10),
+            # FIX 2026-07-13: notional_usdt nunca existiu no banco — usar
+            # size_usdt (já é o notional alavancado real).
+            "notional_usdt": float(t.get("size_usdt", 0) or 0),
             "atr_pct":       2.0,
         }
         for t in open_trades
