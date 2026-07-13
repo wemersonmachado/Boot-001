@@ -81,7 +81,7 @@ import supply_demand
 import engine_router
 import asset_memory as _asset_memory
 from data_fetcher import get_trending_futures
-from risk_manager import create_trade, process_trade_update, can_open_trade
+from risk_manager import create_trade, process_trade_update, can_open_trade, calc_engine_margin
 from binance_executor import open_trade, update_stop_loss, close_position, get_futures_balance, get_client, get_account_balance_detail, get_binance_trade_history, execute_dca_order
 from data_fetcher import get_market_snapshot, get_crypto_news, get_ticker
 from database import (
@@ -2200,20 +2200,22 @@ async def _execute_trade_inner(signal_dict: dict):
         except Exception as _ve_ex:
             print(f"[LEVERAGE VOL] Erro: {_ve_ex}")
 
-    # ── Sizing: Usa Sizing baseado em Risco com Margin Cap quando banca definida ──
+    # ── Sizing: PONTO ÚNICO via risk_manager.calc_engine_margin (2026-07-13) ──
+    # Autônomo é a referência: TODO motor (Pares, Grid) chama a MESMA função
+    # com os MESMOS parâmetros — ver docstring de calc_engine_margin.
     if BANCA_USDT > 0:
         from config import MAX_OPEN_TRADES as _MAX
         n = TRADES_PER_SESSION if TRADES_PER_SESSION > 0 else _MAX
-        max_margin_per_trade = round(BANCA_USDT / n, 2)
-        
+
         # Anti-martingale: reduz margem máxima após sequência de perdas
         anti_mult = 1.0
         for threshold, mult in sorted(_ANTI_MARTINGALE, reverse=True):
             if _consecutive_losses >= threshold:
                 anti_mult = mult
                 break
+        max_margin_per_trade = calc_engine_margin(BANCA_USDT, TRADES_PER_SESSION, _MAX,
+                                                    anti_martingale_mult=anti_mult)
         if anti_mult < 1.0:
-            max_margin_per_trade = round(max_margin_per_trade * anti_mult, 2)
             print(f"[ANTI-MARTINGALE] {_consecutive_losses} perdas consecutivas → margem máxima x{anti_mult} = ${max_margin_per_trade:.2f}")
 
         # ── ALOCAÇÃO DIRETA DO CAPITAL (FIX 2026-07-07) ─────────────────────
@@ -3488,11 +3490,16 @@ async def _execute_grid_trade(signal_dict: dict):
             print(f"[GRID GUARD] {asset} {direction} ja aberto.")
             return
 
-        # FIX #6: usa max_concurrent do GRID_SETTINGS (NORMAL=2, AGGRESSIVE=4) em vez do global fixo
-        _gcfg = GRID_SETTINGS.get(CURRENT_MODE, GRID_SETTINGS["NORMAL"])
-        n = max(_gcfg["max_concurrent"], 1)
-        effective_banca = (BANCA_USDT if BANCA_USDT > 0 else (await _get_balance() or 10)) + _grid_reinvest_bonus
-        margin   = round(effective_banca / n, 2)
+        # PONTO ÚNICO de sizing (2026-07-13): GRID agora usa a MESMA função e
+        # os MESMOS parâmetros do Autônomo (banca / trades_per_session) — antes
+        # usava GRID_SETTINGS[perfil]["max_concurrent"] como "n", uma conta
+        # própria que podia divergir do que o usuário configurou no painel.
+        # _grid_reinvest_bonus continua somado (extra_capital), não é sizing
+        # alternativo — é capital extra real já reinvestido pelo próprio grid.
+        from config import MAX_OPEN_TRADES as _grid_max
+        _banca_for_grid = BANCA_USDT if BANCA_USDT > 0 else (await _get_balance() or 10)
+        margin   = calc_engine_margin(_banca_for_grid, TRADES_PER_SESSION, _grid_max,
+                                       extra_capital=_grid_reinvest_bonus)
         notional = round(margin * GRID_LEVERAGE, 2)
 
         signal = _build_signal_from_dict(signal_dict)

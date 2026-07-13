@@ -13,6 +13,7 @@ from klines_cache import get_klines_cached as get_klines
 from binance_executor import open_trade, close_position, get_position_qty, _sync_time_offset, get_client
 from database import get_open_trades, save_trade, update_trade_close
 from notifier import send_alert
+from risk_manager import calc_engine_margin
 
 # Configurações de Arbitragem
 PAIRS_CONFIG = [
@@ -182,9 +183,14 @@ async def run_pairs_trading_cycle(banca_total_usdt: float, paper_trading: bool =
                 continue
             print(f"[PAIRS ENTRY] {asset_a}/{asset_b} Z-Score={z:+.2f} -> Iniciando {signal}")
 
-            # Sizing: Aloca 15% da banca disponível por perna
+            # PONTO ÚNICO de sizing (2026-07-13, pedido explícito do usuário):
+            # Pares agora usa a MESMA função e os MESMOS parâmetros do
+            # Autônomo (banca / trades_per_session) — antes usava 15% da
+            # banca por perna, uma conta própria alheia ao painel que foi a
+            # causa raiz do incidente real de sizing divergente.
+            from config import MAX_OPEN_TRADES as _pairs_max
             leverage = 5 # arbitragem usa alavancagem menor por segurança
-            margin_per_leg = round(banca_total_usdt * 0.15, 2)
+            margin_per_leg = calc_engine_margin(banca_total_usdt, TRADES_PER_SESSION, _pairs_max)
             if margin_per_leg < 5.0:
                 continue # banca insuficiente
 

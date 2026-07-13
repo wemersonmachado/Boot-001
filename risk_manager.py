@@ -190,6 +190,43 @@ def suggest_leverage(
     }
 
 
+def calc_engine_margin(
+    banca_usdt: float,
+    trades_per_session: int,
+    max_open_trades: int,
+    extra_capital: float = 0.0,
+    anti_martingale_mult: float = 1.0,
+) -> float:
+    """
+    PONTO ÚNICO de cálculo de margem por trade (2026-07-13, trava definitiva
+    pós-incidente real). TODO motor que abre trade REAL (Autônomo, Pares,
+    Grid, e qualquer motor futuro) DEVE chamar esta função — nunca
+    reimplementar a conta de sizing.
+
+    Antes existiam 3 fórmulas diferentes:
+      - Autônomo: banca_usdt / trades_per_session (a referência correta)
+      - Pares:    banca_usdt × 15% por perna (motor próprio, alheio ao painel)
+      - Grid:     banca_usdt / GRID_SETTINGS[perfil]["max_concurrent"]
+    Cada uma gerava um tamanho de posição diferente do que o usuário configurou
+    pensando que "banca + trades por sessão" controlava TUDO. Resultado real:
+    trades de $6 quando o usuário pediu $20 (banca $40 / 2 trades).
+
+    Regra (idêntica ao Autônomo, que é a referência definitiva por pedido
+    explícito do usuário): margem = (banca_usdt + extra_capital) / n, onde
+    n = trades_per_session se > 0, senão max_open_trades como fallback.
+    extra_capital é usado só pelo Grid para somar um bônus de reinvestimento
+    já existente — nunca uma fórmula alternativa de tamanho.
+    anti_martingale_mult (0 < mult <= 1) reduz a margem após sequência de
+    perdas — nunca aumenta.
+    """
+    if banca_usdt <= 0:
+        return 0.0
+    n = trades_per_session if trades_per_session > 0 else max(int(max_open_trades or 1), 1)
+    margin = (banca_usdt + max(extra_capital, 0.0)) / n
+    mult = min(max(anti_martingale_mult, 0.0), 1.0)
+    return round(margin * mult, 2)
+
+
 def calculate_position_size(
     balance_usdt: float,
     entry: float,
