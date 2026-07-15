@@ -1398,7 +1398,12 @@ function fmt(v, d = 2) {
   if (v == null || v === '' || isNaN(f)) return '--';
   return f.toLocaleString('pt-BR', { minimumFractionDigits: d, maximumFractionDigits: d });
 }
-function sign(v) { return parseFloat(v) >= 0 ? '+' : ''; }
+// Preserve the sign for negative PnL.  The previous implementation rendered
+// losses as positive absolute values, making the live history misleading.
+function sign(v) {
+  const f = parseFloat(v || 0);
+  return f > 0 ? '+' : f < 0 ? '-' : '';
+}
 function cls(v)  { return parseFloat(v) >= 0 ? 'up' : 'down'; }
 function pct(v)  { return sign(v) + fmt(v) + '%'; }
 function pnlH(v) {

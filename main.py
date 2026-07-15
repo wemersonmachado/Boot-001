@@ -72,7 +72,8 @@ from config import (WEBHOOK_SECRET, HOST, PORT, WATCHLIST, MAX_DAILY_LOSS_PCT,
                     SINAIS_BRAIN_MIN_SCORE, SINAIS_OUTCOME_TRACKING, SINAIS_OUTCOME_MAX_AGE_H,
                     SINAIS_OUTCOME_MAX_AGE_H_BY_TF,
                     SINAIS_AUTOTUNE_ENABLED, SINAIS_AUTOTUNE_LOOKBACK,
-                    SINAIS_AUTOTUNE_MAX_TIGHTEN, SINAIS_AUTOTUNE_MAX_LOOSEN)
+                    SINAIS_AUTOTUNE_MAX_TIGHTEN, SINAIS_AUTOTUNE_MAX_LOOSEN,
+                    LIVE_MIN_TIMEFRAME, LIVE_ALTCOINS_ENABLED, LIVE_MAX_LEVERAGE)
 import market_engine
 from models import WebhookAlert, Direction, ActiveTrade
 from signal_engine import scan_watchlist, analyze_asset, scan_anomalies, analyze_smart_flow
@@ -219,6 +220,27 @@ DAILY_TARGET_USDT: float = 0.0 # objetivo diário de lucro em USDT (0 = desativa
 
 PAPER_TRADING: bool = False    # True = simulação sem dinheiro real (NÃO é pausa!)
 BOT_PAUSED: bool = False        # True = bot pausado (não abre trades). Separado de PAPER_TRADING.
+
+
+def _live_execution_block_reason(asset: str, timeframe: str) -> str | None:
+    """Return the hard live-trading block reason, or ``None`` if allowed.
+
+    This helper is shared by the scheduled signal path and the webhook/manual
+    execution path.  Keeping the gate in one place prevents a direct webhook
+    from bypassing the same safety limits applied to scanned signals.
+    """
+    if PAPER_TRADING:
+        return None
+    tf_order = {"1m": 1, "3m": 3, "5m": 5, "15m": 15, "30m": 30,
+                "1h": 60, "2h": 120, "4h": 240, "1d": 1440}
+    min_tf = tf_order.get(str(LIVE_MIN_TIMEFRAME).lower(), 5)
+    if tf_order.get(str(timeframe).lower(), 0) < min_tf:
+        return f"live_tf_disabled(<{LIVE_MIN_TIMEFRAME})"
+    if not LIVE_ALTCOINS_ENABLED:
+        base = str(asset).upper().replace("USDT", "").replace("USD", "")
+        if base not in {"BTC", "ETH", "SOL"}:
+            return "live_altcoin_disabled"
+    return None
 LEVERAGE_OVERRIDE: int = 0      # 0 = automático (engine decide por sinal). N>0 = trava Nx nos trades reais.
 
 # Sincronização centralizada com o BotState
@@ -2141,6 +2163,14 @@ async def _execute_trade_inner(signal_dict: dict):
     global _round_trade_ids, _round_was_full
 
     signal = _build_signal_from_dict(signal_dict)
+    _live_block = _live_execution_block_reason(signal.asset, signal.timeframe)
+    if _live_block:
+        print(f"[LIVE-SAFETY] {signal.asset} {signal.timeframe} bloqueado: {_live_block}")
+        await log_event("RISK_BLOCK", f"{signal.asset} {signal.timeframe}: {_live_block}", {
+            "asset": signal.asset, "timeframe": signal.timeframe, "reason": _live_block,
+            "mode": OPERATION_MODE,
+        })
+        return
     from risk_manager import get_leverage as _get_lev
     user_leverage = int(signal_dict.get("leverage") or _get_lev(signal.asset))
 
@@ -2159,6 +2189,10 @@ async def _execute_trade_inner(signal_dict: dict):
     _lev_cap = MODE_SETTINGS.get(CURRENT_MODE, MODE_SETTINGS["NORMAL"]).get("leverage_cap")
     if _lev_cap:
         user_leverage = min(user_leverage, int(_lev_cap))
+    # Real-money execution has a hard leverage ceiling independent of the
+    # selected risk profile.  Paper trading is intentionally unaffected.
+    if not PAPER_TRADING:
+        user_leverage = min(user_leverage, max(1, int(LIVE_MAX_LEVERAGE)))
 
     # Redução de alavancagem adaptativa baseada na exposição total da carteira (Recomendação C2 da Auditoria)
     # FIX 2026-07-08: usava notional_open (JÁ alavancado) / banca crua — mesmo
@@ -2629,6 +2663,14 @@ async def job_auto_trade(signals: list, id_map: dict = None):
         if _mode_wl and signal.asset not in _mode_wl:
             _blk("fora_watchlist_modo")
             continue  # Fora da watchlist do modo atual
+        # Production safety: 1m/3m signals and unbounded low-cap execution are
+        # paper-only by default.  They remain scannable and visible in the
+        # Shadow Book, but cannot consume real capital unless explicitly
+        # enabled through Railway Variables.
+        _live_block = _live_execution_block_reason(signal.asset, signal.timeframe)
+        if _live_block:
+            _blk(_live_block)
+            continue
         # FIX 2026-07-11: varredura de performance real (26 trades) mostrou o
         # timeframe 3m consistentemente negativo (-$1,38, 28,6% acerto) contra
         # o 5m positivo (+$0,42, 37,5% acerto) — e XRPUSDT/LINKUSDT entre os

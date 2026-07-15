@@ -17,6 +17,15 @@ PORT = int(os.getenv("PORT", "8000"))
 
 # Risk per trade (% of balance)
 DEFAULT_RISK_PCT = float(os.getenv("DEFAULT_RISK_PCT", "1.0"))
+
+# Live-trading safety defaults.  Ultra-short timeframes and low-cap altcoins
+# are opt-in for real-money execution; paper trading remains unrestricted so
+# they can still be evaluated without financial exposure.
+LIVE_MIN_TIMEFRAME = os.getenv("LIVE_MIN_TIMEFRAME", "5m")
+LIVE_ALTCOINS_ENABLED = os.getenv("LIVE_ALTCOINS_ENABLED", "0").strip().lower() in {
+    "1", "true", "yes", "on"
+}
+LIVE_MAX_LEVERAGE = int(os.getenv("LIVE_MAX_LEVERAGE", "5"))
 MAX_OPEN_TRADES = int(os.getenv("MAX_OPEN_TRADES", "5"))
 
 # Leverage rules
