@@ -123,6 +123,7 @@ MODE_SETTINGS = {
 # win-rate alto, o filtro está jogando lucro fora; se baixo, está salvando.
 SHADOW_BOOK_ENABLED    = True
 SHADOW_OUTCOME_MAX_H   = 24.0   # janela para resolver (depois vira TIMEOUT)
+SHADOW_V2_ENABLED      = os.getenv("SHADOW_V2_ENABLED", "1").lower() in ("1", "true", "yes", "on")
 
 # ── Time-stop (2026-07-05) — sair de trade que não anda ───────────────────────
 # Trade aberto que após N candles do seu timeframe não avançou nem X% do caminho
@@ -133,6 +134,9 @@ TIME_STOP_ENABLED       = True
 TIME_STOP_MAX_CANDLES   = 40     # idade máxima em candles do TF do trade
 TIME_STOP_MIN_AGE_MIN   = 45     # nunca fecha antes disso (independe do TF)
 TIME_STOP_PROGRESS_PCT  = 25.0   # precisa ter andado ≥25% do caminho até o TP1
+TIME_STOP_MAX_CANDLES_BY_TF = {"1m": 12, "3m": 8, "5m": 6, "15m": 8, "30m": 8, "1h": 6, "4h": 4}
+TIME_STOP_MIN_AGE_MIN_BY_TF = {"1m": 8, "3m": 15, "5m": 25, "15m": 60, "30m": 120, "1h": 240, "4h": 720}
+EXIT_RULES_V2_ENABLED = os.getenv("EXIT_RULES_V2_ENABLED", "1").lower() in ("1", "true", "yes", "on")
 
 # ── Kill-switch do modo AUTÔNOMO ──────────────────────────────────────────────
 # Se a sessão autônoma perder esta % da banca inicial, PARA TUDO (não abre novas
@@ -395,6 +399,11 @@ TRAILING_MILESTONES = [
 #     só o próprio TP1 movia o stop pro breakeven.
 EARLY_BREAKEVEN_PROGRESS   = 0.50   # 50% do caminho até o TP1
 EARLY_BREAKEVEN_MARGIN_PCT = 0.08   # trava em entry ± 0.08% (cobre taxa, lucro real)
+
+# V2: break-even só é permitido após +1R; as constantes legadas acima continuam
+# para compatibilidade com configurações antigas.
+BREAKEVEN_MIN_R = 1.0
+FEE_RATE_BPS = float(os.getenv("FEE_RATE_BPS", "4.0"))
 
 # (2) Trailing por ATR (adaptativo à volatilidade do momento, em vez de % fixo):
 #     uma vez em lucro mínimo, o stop persegue o preço a ATR_TRAIL_MULT×ATR de

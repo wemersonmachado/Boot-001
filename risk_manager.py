@@ -9,6 +9,7 @@ from config import (
     LEVERAGE_MAP, LEVERAGE_MAX, DEFAULT_RISK_PCT,
     MAX_OPEN_TRADES, TRAILING_MILESTONES, SCALE_OUT_MILESTONES,
     EARLY_BREAKEVEN_PROGRESS, EARLY_BREAKEVEN_MARGIN_PCT,
+    BREAKEVEN_MIN_R, FEE_RATE_BPS, EXIT_RULES_V2_ENABLED,
     ATR_TRAIL_MULT, ATR_TRAIL_MIN_PROFIT_PCT,
 )
 from models import ActiveTrade, Direction, TradeSignal
@@ -284,8 +285,11 @@ def update_pnl(trade: ActiveTrade, current_price: float) -> ActiveTrade:
     else:
         pnl_pct = (trade.entry_price - current_price) / trade.entry_price * 100 * trade.leverage
 
-    trade.pnl_pct = round(pnl_pct, 2)
-    trade.pnl_usdt = round(trade.size_usdt * pnl_pct / 100 / trade.leverage, 2)
+    fee_usdt = abs(trade.size_usdt) * (FEE_RATE_BPS / 10000.0) * 2.0
+    gross_usdt = trade.size_usdt * pnl_pct / 100 / trade.leverage
+    trade.pnl_usdt = round(gross_usdt - fee_usdt, 2)
+    margin = abs(trade.size_usdt / max(trade.leverage, 1))
+    trade.pnl_pct = round((trade.pnl_usdt / margin * 100.0) if margin else 0.0, 2)
     return trade
 
 
@@ -309,12 +313,17 @@ def check_trailing_stop(trade: ActiveTrade) -> Optional[float]:
     raw_pnl_pct = trade.pnl_pct / trade.leverage if trade.leverage else 0
     is_long = trade.direction == Direction.LONG
     entry = trade.entry_price
+    risk_distance = (abs(trade.tp1 - entry) / max(abs(trade.rr), 1.0)) if trade.tp1 else abs(entry - trade.stop_loss)
+    moved_now = (trade.current_price - entry) if is_long else (entry - trade.current_price)
+    allow_profit_lock = moved_now >= risk_distance * BREAKEVEN_MIN_R if risk_distance > 0 else False
 
     candidates = []
 
     # ── 1. Milestones de lucro bruto ──────────────────────────────────────────
     for profit_trigger, stop_lock_pct in TRAILING_MILESTONES:
         if raw_pnl_pct >= profit_trigger:
+            if stop_lock_pct > 0 and not allow_profit_lock:
+                continue
             if is_long:
                 candidates.append(round(entry * (1 + stop_lock_pct / 100), 6))
             else:
@@ -322,23 +331,20 @@ def check_trailing_stop(trade: ActiveTrade) -> Optional[float]:
 
     # ── 2. Trailing por ATR (adaptativo) ──────────────────────────────────────
     atr_val = getattr(trade, "atr", 0.0) or 0.0
-    if atr_val > 0 and raw_pnl_pct >= ATR_TRAIL_MIN_PROFIT_PCT and trade.current_price:
+    if atr_val > 0 and raw_pnl_pct >= ATR_TRAIL_MIN_PROFIT_PCT and trade.current_price and allow_profit_lock:
         if is_long:
             candidates.append(round(trade.current_price - atr_val * ATR_TRAIL_MULT, 6))
         else:
             candidates.append(round(trade.current_price + atr_val * ATR_TRAIL_MULT, 6))
 
     # ── 3. Breakeven antecipado (antes do TP1) ────────────────────────────────
-    if not trade.tp1_hit and trade.tp1 and entry:
-        dist_tp1 = abs(trade.tp1 - entry)
-        if dist_tp1 > 0:
-            moved = (trade.current_price - entry) if is_long else (entry - trade.current_price)
-            progress = moved / dist_tp1
-            if progress >= EARLY_BREAKEVEN_PROGRESS:
-                if is_long:
-                    candidates.append(round(entry * (1 + EARLY_BREAKEVEN_MARGIN_PCT / 100), 6))
-                else:
-                    candidates.append(round(entry * (1 - EARLY_BREAKEVEN_MARGIN_PCT / 100), 6))
+    if EXIT_RULES_V2_ENABLED and not trade.tp1_hit and trade.tp1 and entry:
+        moved = moved_now
+        if risk_distance > 0 and moved >= risk_distance * BREAKEVEN_MIN_R:
+            if is_long:
+                candidates.append(round(entry * (1 + EARLY_BREAKEVEN_MARGIN_PCT / 100), 6))
+            else:
+                candidates.append(round(entry * (1 - EARLY_BREAKEVEN_MARGIN_PCT / 100), 6))
 
     if not candidates:
         return None
@@ -412,11 +418,13 @@ async def process_trade_update(trade: ActiveTrade, current_price: float) -> dict
         trade.tp1_hit = True
         actions.append({"action": "PARTIAL_CLOSE", "reason": "TP1", "pct": pct, "original_size": trade.size_usdt})
         trade.size_usdt = round(trade.size_usdt * max(1.0 - pct, 0.0), 2)
-        # Move SL para breakeven
-        if trade.direction == Direction.LONG:
-            trade.stop_loss = max(trade.stop_loss, trade.entry_price)
-        else:
-            trade.stop_loss = min(trade.stop_loss, trade.entry_price)
+        # Move SL para breakeven somente se o TP1 representa pelo menos +1R.
+        risk_distance = abs(trade.tp1 - trade.entry_price) / max(abs(trade.rr), 1.0)
+        if abs(trade.tp1 - trade.entry_price) >= risk_distance * BREAKEVEN_MIN_R:
+            if trade.direction == Direction.LONG:
+                trade.stop_loss = max(trade.stop_loss, trade.entry_price)
+            else:
+                trade.stop_loss = min(trade.stop_loss, trade.entry_price)
     elif tp_hit == "TP2":
         remaining_after_tp1 = max(1.0 - tp1_abs, 0.0001)
         pct = min(tp2_abs / remaining_after_tp1, 1.0)

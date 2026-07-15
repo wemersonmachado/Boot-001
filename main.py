@@ -1909,13 +1909,27 @@ def _classify_pump_dump(reason: str) -> bool:
     return engine in ("BREAKOUT", "FADE")
 
 
+def _shadow_block_code(reason: str) -> str:
+    """Normaliza motivos para aprendizado sem depender de texto livre."""
+    r = (reason or "").upper()
+    for code, keys in (("LOW_SCORE", ("SCORE", "NOTA", "CONFIDENCE")),
+                       ("RISK_GATE", ("RISCO", "RISK", "EXPOS")),
+                       ("REGIME_NEUTRAL", ("NEUTRAL", "NEUTRO", "RANGE")),
+                       ("PUMP_DUMP", ("PUMP", "DUMP", "BREAKOUT", "FADE")),
+                       ("DUPLICATE", ("DUPLIC",)),
+                       ("TIMEFRAME_BLOCK", ("TIMEFRAME", "1M", "3M"))):
+        if any(k in r for k in keys):
+            return code
+    return "OTHER"
+
+
 # ── Shadow book — registra sinais bloqueados e resolve seus outcomes ─────────
 def _record_shadow(s: dict, block_reason: str):
     """Agenda o registro de um sinal bloqueado no shadow book (fail-open:
     qualquer erro é engolido — o fluxo de sinais nunca depende disso)."""
     try:
-        from config import SHADOW_BOOK_ENABLED
-        if not SHADOW_BOOK_ENABLED:
+        from config import SHADOW_BOOK_ENABLED, SHADOW_V2_ENABLED
+        if not SHADOW_BOOK_ENABLED or not SHADOW_V2_ENABLED:
             return
         entry = float(s.get("entry", 0) or 0)
         sl    = float(s.get("stop_loss", 0) or s.get("sl", 0) or 0)
@@ -1928,6 +1942,7 @@ def _record_shadow(s: dict, block_reason: str):
             str(s.get("timeframe", "")),
             entry, sl, tp, block_reason,
             is_pump_dump=_classify_pump_dump(str(s.get("reason", ""))),
+            block_code=_shadow_block_code(block_reason),
         ))
     except Exception as e:
         print(f"[SHADOW] erro ao registrar (ignorado): {e}")
@@ -4552,7 +4567,8 @@ async def job_update_trades():
             # sobrepõe um CLOSE que o process_trade_update já decidiu.
             try:
                 from config import (TIME_STOP_ENABLED, TIME_STOP_MAX_CANDLES,
-                                    TIME_STOP_MIN_AGE_MIN, TIME_STOP_PROGRESS_PCT)
+                                    TIME_STOP_MIN_AGE_MIN, TIME_STOP_PROGRESS_PCT,
+                                    TIME_STOP_MAX_CANDLES_BY_TF, TIME_STOP_MIN_AGE_MIN_BY_TF)
                 _has_close = any(a.get("action") == "CLOSE" for a in result["actions"])
                 if TIME_STOP_ENABLED and not _has_close and not trade.tp1_hit and trade.status == "OPEN":
                     _opened_raw = trade_data.get("opened_at") or ""
@@ -4560,7 +4576,10 @@ async def job_update_trades():
                     _age_min    = (datetime.utcnow() - datetime.fromisoformat(_opened_s)).total_seconds() / 60.0
                     _tf_min     = {"1m": 1, "3m": 3, "5m": 5, "15m": 15, "30m": 30,
                                    "1h": 60, "4h": 240}.get(trade_data.get("timeframe") or "15m", 15)
-                    _max_age    = max(float(TIME_STOP_MIN_AGE_MIN), _tf_min * float(TIME_STOP_MAX_CANDLES))
+                    _tf_name = trade_data.get("timeframe") or "15m"
+                    _candles = TIME_STOP_MAX_CANDLES_BY_TF.get(_tf_name, TIME_STOP_MAX_CANDLES)
+                    _min_age = TIME_STOP_MIN_AGE_MIN_BY_TF.get(_tf_name, TIME_STOP_MIN_AGE_MIN)
+                    _max_age    = max(float(_min_age), _tf_min * float(_candles))
                     if _age_min >= _max_age:
                         _entry_ts  = float(trade.entry_price)
                         _dist_tp   = abs(float(trade.tp1) - _entry_ts)
@@ -4641,32 +4660,39 @@ async def job_update_trades():
                         _pnl_close = (_entry - _exit_px) * _qty * trade.leverage
                         _pnl_pct   = ((_entry - _exit_px) / _entry) * 100.0 * trade.leverage
                         
+                    # Estimativa líquida durante o ciclo; o reconciliador de
+                    # renda da Binance substitui por realized PNL + funding.
+                    from config import FEE_RATE_BPS
+                    _fees = abs(float(trade.size_usdt)) * float(FEE_RATE_BPS) / 10000.0 * 2.0
+                    _pnl_net = _pnl_close - _fees
+                    _margin = abs(float(trade.size_usdt) / max(int(trade.leverage), 1))
+                    _pnl_pct_net = (_pnl_net / _margin * 100.0) if _margin else 0.0
                     _closed_dict = trade.model_dump()
-                    _closed_dict["pnl_usdt"] = _pnl_close
-                    _closed_dict["pnl_pct"] = _pnl_pct
+                    _closed_dict["pnl_usdt"] = _pnl_net
+                    _closed_dict["pnl_pct"] = _pnl_pct_net
 
                     # FIX: grava exit_price e PnL real no DB
                     asyncio.create_task(update_trade_close(
-                        trade.id, _exit_px, _pnl_close, _pnl_pct
+                        trade.id, _exit_px, _pnl_net, _pnl_pct_net
                     ))
 
                     asyncio.create_task(send_trade_closed(
                         _closed_dict, action.get("reason", "CLOSE")
                     ))
-                    if _pnl_close > 0:
+                    if _pnl_net > 0:
                         _eff_mode = _resolve_effective_mode()
                         asyncio.create_task(send_social_proof(_closed_dict, _eff_mode))
 
                     # Adaptive Memory: atualiza perfil do ativo com resultado real
-                    _is_win = _pnl_close > 0
+                    _is_win = _pnl_net > 0
                     _tf     = _closed_dict.get("timeframe", "15m")
                     _now    = datetime.utcnow()
                     _tags   = _closed_dict.get("reason", "")
                     asyncio.create_task(upsert_asset_profile(
-                        _asset, _tf, _now.hour, _now.weekday(), _is_win, _pnl_pct
+                        _asset, _tf, _now.hour, _now.weekday(), _is_win, _pnl_pct_net
                     ))
                     asyncio.create_task(upsert_confluence_pattern(
-                        _asset, _tags[:80], _is_win, _pnl_pct
+                        _asset, _tags[:80], _is_win, _pnl_pct_net
                     ))
                     # P1 — fecha o loop de aprendizado: registra o resultado do sinal
                     # (alimenta signal_outcomes -> base para ML e score adaptativo)

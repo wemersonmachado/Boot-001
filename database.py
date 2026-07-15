@@ -278,6 +278,7 @@ async def init_db():
             # ordenação de chave (ver pairs_trading_engine.py) era secundário;
             # esta é a causa raiz real e mais profunda do mesmo incidente.
             "ALTER TABLE trades ADD COLUMN trade_type TEXT DEFAULT ''",
+            "ALTER TABLE shadow_signals ADD COLUMN block_code TEXT DEFAULT ''",
         ):
             try:
                 await db.execute(stmt)
@@ -747,7 +748,7 @@ async def record_signal_outcome(signal_db_id: int, asset: str, direction: str,
 async def save_shadow_signal(asset: str, direction: str, timeframe: str,
                              entry: float, sl: float, tp: float,
                              block_reason: str, dedup_min: int = 30,
-                             is_pump_dump: bool = False) -> bool:
+                             is_pump_dump: bool = False, block_code: str = "") -> bool:
     """Registra um sinal bloqueado pelos filtros para rastreio hipotético.
     Dedup: ignora se o MESMO asset+tf+direction já foi registrado (pendente)
     nos últimos dedup_min minutos — o scan roda a cada 60s e re-bloquearia o
@@ -764,10 +765,10 @@ async def save_shadow_signal(asset: str, direction: str, timeframe: str,
                 return False
         await db.execute(
             """INSERT INTO shadow_signals
-               (ts, asset, direction, timeframe, entry, sl, tp, block_reason, is_pump_dump)
-               VALUES (?,?,?,?,?,?,?,?,?)""",
+               (ts, asset, direction, timeframe, entry, sl, tp, block_reason, is_pump_dump, block_code)
+               VALUES (?,?,?,?,?,?,?,?,?,?)""",
             (now.isoformat(), asset, direction, timeframe, entry, sl, tp, block_reason[:120],
-             1 if is_pump_dump else 0),
+             1 if is_pump_dump else 0, block_code[:40]),
         )
         await db.commit()
     return True
@@ -914,6 +915,14 @@ async def get_score_adjustment(asset: str, timeframe: str,
 
     total, wins, total_pnl = row
     win_rate = wins / total
+    # Limite inferior de Wilson: reduz overfitting em amostras pequenas e
+    # impede que uma sequência curta de vitórias aumente o score demais.
+    import math
+    z = 1.96
+    denom = 1.0 + z * z / total
+    centre = win_rate + z * z / (2.0 * total)
+    spread = z * math.sqrt((win_rate * (1.0 - win_rate) + z * z / (4.0 * total)) / total)
+    win_rate = max(0.0, (centre - spread) / denom)
     avg_pnl  = total_pnl / total
 
     # Ajuste baseado em win rate histórico nessa condição
