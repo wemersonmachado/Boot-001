@@ -1405,7 +1405,7 @@ function sign(v) {
   return f > 0 ? '+' : f < 0 ? '-' : '';
 }
 function cls(v)  { return parseFloat(v) >= 0 ? 'up' : 'down'; }
-function pct(v)  { return sign(v) + fmt(v) + '%'; }
+function pct(v)  { return sign(v) + fmt(Math.abs(parseFloat(v || 0))) + '%'; }
 function pnlH(v) {
   const f = parseFloat(v || 0);
   return `<span class="${cls(f)}">${sign(f)}$${fmt(Math.abs(f))}</span>`;
