@@ -25,7 +25,9 @@ LIVE_MIN_TIMEFRAME = os.getenv("LIVE_MIN_TIMEFRAME", "5m")
 LIVE_ALTCOINS_ENABLED = os.getenv("LIVE_ALTCOINS_ENABLED", "0").strip().lower() in {
     "1", "true", "yes", "on"
 }
-LIVE_MAX_LEVERAGE = int(os.getenv("LIVE_MAX_LEVERAGE", "5"))
+# Optional emergency ceiling.  Zero means no hidden ceiling: when the user
+# fixes leverage in Dashboard/Telegram, that exact value is authoritative.
+LIVE_MAX_LEVERAGE = int(os.getenv("LIVE_MAX_LEVERAGE", "0"))
 MAX_OPEN_TRADES = int(os.getenv("MAX_OPEN_TRADES", "5"))
 
 # Leverage rules

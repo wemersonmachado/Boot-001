@@ -607,7 +607,7 @@ async def _set_paper_trading(enabled: bool):
 
 
 async def _set_leverage_override(value):
-    global LEVERAGE_OVERRIDE
+    global LEVERAGE_OVERRIDE, GRID_LEVERAGE
     try:
         lev = int(value)
     except (TypeError, ValueError):
@@ -615,7 +615,13 @@ async def _set_leverage_override(value):
     if lev < 0 or lev > 25:
         raise ValueError("Use 0 (automático) ou um valor entre 1 e 25")
     LEVERAGE_OVERRIDE = lev
+    # Dashboard e Telegram compartilham a mesma fonte de verdade. O espelho
+    # legado do Grid tambem e sincronizado quando ha valor explicito.
+    if lev > 0:
+        GRID_LEVERAGE = lev
     await save_global_state_to_db()
+    if lev > 0:
+        await bot_state.save_key("grid_leverage", GRID_LEVERAGE)
     return LEVERAGE_OVERRIDE
 
 
@@ -2182,16 +2188,18 @@ async def _execute_trade_inner(signal_dict: dict):
     # ele vira a BASE em vez do valor da engine — mas os tetos de segurança
     # abaixo (perfil, exposição, volatilidade) continuam valendo por cima,
     # só para REDUZIR, nunca para subir além do que o usuário pediu.
-    if LEVERAGE_OVERRIDE > 0:
+    _leverage_locked = LEVERAGE_OVERRIDE > 0
+    if _leverage_locked:
         user_leverage = LEVERAGE_OVERRIDE
 
-    # Teto de alavancagem do perfil ativo (CONSERVATIVE = 10x)
+    # Teto de perfil só vale no modo automático. Um valor fixado pelo usuário
+    # no Dashboard/Telegram é uma ordem explícita e deve ser obedecido exato.
     _lev_cap = MODE_SETTINGS.get(CURRENT_MODE, MODE_SETTINGS["NORMAL"]).get("leverage_cap")
-    if _lev_cap:
+    if _lev_cap and not _leverage_locked:
         user_leverage = min(user_leverage, int(_lev_cap))
-    # Real-money execution has a hard leverage ceiling independent of the
-    # selected risk profile.  Paper trading is intentionally unaffected.
-    if not PAPER_TRADING:
+    # Optional emergency ceiling, disabled by default. It must never silently
+    # override an explicit Dashboard/Telegram value in normal operation.
+    if LIVE_MAX_LEVERAGE > 0 and not _leverage_locked:
         user_leverage = min(user_leverage, max(1, int(LIVE_MAX_LEVERAGE)))
 
     # Redução de alavancagem adaptativa baseada na exposição total da carteira (Recomendação C2 da Auditoria)
@@ -2209,7 +2217,7 @@ async def _execute_trade_inner(signal_dict: dict):
         )
         effective_banca = BANCA_USDT if BANCA_USDT > 0 else (await _get_balance() or 10)
 
-        if effective_banca > 0:
+        if effective_banca > 0 and not _leverage_locked:
             exposure_ratio = margin_open / effective_banca
             reduction_factor = max(0.2, min(1.0, 1.0 - exposure_ratio))
             if reduction_factor < 1.0:
@@ -2220,7 +2228,7 @@ async def _execute_trade_inner(signal_dict: dict):
         print(f"[LEVERAGE ADAPTIVE] Erro ao calcular reducao: {_le_ex}")
 
     # ── #3 Alavancagem por VOLATILIDADE (ATR%) — reduz em ativos mais voláteis ──
-    if LEVERAGE_BY_VOLATILITY:
+    if LEVERAGE_BY_VOLATILITY and not _leverage_locked:
         try:
             _entry_px = float(signal.entry or 0)
             _atr_abs  = float(signal_dict.get("atr") or abs(_entry_px - float(signal.stop_loss)))
