@@ -5608,6 +5608,30 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         print(f"[STARTUP] Erro ao carregar/sincronizar configurações do DB: {e}")
 
+    # FIX 2026-07-19: revela quanto tempo o container ficou REALMENTE fora do
+    # ar quando o desligamento veio do botão /bot/shutdown_railway (ver marca
+    # gravada lá). Sem isto, o boot normal ("reiniciou e retomou sozinho")
+    # não distingue um restart de 10s de um container morto por 3 dias — e
+    # nesse intervalo NENHUM comando de Telegram tem como religar o bot
+    # (Catch-22: o processo que atenderia o comando está desligado). Só
+    # dispara uma vez por shutdown (a marca é apagada após o aviso).
+    try:
+        _shutdown_at_iso = await get_setting("railway_shutdown_at", None)
+        if _shutdown_at_iso:
+            _down_s = (datetime.utcnow() - datetime.fromisoformat(_shutdown_at_iso)).total_seconds()
+            _down_h = _down_s / 3600.0
+            asyncio.create_task(send_alert(
+                f"⚠️ *Bot voltou depois de ficar DESLIGADO no Railway* "
+                f"(botão de desligar do dashboard, não crash).\n"
+                f"Ficou fora do ar por *{_down_h:.1f}h* — nesse intervalo nenhum "
+                f"comando de Telegram funcionava (o container estava parado).\n"
+                f"Precisou de redeploy manual pelo painel do Railway para voltar."
+            ))
+            await save_setting("railway_shutdown_at", "")
+            print(f"[STARTUP] ⚠️ Container tinha sido desligado via /bot/shutdown_railway — ficou {_down_h:.1f}h fora do ar.")
+    except Exception as _sd_ex:
+        print(f"[STARTUP] Erro ao checar marca de shutdown Railway: {_sd_ex}")
+
     # Fluxo contínuo por LOTE (FIX 2026-07-08): reconstrói o lote em andamento
     # a partir dos trades REALMENTE abertos no modo AUTÔNOMO. Sem isto, todo
     # restart/deploy zerava _round_trade_ids mesmo com posições reais abertas
@@ -7771,11 +7795,22 @@ async def shutdown_railway_service():
         if not active_id:
             raise HTTPException(500, f"Não achei o deployment ativo no Railway: {data}")
 
+    # FIX 2026-07-19: incidente real — o container ficou desligado por este
+    # botão de 2026-07-16 03:28 até 2026-07-19 15:22 (~3 dias) sem que
+    # NENHUM comando de Telegram conseguisse religá-lo (o processo que
+    # atenderia o comando estava morto — Catch-22). Grava o horário do
+    # shutdown de forma PERSISTENTE (sobrevive ao container morto) para que,
+    # quando o bot finalmente voltar (redeploy manual pelo painel Railway),
+    # o startup consiga avisar quanto tempo ficou fora do ar em vez de só
+    # "reiniciou e retomou" em silêncio sobre o intervalo real de downtime.
+    await save_setting("railway_shutdown_at", datetime.utcnow().isoformat())
+
     # Avisa ANTES de desligar — depois disso o bot não consegue mais mandar nada.
     await send_alert(
         "🛑 *DESLIGANDO O SERVIÇO NO RAILWAY* — acionado pelo dashboard.\n"
         "O bot e o dashboard vão parar de responder em instantes.\n"
-        "Pra religar: painel do Railway → Deployments → Redeploy no último deployment."
+        "IMPORTANTE: nenhum comando de Telegram religa o container — só o "
+        "painel do Railway (Deployments → Redeploy no último deployment)."
     )
     print(f"[RAILWAY] Desligando deployment {active_id} via API pública (acionado pelo dashboard)")
 
