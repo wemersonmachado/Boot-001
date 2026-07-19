@@ -54,41 +54,54 @@ def _max_drawdown(equity: np.ndarray) -> float:
     return max_dd
 
 
-def _sharpe(returns: np.ndarray, risk_free: float = 0.0) -> float:
+def _sharpe(returns: np.ndarray, risk_free: float = 0.0, periods_per_year: float = 252.0) -> float:
     if len(returns) < 2:
         return 0.0
     excess = returns - risk_free
     std    = np.std(excess)
     if std == 0:
         return 0.0
-    return float(np.mean(excess) / std * np.sqrt(252))
+    return float(np.mean(excess) / std * np.sqrt(periods_per_year))
 
 
-def _sortino(returns: np.ndarray, risk_free: float = 0.0) -> float:
+def _sortino(returns: np.ndarray, risk_free: float = 0.0, periods_per_year: float = 252.0) -> float:
     if len(returns) < 2:
         return 0.0
     excess    = returns - risk_free
     downside  = excess[excess < 0]
     down_std  = np.std(downside) if len(downside) > 0 else 1e-9
-    return float(np.mean(excess) / down_std * np.sqrt(252))
+    return float(np.mean(excess) / down_std * np.sqrt(periods_per_year))
 
 
 def run(
     trade_returns: list[float],
     n_simulations: int = 1000,
-    noise_std:     float = 0.5,    # desvio padrão do ruído aditivo (em %)
+    noise_std:     float = None,   # desvio padrão do ruído aditivo (em %); None = auto (ver abaixo)
     resample:      bool  = True,   # True = reordena aleatoriamente + ruído
     initial_capital: float = 100.0,
+    periods_per_year: float = 252.0,
 ) -> Optional[MonteCarloResult]:
     """
     Executa simulação Monte Carlo.
 
     Args:
-        trade_returns: lista de retornos por trade em % (ex: [2.3, -1.1, 4.5, ...])
+        trade_returns: lista de retornos por trade, JÁ EXPRESSOS COMO % DA BANCA
+            TOTAL (não da margem do trade — ver FIX 2026-07-19 no chamador em
+            main.py `/monte_carlo`: compor retornos relativos à margem como se
+            fossem relativos à banca inteira foi a causa raiz de um ROI simulado
+            de +723% contra um lucro real de +$9,62 no mesmo período).
         n_simulations: número de simulações (padrão 1000)
-        noise_std: desvio padrão do ruído gaussiano adicionado a cada retorno (%)
+        noise_std: desvio padrão do ruído gaussiano adicionado a cada retorno (%).
+            Se None (padrão), usa 30% do desvio padrão empírico da própria
+            amostra — antes era uma constante fixa de 0.5%, calibrada para uma
+            escala de retornos ~10x maior (retorno sobre margem); nessa escala
+            nova ela dominava o sinal real em vez de só adicionar ruído.
         resample: se True, embaralha a ordem dos trades em cada simulação
         initial_capital: capital inicial para cálculo da curva de capital
+        periods_per_year: nº de trades/ano estimado pela cadência REAL (ver
+            FIX 2026-07-19 em _calc_risk_metrics/main.py) — usado para anualizar
+            Sharpe/Sortino corretamente em vez da constante fixa sqrt(252),
+            que assumia 1 amostra = 1 dia (aqui 1 amostra = 1 trade).
 
     Returns:
         MonteCarloResult com distribuições completas
@@ -97,6 +110,8 @@ def run(
     n = len(returns)
     if n < 5:
         return None
+    if noise_std is None:
+        noise_std = max(float(np.std(returns)) * 0.3, 1e-6)
 
     roi_list    = []
     max_dd_list = []
@@ -116,8 +131,8 @@ def run(
         eq    = _equity_curve(sim_returns, initial_capital)
         roi   = (eq[-1] / initial_capital - 1) * 100
         dd    = _max_drawdown(eq)
-        sh    = _sharpe(sim_returns)
-        so    = _sortino(sim_returns)
+        sh    = _sharpe(sim_returns, periods_per_year=periods_per_year)
+        so    = _sortino(sim_returns, periods_per_year=periods_per_year)
 
         roi_list.append(roi)
         max_dd_list.append(dd)

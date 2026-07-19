@@ -846,6 +846,7 @@ _sinais_score_offset: int       = 0          # deslocamento no min_score do SINA
 
 # ── Sharpe / Sortino ao vivo ───────────────────────────────────────────────
 _session_returns: list  = []      # pnl_pct de cada trade fechado nesta sessao
+_session_returns_first_ts: float = 0.0  # timestamp do 1o append — usado para estimar trades/ano real
 _sortino_pause:   bool  = False   # True = bot pausado por Sortino baixo
 SORTINO_PAUSE_THRESHOLD = 0.8     # pausa se Sortino cair abaixo disto
 SORTINO_MIN_TRADES      = 8       # minimo de trades para calcular (evita falso positivo)
@@ -1448,8 +1449,33 @@ def _check_correlation(asset: str, open_assets: set, direction: str = "", open_t
     return True
 
 
+def _record_session_return(pnl_pct: float) -> None:
+    """Registra o retorno de um trade fechado para o calculo de Sharpe/Sortino,
+    marcando o timestamp do 1o registro (usado para estimar a cadencia real de
+    trades/ano em _calc_risk_metrics — ver FIX 2026-07-19 la)."""
+    global _session_returns_first_ts
+    if not _session_returns_first_ts:
+        _session_returns_first_ts = time.time()
+    _session_returns.append(pnl_pct)
+
+
 def _calc_risk_metrics() -> dict:
-    """Calcula Sharpe e Sortino da sessao atual. Pausa bot se Sortino < threshold."""
+    """Calcula Sharpe e Sortino da sessao atual. Pausa bot se Sortino < threshold.
+
+    FIX 2026-07-19 (achado de auditoria): a anualizacao usava a constante fixa
+    sqrt(252), que so e correta quando cada amostra de `rets` e o retorno de UM
+    DIA. Aqui cada amostra e o retorno de UM TRADE, e o bot fecha varios trades
+    por dia — logo sqrt(252) inflava Sharpe/Sortino em ~16x (sqrt(252) ~= 15.87)
+    em vez dos ~sqrt(trades_por_ano) corretos. Na pratica isso desarmava o freio
+    automatico: o SORTINO_PAUSE_THRESHOLD (0.8) so seria cruzado numa catastrofe
+    quase impossivel, porque o valor calculado partia de uma base ja inflada.
+    Correcao: estima trades/ano pela cadencia REAL observada nesta sessao
+    (len(rets) / dias decorridos desde o 1o trade, com piso de 1 dia para nao
+    extrapolar uma rajada curta como se fosse a cadencia do ano inteiro — na
+    duvida, o piso produz uma anualizacao MENOR, ou seja, um Sortino mais baixo
+    e mais propenso a pausar o bot, o lado seguro do erro). O limiar de 0.8
+    continua valendo sem mudanca: ele ja assumia uma escala anualizada de
+    verdade, so a anualizacao em si estava errada."""
     global _sortino_pause
     rets = _session_returns
     if len(rets) < SORTINO_MIN_TRADES:
@@ -1459,11 +1485,17 @@ def _calc_risk_metrics() -> dict:
     arr     = np.array(rets, dtype=float)
     mean_r  = float(np.mean(arr))
     std_r   = float(np.std(arr)) or 1e-9
-    sharpe  = round(mean_r / std_r * (252 ** 0.5), 3)
+
+    elapsed_days   = max((time.time() - _session_returns_first_ts) / 86400.0, 1.0) if _session_returns_first_ts else 1.0
+    trades_per_day = len(rets) / elapsed_days
+    periods_per_year = max(trades_per_day * 365.0, 1.0)
+    ann_factor = periods_per_year ** 0.5
+
+    sharpe  = round(mean_r / std_r * ann_factor, 3)
 
     downside = arr[arr < 0]
     down_std = float(np.std(downside)) if len(downside) > 0 else 1e-9
-    sortino  = round(mean_r / down_std * (252 ** 0.5), 3)
+    sortino  = round(mean_r / down_std * ann_factor, 3)
 
     # Pausa automatica se Sortino cair abaixo do threshold
     pause_alert = None
@@ -1479,7 +1511,11 @@ def _calc_risk_metrics() -> dict:
         _sortino_pause = False
         print(f"[RISK] Sortino recuperado ({sortino:.2f}) — bot REATIVADO")
 
-    return {"sharpe": sharpe, "sortino": sortino, "n": len(rets), "paused": _sortino_pause, "pause_alert": pause_alert}
+    return {
+        "sharpe": sharpe, "sortino": sortino, "n": len(rets),
+        "paused": _sortino_pause, "pause_alert": pause_alert,
+        "trades_per_year_est": round(periods_per_year, 1),  # cadencia usada na anualizacao (auditavel)
+    }
 
 
 def _check_daily_loss() -> bool:
@@ -3311,6 +3347,34 @@ async def job_grid_scan(pairs: list = None):
             if asset_dir_key in open_asset_dir:
                 continue
 
+            # FIX 2026-07-19 (achado de auditoria): job_auto_trade (Autônomo/
+            # Supervisionado) já checava correlação estática (_check_correlation)
+            # e dinâmica (correlation_engine.is_highly_correlated) antes de abrir
+            # trade — o GRID nunca chamava nenhuma das duas. Resultado: o Grid
+            # podia abrir BTCUSDT LONG + ETHUSDT LONG (ou qualquer par com
+            # correlação real ≥0.75 medida por correlation_engine) ao mesmo
+            # tempo, e pior, sem nem checar contra posições abertas por OUTROS
+            # modos (Autônomo/Pares) no mesmo ativo/direção. Usa a lista
+            # completa de open_trades (não só grid_trades) porque risco de
+            # concentração é de portfólio, não por engine.
+            _open_assets_all = {t["asset"] for t in open_trades}
+            if not _check_correlation(symbol, _open_assets_all, signal.direction.value, open_trades):
+                print(f"[GRID] {symbol} skip — correlação estática com posição já aberta")
+                continue
+            try:
+                import correlation_engine as _corr
+                _hi_corr, _corr_reason = _corr.is_highly_correlated(
+                    symbol, _open_assets_all, signal.direction.value, open_trades
+                )
+                if _hi_corr:
+                    print(f"[GRID-CORR-DYN] Skip {symbol} — {_corr_reason}")
+                    continue
+            except Exception as _corr_err:
+                # Fail-closed: mesmo padrão do Autônomo — erro no cálculo bloqueia
+                # por segurança em vez de deixar passar.
+                print(f"[GRID-CORR-DYN] Erro no cálculo — bloqueando por segurança: {_corr_err}")
+                continue
+
             # [G3] BTC veto aplicado à direção
             if signal.direction.value == "LONG" and btc_chg_1h < btc_veto:
                 print(f"[GRID] {symbol} LONG bloqueado — BTC veto ({btc_chg_1h:.1f}% < {btc_veto}%)")
@@ -4528,7 +4592,7 @@ async def job_update_trades():
                     _daily_pnl += dca_res["pnl_usdt"]
                     _register_auto_pnl(dca_res["pnl_usdt"])  # alimenta kill-switch -20%
                     _check_daily_target_notify()
-                    _session_returns.append(dca_res["pnl_pct"])
+                    _record_session_return(dca_res["pnl_pct"])
                     _rm = _calc_risk_metrics()
                     if _rm.get("pause_alert"):
                         asyncio.create_task(send_alert(_rm["pause_alert"]))
@@ -4729,7 +4793,7 @@ async def job_update_trades():
                     _register_auto_pnl(_pnl_close)  # alimenta kill-switch -20%
                     _check_daily_target_notify()
                     # Sharpe/Sortino: registra retorno da sessao
-                    _session_returns.append(_pnl_pct)
+                    _record_session_return(_pnl_pct)
                     _rm = _calc_risk_metrics()
                     if _rm.get("pause_alert"):
                         asyncio.create_task(send_alert(_rm["pause_alert"]))
@@ -8131,7 +8195,17 @@ async def run_monte_carlo(n: int = 1000):
     """
     Roda Monte Carlo sobre os trades fechados do banco.
     Parâmetro: n = número de simulações (padrão 1000).
-    """
+
+    FIX 2026-07-19 (achado de auditoria): antes, a curva de capital simulada
+    compunha `pnl_pct` de cada trade — que e o retorno sobre a MARGEM daquele
+    trade (ex.: margem $8 de uma banca de $60) — como se fosse o retorno sobre
+    a BANCA INTEIRA. Resultado real observado: ROI medio simulado de +723%
+    contra um lucro real acumulado de +$9,62 no mesmo periodo — a curva
+    explodia exponencialmente por erro de unidade, nao por robustez real da
+    estrategia. Correcao: usa pnl_usdt (dinheiro real ganho/perdido, sem
+    ambiguidade de escala) dividido pela banca de referencia, para obter o
+    retorno de cada trade como fracao da banca — a mesma grandeza que uma
+    curva de capital deveria compor."""
     from database import get_open_trades
     import aiosqlite
     from config import DB_PATH
@@ -8139,17 +8213,34 @@ async def run_monte_carlo(n: int = 1000):
         async with aiosqlite.connect(DB_PATH) as db:
             db.row_factory = aiosqlite.Row
             async with db.execute(
-                "SELECT pnl_pct FROM trades WHERE status='CLOSED' AND pnl_pct IS NOT NULL ORDER BY closed_at DESC LIMIT 500"
+                "SELECT pnl_usdt, closed_at FROM trades "
+                "WHERE status='CLOSED' AND pnl_usdt IS NOT NULL ORDER BY closed_at DESC LIMIT 500"
             ) as cur:
                 rows = await cur.fetchall()
-        returns = [float(r["pnl_pct"]) for r in rows if r["pnl_pct"] is not None]
-        if len(returns) < 5:
+        if len(rows) < 5:
             return {"error": "Trades insuficientes para Monte Carlo (mínimo 5)"}
-        result = monte_carlo.run(returns, n_simulations=min(n, 2000))
+
+        banca_ref = BANCA_USDT if BANCA_USDT > 0 else float(_balance_cache.get("wallet_balance", 0) or 100.0)
+        returns = [float(r["pnl_usdt"]) / banca_ref * 100.0 for r in rows]
+
+        # Cadencia real (trades/ano) pelo intervalo entre o trade mais antigo e o
+        # mais recente da amostra — mesma logica de _calc_risk_metrics, evita a
+        # constante fixa sqrt(252) que assumia 1 amostra = 1 dia (aqui 1 amostra
+        # = 1 trade, e o bot fecha varios por dia).
+        closed_ts = [datetime.fromisoformat(r["closed_at"]) for r in rows if r["closed_at"]]
+        if len(closed_ts) >= 2:
+            span_days = max((max(closed_ts) - min(closed_ts)).total_seconds() / 86400.0, 1.0)
+            periods_per_year = max(len(rows) / span_days * 365.0, 1.0)
+        else:
+            periods_per_year = 252.0
+
+        result = monte_carlo.run(returns, n_simulations=min(n, 2000), periods_per_year=periods_per_year)
         if not result:
             return {"error": "Falha ao rodar simulação"}
         interp = monte_carlo.interpret(result)
         return {
+            "banca_ref_usdt":       banca_ref,
+            "periods_per_year_est": round(periods_per_year, 1),
             "n_simulations":   result.n_simulations,
             "n_trades":        result.n_trades,
             "roi_mean":        result.roi_mean,
